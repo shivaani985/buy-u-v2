@@ -9,10 +9,12 @@ import {
   createSupabaseServerClient,
   getSessionSummary,
 } from "@/lib/supabase/server";
+import { createParticipantSignedAttachmentUrl } from "@/lib/supabase/service";
 
 /**
  * Participant-authorized signed URL redirect for private chat attachments.
- * Never exposes private storage objects publicly.
+ * Supports canonical `<participantUid>/<conversationId>/<file>` and historical
+ * `<conversationId>/<file>` paths. Never exposes private files publicly.
  */
 export async function GET(request: NextRequest) {
   const session = await getSessionSummary();
@@ -22,11 +24,15 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const conversationId = request.nextUrl.searchParams.get("conversationId") ?? "";
+  const conversationId =
+    request.nextUrl.searchParams.get("conversationId") ?? "";
   const path = request.nextUrl.searchParams.get("path") ?? "";
 
-  if (!isValidUuid(conversationId) || !isAttachmentPathAuthorized(conversationId, path)) {
-    return NextResponse.json({ error: "Invalid attachment path" }, { status: 400 });
+  if (!isValidUuid(conversationId)) {
+    return NextResponse.json(
+      { error: "Invalid conversation identifier" },
+      { status: 400 }
+    );
   }
 
   const supabase = await createSupabaseServerClient();
@@ -41,7 +47,12 @@ export async function GET(request: NextRequest) {
     .eq("id", conversationId)
     .maybeSingle();
 
-  const row = conv as { id: string; member_a: string; member_b: string } | null;
+  const row = conv as {
+    id: string;
+    member_a: string;
+    member_b: string;
+  } | null;
+
   if (
     !row ||
     (row.member_a !== eligibility.userId && row.member_b !== eligibility.userId)
@@ -49,25 +60,52 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  // Generate a short-lived 5-minute signed URL from the private bucket
-  let signed = await supabase.storage
-    .from(CHAT_ATTACHMENTS_BUCKET)
-    .createSignedUrl(path, 300);
-
-  if (signed.error || !signed.data?.signedUrl) {
-    signed = await supabase.storage
-      .from("chat-media")
-      .createSignedUrl(path, 300);
+  if (
+    !isAttachmentPathAuthorized(conversationId, path, [
+      row.member_a,
+      row.member_b,
+    ])
+  ) {
+    return NextResponse.json(
+      { error: "Invalid or unauthorized attachment path" },
+      { status: 400 }
+    );
   }
 
-  if (signed.error || !signed.data?.signedUrl) {
+  // Try RLS-scoped signer first; fall back to authorized server signer so both
+  // sender and recipient can view/download shared private conversation files.
+  let signedUrl: string | null = null;
+  const rlsPrimary = await supabase.storage
+    .from(CHAT_ATTACHMENTS_BUCKET)
+    .createSignedUrl(path, 300);
+  if (!rlsPrimary.error && rlsPrimary.data?.signedUrl) {
+    signedUrl = rlsPrimary.data.signedUrl;
+  }
+
+  if (!signedUrl) {
+    signedUrl = await createParticipantSignedAttachmentUrl(
+      CHAT_ATTACHMENTS_BUCKET,
+      path,
+      300
+    );
+  }
+
+  if (!signedUrl) {
+    signedUrl = await createParticipantSignedAttachmentUrl(
+      "chat-media",
+      path,
+      300
+    );
+  }
+
+  if (!signedUrl) {
     return NextResponse.json(
       { error: "Attachment could not be accessed" },
       { status: 404 }
     );
   }
 
-  const response = NextResponse.redirect(signed.data.signedUrl, { status: 302 });
+  const response = NextResponse.redirect(signedUrl, { status: 302 });
   response.headers.set("Cache-Control", "private, no-store");
   return response;
 }

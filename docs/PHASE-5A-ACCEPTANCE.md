@@ -42,3 +42,31 @@
 ## Live Two-Account Write & Realtime E2E (Pending Owner Approval)
 
 Zero hosted writes were performed during Phase 5A. Live two-account E2E verification (sending messages, uploading/opening private attachments, verifying live cross-browser Realtime delivery and unread badge increment/decrement) requires owner approval or manual testing.
+
+---
+
+## Phase 5A.1 — Messaging Repair
+
+### Root Causes Fixed
+1. **Attachment upload failure (`"Network error while sending message"`):**
+   - Private `chat-attachments` Storage INSERT RLS requires `senderUid` as the first folder (`senderUid/conversationId/...`), whereas Phase 5A uploaded to `conversationId/senderUid/...`.
+   - Sending `File` objects through Next.js Server Action `FormData` also hit the default `1 MB` Server Action body size limit.
+   - **Fix:** Upload directly from the authenticated browser client to `chat-attachments` at `senderUid/conversationId/<timestamp>-<idx>-<safeName>` (`buildChatAttachmentPath`), surface exact Storage errors on failure with inline retry, and update `GET /api/messages/attachment` + `isAttachmentPathAuthorized` to validate both canonical `participantUid/conversationId/...` and historical `conversationId/...` paths with server-side participant-authorized signed URLs.
+2. **Slow delivery / recipient needed refresh:**
+   - Browser Realtime channels subscribed without explicitly setting the authenticated session JWT (`supabase.realtime.setAuth(session.access_token)`), and `sendMessageAction` triggered full-page `revalidatePath` roundtrips on every send.
+   - **Fix:** Await `supabase.auth.getSession()`, call `supabase.realtime.setAuth(access_token)` before subscribing, keep auth synced via `onAuthStateChange`, remove hot-path `revalidatePath`, and subscribe to both `messages` and `notifications` Realtime channels.
+3. **Missing unread counters (navbar & conversation list):**
+   - `notifications` has no automatic DB trigger and INSERT RLS restricts inserts to `auth.uid() = user_id`, silently blocking recipient notification inserts from the sender's RLS client.
+   - **Fix:** Added strictly server-only `createRecipientMessageNotification` in `src/lib/supabase/service.ts` (invoked only after verified participant message insert in `sendMessageAction`) + live Realtime `notifications` subscription and custom event sync in `MessagesClient.tsx` and `SiteHeader.tsx`. Opening/reading a conversation clears unread notifications and updates both the conversation list and navbar immediately.
+4. **Immediate message rendering:**
+   - **Fix:** Added optimistic pending bubbles (`Sending...` + local image previews) with instant composer clear, delivery checkmarks (`Sent`), error state + inline `Retry` / `Dismiss`, and `mergeOrderedMessages` deduplication against Realtime echoes.
+
+### Phase 5A.1 Verification
+- `tsc --noEmit`: PASS (0 errors)
+- `npm run lint`: PASS (0 errors, 0 warnings)
+- `node --test`: PASS (42/42 across all 7 suites)
+- `npm run build`: PASS
+- `node scripts/smoke-check.mjs http://localhost:3000`: PASS (15/15)
+- `GET /api/messages/attachment` (guest): PASS (`401 Unauthorized`)
+- Read-only browser QA (`examiner.seller`, `1440px`/`390px`/`320px`): PASS (`Live` Realtime, Sent checkmarks, `0px` overflow, `0` console errors; zero hosted writes).
+- Live two-account write acceptance (instant cross-browser send/receive, image/PDF upload & private download, live unread badge increment & clear) is ready for owner manual testing.

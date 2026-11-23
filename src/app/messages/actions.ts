@@ -3,12 +3,9 @@
 import { revalidatePath } from "next/cache";
 import { mapRawMessage, type ChatMessageItem } from "@/lib/messages/data";
 import {
-  CHAT_ATTACHMENTS_BUCKET,
   evaluateMessagingEligibility,
   isValidUuid,
-  MAX_MESSAGE_ATTACHMENTS,
   MESSAGE_PAGE_SIZE,
-  validateAttachmentFileMeta,
   validateMessageInput,
   validateStartConversation,
 } from "@/lib/messages/validation";
@@ -16,6 +13,7 @@ import {
   createSupabaseServerClient,
   getSessionSummary,
 } from "@/lib/supabase/server";
+import { createRecipientMessageNotification } from "@/lib/supabase/service";
 
 export interface StartConversationResult {
   ok: boolean;
@@ -35,15 +33,6 @@ export interface LoadOlderMessagesResult {
   messages?: ChatMessageItem[];
   hasOlder?: boolean;
   error?: string;
-}
-
-function sanitizeFileName(raw: string): string {
-  const cleaned = raw
-    .trim()
-    .replace(/[^a-zA-Z0-9._-]/g, "_")
-    .replace(/_{2,}/g, "_")
-    .slice(0, 64);
-  return cleaned || "attachment";
 }
 
 export async function startConversationAction(input: {
@@ -89,7 +78,6 @@ export async function startConversationAction(input: {
     return { ok: false, error: check.error };
   }
 
-  // Reuse existing canonical conversation if present
   const { data: existing, error: fetchErr } = await supabase
     .from("conversations")
     .select("id")
@@ -116,7 +104,6 @@ export async function startConversationAction(input: {
       .single();
 
     if (insertErr) {
-      // Handle concurrent creation race cleanly
       if (insertErr.code === "23505") {
         const { data: raced } = await supabase
           .from("conversations")
@@ -151,16 +138,25 @@ export async function startConversationAction(input: {
   };
 }
 
-export async function sendMessageAction(
-  formData: FormData
-): Promise<SendMessageResult> {
+/**
+ * Persists a validated message (with optional pre-uploaded private attachment
+ * paths under `senderUid/conversationId/...`) and creates the recipient's
+ * unread notification through the authorized server-only helper.
+ */
+export async function sendMessageAction(input: {
+  conversationId: string;
+  body: string;
+  attachmentPaths?: string[];
+  listingId?: string | null;
+}): Promise<SendMessageResult> {
   const session = await getSessionSummary();
   const eligibility = evaluateMessagingEligibility(session);
 
   if (!eligibility.eligible || !eligibility.userId) {
     return {
       ok: false,
-      error: eligibility.reason || "Sign in with your UMS account to send messages.",
+      error:
+        eligibility.reason || "Sign in with your UMS account to send messages.",
     };
   }
 
@@ -170,16 +166,12 @@ export async function sendMessageAction(
   }
 
   const userId = eligibility.userId;
-  const conversationId = String(formData.get("conversationId") ?? "").trim();
-  const body = String(formData.get("body") ?? "");
-  const rawListingId = String(formData.get("listingId") ?? "").trim();
-  const listingId = rawListingId.length > 0 ? rawListingId : null;
+  const conversationId = (input.conversationId ?? "").trim();
 
   if (!isValidUuid(conversationId)) {
     return { ok: false, error: "Invalid conversation identifier." };
   }
 
-  // Verify participant ownership
   const { data: convRow, error: convErr } = await supabase
     .from("conversations")
     .select("id,member_a,member_b")
@@ -205,60 +197,14 @@ export async function sendMessageAction(
     : { data: [] };
   const isBlocked = Array.isArray(blockRows) && blockRows.length > 0;
 
-  // Validate and upload optional private attachments
-  const uploadedFiles = formData
-    .getAll("attachments")
-    .filter((entry): entry is File => entry instanceof File && entry.size > 0);
-
-  if (uploadedFiles.length > MAX_MESSAGE_ATTACHMENTS) {
-    return {
-      ok: false,
-      error: `You can attach up to ${MAX_MESSAGE_ATTACHMENTS} files per message.`,
-    };
-  }
-
-  for (const file of uploadedFiles) {
-    const fileCheck = validateAttachmentFileMeta({
-      name: file.name,
-      type: file.type,
-      size: file.size,
-    });
-    if (!fileCheck.ok) {
-      return { ok: false, error: fileCheck.error };
-    }
-  }
-
-  const uploadedPaths: string[] = [];
-  if (isParticipant && !isBlocked && uploadedFiles.length > 0) {
-    for (let i = 0; i < uploadedFiles.length; i += 1) {
-      const file = uploadedFiles[i]!;
-      const safeName = sanitizeFileName(file.name);
-      const storagePath = `${conversationId}/${userId}/${Date.now()}-${i}-${safeName}`;
-      const { error: uploadErr } = await supabase.storage
-        .from(CHAT_ATTACHMENTS_BUCKET)
-        .upload(storagePath, file, {
-          contentType: file.type,
-          upsert: false,
-        });
-
-      if (uploadErr) {
-        return {
-          ok: false,
-          error: "Could not upload attachment. Please check file size and try again.",
-        };
-      }
-      uploadedPaths.push(storagePath);
-    }
-  }
-
   const validation = validateMessageInput({
     eligibility,
     conversationId,
     isParticipant,
     isBlocked,
-    body,
-    attachmentPaths: uploadedPaths,
-    listingId,
+    body: input.body ?? "",
+    attachmentPaths: input.attachmentPaths ?? [],
+    listingId: input.listingId ?? null,
   });
 
   if (!validation.ok) {
@@ -282,7 +228,9 @@ export async function sendMessageAction(
   if (insertErr || !inserted) {
     return {
       ok: false,
-      error: "Could not send message right now. Please retry.",
+      error: insertErr?.message
+        ? `Could not send message: ${insertErr.message}`
+        : "Could not send message right now. Please retry.",
     };
   }
 
@@ -290,25 +238,29 @@ export async function sendMessageAction(
     inserted as Parameters<typeof mapRawMessage>[0]
   );
 
-  // Update conversation timestamp and best-effort unread notification for peer
+  const senderDisplayName =
+    session.profile?.display_name?.trim() ||
+    session.profile?.full_name?.trim() ||
+    "UMS Member";
+  const previewText =
+    validation.trimmedBody ||
+    (validation.imagePaths.length === 1
+      ? "Sent an attachment"
+      : `Sent ${validation.imagePaths.length} attachments`);
+
+  // Update conversation timestamp + create recipient unread notification server-side.
   await Promise.allSettled([
     supabase
       .from("conversations")
       .update({ last_message_at: mapped.createdAt })
       .eq("id", conversationId),
-    supabase.from("notifications").insert({
-      user_id: peerId,
-      kind: "new_message",
-      title: `New message from ${session.profile?.display_name || "UMS Member"}`,
-      body:
-        validation.trimmedBody.slice(0, 120) ||
-        "Sent a private attachment",
-      href: `/messages?c=${conversationId}`,
+    createRecipientMessageNotification({
+      recipientUserId: peerId,
+      conversationId,
+      senderDisplayName,
+      previewText,
     }),
   ]);
-
-  revalidatePath("/");
-  revalidatePath("/messages");
 
   return { ok: true, message: mapped };
 }
@@ -358,11 +310,15 @@ export async function loadOlderMessagesAction(input: {
 
 export async function markConversationReadAction(
   conversationId: string
-): Promise<{ ok: boolean }> {
+): Promise<{ ok: boolean; remainingUnread?: number }> {
   const session = await getSessionSummary();
   const eligibility = evaluateMessagingEligibility(session);
 
-  if (!eligibility.eligible || !eligibility.userId || !isValidUuid(conversationId)) {
+  if (
+    !eligibility.eligible ||
+    !eligibility.userId ||
+    !isValidUuid(conversationId)
+  ) {
     return { ok: false };
   }
 
@@ -381,7 +337,15 @@ export async function markConversationReadAction(
     return { ok: false };
   }
 
-  revalidatePath("/");
-  revalidatePath("/messages");
-  return { ok: true };
+  const { count } = await supabase
+    .from("notifications")
+    .select("id", { count: "exact", head: true })
+    .eq("user_id", eligibility.userId)
+    .is("read_at", null)
+    .in("kind", ["new_message", "message"]);
+
+  return {
+    ok: true,
+    remainingUnread: typeof count === "number" ? Math.max(0, count) : 0,
+  };
 }

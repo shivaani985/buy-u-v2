@@ -17,6 +17,7 @@ import {
   X,
 } from "lucide-react";
 import { signOutAction } from "@/app/auth/actions";
+import { getSupabaseBrowserClient } from "@/lib/supabase/client";
 import type { AuthSessionSummary } from "@/types/marketplace";
 
 interface SiteHeaderProps {
@@ -33,9 +34,92 @@ export function SiteHeader({
   const pathname = usePathname();
   const router = useRouter();
   const [searchQuery, setSearchQuery] = useState("");
+  const [liveUnreadOverride, setLiveUnreadOverride] = useState<number | null>(
+    null
+  );
   const [mobileOpenPath, setMobileOpenPath] = useState<string | null>(null);
   const [accountMenuPath, setAccountMenuPath] = useState<string | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+
+  const effectiveUnreadCount =
+    liveUnreadOverride !== null ? liveUnreadOverride : unreadMessageCount;
+  const authUserId = session.isAuthenticated ? session.profile?.id ?? null : null;
+
+  // Live navbar Messages badge sync via local events + authenticated Realtime notifications
+  useEffect(() => {
+    function handleUnreadEvent(e: Event) {
+      const detail = (e as CustomEvent<{ count?: number; delta?: number }>)
+        .detail;
+      if (typeof detail?.count === "number") {
+        setLiveUnreadOverride(Math.max(0, detail.count));
+      } else if (typeof detail?.delta === "number") {
+        setLiveUnreadOverride((prev) =>
+          Math.max(0, (prev ?? unreadMessageCount) + detail.delta!)
+        );
+      }
+    }
+    window.addEventListener("buyu:unread-messages", handleUnreadEvent);
+    return () => {
+      window.removeEventListener("buyu:unread-messages", handleUnreadEvent);
+    };
+  }, [unreadMessageCount]);
+
+  useEffect(() => {
+    if (!authUserId) return;
+    const supabase = getSupabaseBrowserClient();
+    if (!supabase) return;
+
+    let disposed = false;
+    let channel: ReturnType<typeof supabase.channel> | null = null;
+
+    async function subscribeNavbarUnread() {
+      if (!supabase || !authUserId) return;
+      const {
+        data: { session: clientSession },
+      } = await supabase.auth.getSession();
+      if (disposed) return;
+
+      if (clientSession?.access_token) {
+        supabase.realtime.setAuth(clientSession.access_token);
+      }
+
+      async function refreshUnreadCount() {
+        if (!supabase || !authUserId || disposed) return;
+        const { count } = await supabase
+          .from("notifications")
+          .select("id", { count: "exact", head: true })
+          .eq("user_id", authUserId)
+          .is("read_at", null)
+          .in("kind", ["new_message", "message"]);
+        if (!disposed && typeof count === "number") {
+          setLiveUnreadOverride(Math.max(0, count));
+        }
+      }
+
+      channel = supabase
+        .channel(`navbar-unread-${authUserId}`)
+        .on(
+          "postgres_changes",
+          {
+            event: "*",
+            schema: "public",
+            table: "notifications",
+            filter: `user_id=eq.${authUserId}`,
+          },
+          () => {
+            void refreshUnreadCount();
+          }
+        )
+        .subscribe();
+    }
+
+    void subscribeNavbarUnread();
+
+    return () => {
+      disposed = true;
+      if (channel) void supabase.removeChannel(channel);
+    };
+  }, [authUserId]);
 
   const mobileOpen = mobileOpenPath === pathname;
   const accountMenuOpen = accountMenuPath === pathname;
@@ -261,13 +345,13 @@ export function SiteHeader({
           <Link
             href="/messages"
             title={
-              unreadMessageCount > 0
-                ? `Messages (${unreadMessageCount} unread)`
+              effectiveUnreadCount > 0
+                ? `Messages (${effectiveUnreadCount} unread)`
                 : "Messages"
             }
             aria-label={
-              unreadMessageCount > 0
-                ? `Messages, ${unreadMessageCount} unread`
+              effectiveUnreadCount > 0
+                ? `Messages, ${effectiveUnreadCount} unread`
                 : "Messages"
             }
             className={`relative hidden h-9 w-9 items-center justify-center rounded-full border transition-colors press-feedback xl:flex focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4E2A84] ${
@@ -277,12 +361,12 @@ export function SiteHeader({
             }`}
           >
             <MessageCircle className="h-[19px] w-[19px]" aria-hidden="true" />
-            {unreadMessageCount > 0 ? (
+            {effectiveUnreadCount > 0 ? (
               <span
                 aria-hidden="true"
                 className="absolute -top-0.5 -right-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-[#4E2A84] px-1 text-[10px] font-bold leading-none text-white"
               >
-                {unreadMessageCount > 99 ? "99+" : unreadMessageCount}
+                {effectiveUnreadCount > 99 ? "99+" : effectiveUnreadCount}
               </span>
             ) : null}
           </Link>
@@ -383,9 +467,9 @@ export function SiteHeader({
                         <MessageCircle className="h-4 w-4 text-[#4E2A84]" aria-hidden="true" />
                         <span>Messages</span>
                       </span>
-                      {unreadMessageCount > 0 ? (
+                      {effectiveUnreadCount > 0 ? (
                         <span className="text-xs font-bold text-[#4E2A84]">
-                          {unreadMessageCount}
+                          {effectiveUnreadCount}
                         </span>
                       ) : null}
                     </Link>
@@ -523,9 +607,9 @@ export function SiteHeader({
               className="flex items-center justify-between rounded-lg px-3 py-2.5 text-sm font-semibold text-[#14121A] hover:bg-[#F4F2FA] hover:text-[#4E2A84]"
             >
               <span>Messages</span>
-              {unreadMessageCount > 0 ? (
+              {effectiveUnreadCount > 0 ? (
                 <span className="text-xs font-bold text-[#4E2A84]">
-                  {unreadMessageCount} unread
+                  {effectiveUnreadCount} unread
                 </span>
               ) : null}
             </Link>

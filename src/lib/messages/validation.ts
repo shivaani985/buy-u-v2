@@ -141,19 +141,78 @@ export function validateStartConversation(input: {
   return { ok: true, ...pair };
 }
 
+export function sanitizeAttachmentFileName(raw: string): string {
+  const cleaned = raw
+    .trim()
+    .replace(/[^a-zA-Z0-9._-]/g, "_")
+    .replace(/_{2,}/g, "_")
+    .slice(0, 64);
+  return cleaned || "attachment";
+}
+
+/**
+ * Matches private `chat-attachments` Storage RLS policy:
+ * first folder MUST be the authenticated sender's UID (`senderUid/conversationId/...`).
+ */
+export function buildChatAttachmentPath(
+  senderUid: string,
+  conversationId: string,
+  fileName: string,
+  index = 0,
+  timestamp = Date.now()
+): string {
+  const safeName = sanitizeAttachmentFileName(fileName);
+  return `${senderUid.trim()}/${conversationId.trim()}/${timestamp}-${index}-${safeName}`;
+}
+
+/**
+ * Authorizes private attachment paths belonging strictly to `conversationId`:
+ * - Canonical format (RLS-compliant): `<participantUid>/<conversationId>/<file>`
+ * - Legacy historical format: `<conversationId>/<file>`
+ * Rejects traversal (`..`), backslashes, leading slashes, and cross-conversation paths.
+ */
 export function isAttachmentPathAuthorized(
   conversationId: string,
-  rawPath: string
+  rawPath: string,
+  allowedParticipantUids?: string[]
 ): boolean {
   if (!isValidUuid(conversationId) || typeof rawPath !== "string") return false;
   const trimmed = rawPath.trim();
-  if (!trimmed || trimmed.startsWith("/") || trimmed.includes("..") || trimmed.includes("\\")) {
+  if (
+    !trimmed ||
+    trimmed.startsWith("/") ||
+    trimmed.includes("..") ||
+    trimmed.includes("\\")
+  ) {
     return false;
   }
-  const prefix = `${conversationId.trim().toLowerCase()}/`;
-  if (!trimmed.toLowerCase().startsWith(prefix)) return false;
-  const rest = trimmed.slice(prefix.length);
-  return rest.length > 0 && !rest.endsWith("/");
+
+  const segments = trimmed.split("/");
+  if (segments.some((s) => s.length === 0)) return false;
+
+  const convLower = conversationId.trim().toLowerCase();
+
+  // Canonical format: <senderUid>/<conversationId>/<filename...>
+  if (
+    segments.length >= 3 &&
+    isValidUuid(segments[0]) &&
+    segments[1]?.toLowerCase() === convLower
+  ) {
+    if (allowedParticipantUids && allowedParticipantUids.length > 0) {
+      const allowed = new Set(
+        allowedParticipantUids.map((u) => u.trim().toLowerCase())
+      );
+      return allowed.has(segments[0]!.toLowerCase());
+    }
+    return true;
+  }
+
+  // Legacy historical format: <conversationId>/<filename...>
+  if (segments.length >= 2 && segments[0]?.toLowerCase() === convLower) {
+    return true;
+  }
+
+  return false;
 }
 
 export function validateAttachmentFileMeta(input: {
@@ -230,7 +289,11 @@ export function validateMessageInput(input: {
 
   const imagePaths: string[] = [];
   for (const p of rawPaths) {
-    if (!isAttachmentPathAuthorized(input.conversationId, p)) {
+    if (
+      !isAttachmentPathAuthorized(input.conversationId, p, [
+        input.eligibility.userId,
+      ])
+    ) {
       return { ok: false, error: "Invalid or unauthorized attachment path." };
     }
     imagePaths.push(p.trim());

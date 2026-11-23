@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  buildChatAttachmentPath,
   canonicalConversationPair,
   countUnreadByConversation,
   evaluateMessagingEligibility,
@@ -81,21 +82,61 @@ test("canonicalConversationPair prevents duplicate threads and blocks self-messa
   assert.equal(blockedCheck.ok, false);
 });
 
-test("attachment authorization and file validation block cross-conversation paths, traversal, and oversized/disallowed files", () => {
+test("attachment authorization and file validation enforce senderUid/conversationId RLS path, preserve historical paths, and block unauthorized access", () => {
+  // Canonical RLS-compliant path: <senderUid>/<conversationId>/<timestamp>-<idx>-<filename>
+  const canonicalPath = buildChatAttachmentPath(
+    USER_A,
+    CONV_ID,
+    "my receipt (1).pdf",
+    0,
+    1700000000000
+  );
   assert.equal(
-    isAttachmentPathAuthorized(CONV_ID, `${CONV_ID}/${USER_A}/photo.png`),
+    canonicalPath,
+    `${USER_A}/${CONV_ID}/1700000000000-0-my_receipt_1_.pdf`
+  );
+  assert.equal(
+    isAttachmentPathAuthorized(CONV_ID, canonicalPath, [USER_A, USER_B]),
     true
   );
+
+  // Historical path preserved for backward compatibility
   assert.equal(
-    isAttachmentPathAuthorized(CONV_ID, `${OTHER_CONV_ID}/${USER_A}/photo.png`),
+    isAttachmentPathAuthorized(CONV_ID, `${CONV_ID}/${USER_A}/photo.png`, [
+      USER_A,
+      USER_B,
+    ]),
+    true
+  );
+
+  // Outsider UID in first folder rejected when participant list is checked
+  const outsiderUid = "ffffffff-8349-4dc2-bccd-94d9bd0ebc52";
+  assert.equal(
+    isAttachmentPathAuthorized(
+      CONV_ID,
+      `${outsiderUid}/${CONV_ID}/photo.png`,
+      [USER_A, USER_B]
+    ),
+    false
+  );
+
+  // Cross-conversation, traversal, and leading slash rejected
+  assert.equal(
+    isAttachmentPathAuthorized(CONV_ID, `${USER_A}/${OTHER_CONV_ID}/photo.png`, [
+      USER_A,
+      USER_B,
+    ]),
     false
   );
   assert.equal(
-    isAttachmentPathAuthorized(CONV_ID, `${CONV_ID}/../other/secret.pdf`),
+    isAttachmentPathAuthorized(CONV_ID, `${USER_A}/${CONV_ID}/../secret.pdf`, [
+      USER_A,
+      USER_B,
+    ]),
     false
   );
   assert.equal(
-    isAttachmentPathAuthorized(CONV_ID, `/${CONV_ID}/photo.png`),
+    isAttachmentPathAuthorized(CONV_ID, `/${USER_A}/${CONV_ID}/photo.png`),
     false
   );
 
@@ -165,17 +206,29 @@ test("validateMessageInput enforces participant isolation, block rules, and atta
     false
   );
 
-  // Attachment-only message accepted with authorized path
+  // Attachment-only message accepted with authorized RLS-compliant path
   const okAttach = validateMessageInput({
     eligibility,
     conversationId: CONV_ID,
     isParticipant: true,
     isBlocked: false,
     body: "",
-    attachmentPaths: [`${CONV_ID}/${USER_A}/pic.jpg`],
+    attachmentPaths: [`${USER_A}/${CONV_ID}/1700000000000-0-pic.jpg`],
     listingId: LISTING_ID,
   });
   assert.equal(okAttach.ok, true);
+
+  // Attachment under another user's UID rejected
+  const badAttach = validateMessageInput({
+    eligibility,
+    conversationId: CONV_ID,
+    isParticipant: true,
+    isBlocked: false,
+    body: "",
+    attachmentPaths: [`${USER_B}/${CONV_ID}/1700000000000-0-pic.jpg`],
+    listingId: LISTING_ID,
+  });
+  assert.equal(badAttach.ok, false);
 });
 
 test("mergeOrderedMessages deduplicates Realtime echoes and preserves chronological order", () => {

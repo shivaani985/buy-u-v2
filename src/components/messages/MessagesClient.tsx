@@ -2,11 +2,11 @@
 
 import { useEffect, useRef, useState, useTransition } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import {
   AlertCircle,
   ArrowLeft,
   Ban,
+  Check,
   ExternalLink,
   FileText,
   Info,
@@ -14,6 +14,7 @@ import {
   MapPin,
   MessageCircle,
   Paperclip,
+  RefreshCw,
   Search,
   Send,
   ShieldCheck,
@@ -31,6 +32,8 @@ import type {
   LinkedListingContext,
 } from "@/lib/messages/data";
 import {
+  buildChatAttachmentPath,
+  CHAT_ATTACHMENTS_BUCKET,
   MAX_MESSAGE_ATTACHMENTS,
   mergeOrderedMessages,
   validateAttachmentFileMeta,
@@ -47,6 +50,28 @@ interface MessagesClientProps {
   activeListing: LinkedListingContext | null;
   hasExplicitConversationParam: boolean;
 }
+
+interface OptimisticAttachment {
+  name: string;
+  isImage: boolean;
+  previewUrl: string | null;
+}
+
+interface OptimisticMessage {
+  clientId: string;
+  conversationId: string;
+  body: string;
+  files: File[];
+  uploadedPaths: string[];
+  attachments: OptimisticAttachment[];
+  listingId: string | null;
+  status: "sending" | "failed";
+  error?: string;
+  createdAt: string;
+}
+
+const CONV_ID_RE =
+  /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
 
 function getInitials(name: string): string {
   const [first, second] = name.trim().split(/\s+/).filter(Boolean);
@@ -79,6 +104,22 @@ function attachmentProxyUrl(conversationId: string, path: string): string {
   return `/api/messages/attachment?conversationId=${encodeURIComponent(conversationId)}&path=${encodeURIComponent(path)}`;
 }
 
+function emitUnreadUpdate(detail: { count?: number; delta?: number }) {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent("buyu:unread-messages", { detail }));
+}
+
+function getCurrentTimestampMs(): number {
+  return Date.now();
+}
+
+function createOptimisticClientId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return `opt-${crypto.randomUUID()}`;
+  }
+  return `opt-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
 export function MessagesClient({
   currentUserId,
   initialConversations,
@@ -88,23 +129,24 @@ export function MessagesClient({
   activeListing,
   hasExplicitConversationParam,
 }: MessagesClientProps) {
-  const router = useRouter();
   const [conversations, setConversations] =
     useState<ConversationListItem[]>(initialConversations);
   const [messages, setMessages] = useState<ChatMessageItem[]>(initialMessages);
+  const [optimisticMessages, setOptimisticMessages] = useState<
+    OptimisticMessage[]
+  >([]);
   const [hasOlder, setHasOlder] = useState<boolean>(initialHasOlder);
   const [searchQuery, setSearchQuery] = useState("");
   const [draftBody, setDraftBody] = useState("");
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [composerError, setComposerError] = useState<string | null>(null);
   const [realtimeStatus, setRealtimeStatus] = useState<
-    "connecting" | "live" | "offline"
+    "connecting" | "live" | "reconnecting"
   >("connecting");
   const [showMobileDetails, setShowMobileDetails] = useState(false);
   const [mobileShowChat, setMobileShowChat] = useState<boolean>(
     hasExplicitConversationParam && Boolean(initialActiveConversationId)
   );
-  const [isSending, startSendTransition] = useTransition();
   const [isLoadingOlder, startLoadOlderTransition] = useTransition();
 
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -113,112 +155,226 @@ export function MessagesClient({
   const activeConversation =
     conversations.find((c) => c.id === initialActiveConversationId) ?? null;
 
-  // Auto-scroll to latest message
+  // Auto-scroll smoothly when messages or optimistic bubbles change
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [messages.length, initialActiveConversationId]);
+  }, [messages.length, optimisticMessages.length, initialActiveConversationId]);
 
-  // Mark active conversation unread notifications as read when opened
+  // Mark active conversation unread notifications as read on open and sync navbar
   useEffect(() => {
-    if (!activeConversation || activeConversation.unreadCount <= 0) return;
+    if (!initialActiveConversationId) return;
     let cancelled = false;
-    void markConversationReadAction(activeConversation.id).then((res) => {
+    void markConversationReadAction(initialActiveConversationId).then((res) => {
       if (cancelled || !res.ok) return;
       setConversations((prev) =>
         prev.map((c) =>
-          c.id === activeConversation.id ? { ...c, unreadCount: 0 } : c
+          c.id === initialActiveConversationId ? { ...c, unreadCount: 0 } : c
         )
       );
-      router.refresh();
+      if (typeof res.remainingUnread === "number") {
+        emitUnreadUpdate({ count: res.remainingUnread });
+      }
     });
     return () => {
       cancelled = true;
     };
-  }, [activeConversation, router]);
+  }, [initialActiveConversationId]);
 
-  // Real Supabase Realtime subscription for the active conversation
+  // Authenticated Supabase Realtime subscription (messages + unread notifications)
   useEffect(() => {
-    if (!initialActiveConversationId) return;
     const supabase = getSupabaseBrowserClient();
     if (!supabase) return;
 
-    const channel = supabase
-      .channel(`messages:${initialActiveConversationId}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "INSERT",
-          schema: "public",
-          table: "messages",
-          filter: `conversation_id=eq.${initialActiveConversationId}`,
-        },
-        (payload) => {
-          const raw = payload.new as {
-            id: string;
-            conversation_id: string;
-            sender_id: string;
-            body: string | null;
-            image_paths: string[] | null;
-            listing_id: string | null;
-            order_id: string | null;
-            free_notice_id: string | null;
-            service_request_id: string | null;
-            edited_at: string | null;
-            created_at: string;
-          };
-          if (!raw?.id) return;
+    let disposed = false;
+    let msgChannel: ReturnType<typeof supabase.channel> | null = null;
+    let notifChannel: ReturnType<typeof supabase.channel> | null = null;
 
-          const incoming: ChatMessageItem = {
-            id: raw.id,
-            conversationId: raw.conversation_id,
-            senderId: raw.sender_id,
-            body: raw.body ?? "",
-            imagePaths: Array.isArray(raw.image_paths) ? raw.image_paths : [],
-            listingId: raw.listing_id,
-            orderId: raw.order_id,
-            freeNoticeId: raw.free_notice_id,
-            serviceRequestId: raw.service_request_id,
-            editedAt: raw.edited_at,
-            createdAt: raw.created_at,
-          };
+    const {
+      data: { subscription: authSub },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (session?.access_token) {
+        supabase.realtime.setAuth(session.access_token);
+      }
+    });
 
-          setMessages((prev) => mergeOrderedMessages(prev, [incoming]));
-          setConversations((prev) =>
-            prev.map((c) =>
-              c.id === incoming.conversationId
-                ? {
-                    ...c,
-                    lastMessageAt: incoming.createdAt,
-                    lastMessagePreview:
-                      incoming.body ||
-                      (incoming.imagePaths.length > 0
-                        ? "Sent an attachment"
-                        : "New message"),
-                    lastMessageSenderId: incoming.senderId,
+    async function setupRealtime() {
+      if (!supabase) return;
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+      if (disposed) return;
+
+      if (session?.access_token) {
+        supabase.realtime.setAuth(session.access_token);
+      }
+
+      if (initialActiveConversationId) {
+        msgChannel = supabase
+          .channel(`chat-messages-${initialActiveConversationId}`)
+          .on(
+            "postgres_changes",
+            {
+              event: "INSERT",
+              schema: "public",
+              table: "messages",
+              filter: `conversation_id=eq.${initialActiveConversationId}`,
+            },
+            (payload) => {
+              const raw = payload.new as {
+                id: string;
+                conversation_id: string;
+                sender_id: string;
+                body: string | null;
+                image_paths: string[] | null;
+                listing_id: string | null;
+                order_id: string | null;
+                free_notice_id: string | null;
+                service_request_id: string | null;
+                edited_at: string | null;
+                created_at: string;
+              };
+              if (!raw?.id) return;
+
+              const incoming: ChatMessageItem = {
+                id: raw.id,
+                conversationId: raw.conversation_id,
+                senderId: raw.sender_id,
+                body: raw.body ?? "",
+                imagePaths: Array.isArray(raw.image_paths)
+                  ? raw.image_paths
+                  : [],
+                listingId: raw.listing_id,
+                orderId: raw.order_id,
+                freeNoticeId: raw.free_notice_id,
+                serviceRequestId: raw.service_request_id,
+                editedAt: raw.edited_at,
+                createdAt: raw.created_at,
+              };
+
+              setMessages((prev) => mergeOrderedMessages(prev, [incoming]));
+              setConversations((prev) => {
+                const updated = prev.map((c) =>
+                  c.id === incoming.conversationId
+                    ? {
+                        ...c,
+                        lastMessageAt: incoming.createdAt,
+                        lastMessagePreview:
+                          incoming.body ||
+                          (incoming.imagePaths.length > 0
+                            ? "Sent an attachment"
+                            : "New message"),
+                        lastMessageSenderId: incoming.senderId,
+                      }
+                    : c
+                );
+                return updated.sort(
+                  (a, b) =>
+                    new Date(b.lastMessageAt).getTime() -
+                    new Date(a.lastMessageAt).getTime()
+                );
+              });
+
+              if (incoming.senderId !== currentUserId) {
+                void markConversationReadAction(incoming.conversationId).then(
+                  (res) => {
+                    if (res.ok && typeof res.remainingUnread === "number") {
+                      emitUnreadUpdate({ count: res.remainingUnread });
+                    }
                   }
-                : c
-            )
-          );
+                );
+              }
+            }
+          )
+          .subscribe((status) => {
+            if (disposed) return;
+            if (status === "SUBSCRIBED") {
+              setRealtimeStatus("live");
+            } else if (
+              status === "CHANNEL_ERROR" ||
+              status === "TIMED_OUT" ||
+              status === "CLOSED"
+            ) {
+              setRealtimeStatus("reconnecting");
+            }
+          });
+      }
 
-          if (incoming.senderId !== currentUserId) {
-            void markConversationReadAction(incoming.conversationId).then(() => {
-              router.refresh();
-            });
+      // Live unread notification sync across conversation list & navbar
+      notifChannel = supabase
+        .channel(`chat-notifications-${currentUserId}`)
+        .on(
+          "postgres_changes",
+          {
+            event: "INSERT",
+            schema: "public",
+            table: "notifications",
+            filter: `user_id=eq.${currentUserId}`,
+          },
+          (payload) => {
+            const row = payload.new as {
+              kind?: string;
+              href?: string | null;
+              body?: string | null;
+              read_at?: string | null;
+              created_at?: string;
+            };
+            const kind = (row?.kind ?? "").toLowerCase();
+            if (kind !== "new_message" && kind !== "message") return;
+            if (row.read_at !== null && row.read_at !== undefined) return;
+
+            const cidMatch = row.href?.match(CONV_ID_RE);
+            const targetConvId = cidMatch ? cidMatch[0].toLowerCase() : null;
+
+            if (
+              targetConvId &&
+              initialActiveConversationId &&
+              targetConvId === initialActiveConversationId.toLowerCase()
+            ) {
+              // Currently viewing this conversation — mark read immediately
+              void markConversationReadAction(initialActiveConversationId).then(
+                (res) => {
+                  if (res.ok && typeof res.remainingUnread === "number") {
+                    emitUnreadUpdate({ count: res.remainingUnread });
+                  }
+                }
+              );
+              return;
+            }
+
+            if (targetConvId) {
+              setConversations((prev) => {
+                const updated = prev.map((c) =>
+                  c.id.toLowerCase() === targetConvId
+                    ? {
+                        ...c,
+                        unreadCount: c.unreadCount + 1,
+                        lastMessagePreview:
+                          row.body?.trim() || c.lastMessagePreview,
+                        lastMessageAt: row.created_at || c.lastMessageAt,
+                      }
+                    : c
+                );
+                return updated.sort(
+                  (a, b) =>
+                    new Date(b.lastMessageAt).getTime() -
+                    new Date(a.lastMessageAt).getTime()
+                );
+              });
+            }
           }
-        }
-      )
-      .subscribe((status) => {
-        if (status === "SUBSCRIBED") {
-          setRealtimeStatus("live");
-        } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
-          setRealtimeStatus("offline");
-        }
-      });
+        )
+        .subscribe();
+    }
+
+    void setupRealtime();
 
     return () => {
-      void supabase.removeChannel(channel);
+      disposed = true;
+      authSub.unsubscribe();
+      if (msgChannel) void supabase.removeChannel(msgChannel);
+      if (notifChannel) void supabase.removeChannel(notifChannel);
     };
-  }, [initialActiveConversationId, currentUserId, router]);
+  }, [initialActiveConversationId, currentUserId]);
 
   const filteredConversations = conversations.filter((c) => {
     const q = searchQuery.trim().toLowerCase();
@@ -256,9 +412,145 @@ export function MessagesClient({
     e.target.value = "";
   }
 
+  function revokePreviews(item: OptimisticMessage) {
+    for (const att of item.attachments) {
+      if (att.previewUrl) {
+        URL.revokeObjectURL(att.previewUrl);
+      }
+    }
+  }
+
+  async function deliverOptimisticMessage(opt: OptimisticMessage) {
+    const supabase = getSupabaseBrowserClient();
+    const uploadedPaths = [...opt.uploadedPaths];
+
+    // 1. Upload any remaining attachments directly to private `chat-attachments`
+    //    matching Storage RLS (`senderUid/conversationId/...`).
+    if (opt.files.length > uploadedPaths.length) {
+      if (!supabase) {
+        setOptimisticMessages((prev) =>
+          prev.map((m) =>
+            m.clientId === opt.clientId
+              ? {
+                  ...m,
+                  status: "failed",
+                  error: "Storage client is unavailable. Please refresh.",
+                }
+              : m
+          )
+        );
+        return;
+      }
+
+      const timestamp = getCurrentTimestampMs();
+      for (let i = uploadedPaths.length; i < opt.files.length; i += 1) {
+        const file = opt.files[i]!;
+        const storagePath = buildChatAttachmentPath(
+          currentUserId,
+          opt.conversationId,
+          file.name,
+          i,
+          timestamp
+        );
+
+        const { error: uploadErr } = await supabase.storage
+          .from(CHAT_ATTACHMENTS_BUCKET)
+          .upload(storagePath, file, {
+            contentType: file.type,
+            upsert: false,
+          });
+
+        if (uploadErr) {
+          setOptimisticMessages((prev) =>
+            prev.map((m) =>
+              m.clientId === opt.clientId
+                ? {
+                    ...m,
+                    uploadedPaths,
+                    status: "failed",
+                    error: `Upload failed for "${file.name}": ${uploadErr.message}`,
+                  }
+                : m
+            )
+          );
+          return;
+        }
+
+        uploadedPaths.push(storagePath);
+      }
+    }
+
+    // 2. Persist message row & create recipient notification server-side
+    try {
+      const res = await sendMessageAction({
+        conversationId: opt.conversationId,
+        body: opt.body,
+        attachmentPaths: uploadedPaths,
+        listingId: opt.listingId,
+      });
+
+      if (!res.ok || !res.message) {
+        setOptimisticMessages((prev) =>
+          prev.map((m) =>
+            m.clientId === opt.clientId
+              ? {
+                  ...m,
+                  uploadedPaths,
+                  status: "failed",
+                  error: res.error || "Could not send message. Please retry.",
+                }
+              : m
+          )
+        );
+        return;
+      }
+
+      const persisted = res.message;
+      revokePreviews(opt);
+      setOptimisticMessages((prev) =>
+        prev.filter((m) => m.clientId !== opt.clientId)
+      );
+      setMessages((prev) => mergeOrderedMessages(prev, [persisted]));
+      setConversations((prev) => {
+        const updated = prev.map((c) =>
+          c.id === persisted.conversationId
+            ? {
+                ...c,
+                lastMessageAt: persisted.createdAt,
+                lastMessagePreview:
+                  persisted.body ||
+                  (persisted.imagePaths.length > 0
+                    ? "Sent an attachment"
+                    : "New message"),
+                lastMessageSenderId: persisted.senderId,
+              }
+            : c
+        );
+        return updated.sort(
+          (a, b) =>
+            new Date(b.lastMessageAt).getTime() -
+            new Date(a.lastMessageAt).getTime()
+        );
+      });
+    } catch {
+      setOptimisticMessages((prev) =>
+        prev.map((m) =>
+          m.clientId === opt.clientId
+            ? {
+                ...m,
+                uploadedPaths,
+                status: "failed",
+                error: "Connection error while sending. Tap Retry to resend.",
+              }
+            : m
+        )
+      );
+    }
+  }
+
   function handleSend(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
-    if (!activeConversation || activeConversation.isBlocked || isSending) return;
+    if (!activeConversation || activeConversation.isBlocked) return;
     setComposerError(null);
 
     const trimmed = draftBody.trim();
@@ -267,53 +559,53 @@ export function MessagesClient({
       return;
     }
 
-    const formData = new FormData();
-    formData.set("conversationId", activeConversation.id);
-    formData.set("body", trimmed);
-    if (activeListing?.id) {
-      formData.set("listingId", activeListing.id);
-    }
-    for (const file of selectedFiles) {
-      formData.append("attachments", file);
-    }
+    const filesToSend = [...selectedFiles];
+    const attachments: OptimisticAttachment[] = filesToSend.map((f) => ({
+      name: f.name,
+      isImage: f.type.startsWith("image/"),
+      previewUrl: f.type.startsWith("image/") ? URL.createObjectURL(f) : null,
+    }));
 
-    startSendTransition(async () => {
-      try {
-        const res = await sendMessageAction(formData);
-        if (!res.ok || !res.message) {
-          setComposerError(res.error || "Could not send message. Please retry.");
-          return;
-        }
+    const optimistic: OptimisticMessage = {
+      clientId: createOptimisticClientId(),
+      conversationId: activeConversation.id,
+      body: trimmed,
+      files: filesToSend,
+      uploadedPaths: [],
+      attachments,
+      listingId: activeListing?.id ?? null,
+      status: "sending",
+      createdAt: new Date().toISOString(),
+    };
 
-        const sent = res.message;
-        setMessages((prev) => mergeOrderedMessages(prev, [sent]));
-        setConversations((prev) => {
-          const updated = prev.map((c) =>
-            c.id === sent.conversationId
-              ? {
-                  ...c,
-                  lastMessageAt: sent.createdAt,
-                  lastMessagePreview:
-                    sent.body ||
-                    (sent.imagePaths.length > 0
-                      ? "Sent an attachment"
-                      : "New message"),
-                  lastMessageSenderId: sent.senderId,
-                }
-              : c
-          );
-          return updated.sort(
-            (a, b) =>
-              new Date(b.lastMessageAt).getTime() -
-              new Date(a.lastMessageAt).getTime()
-          );
-        });
-        setDraftBody("");
-        setSelectedFiles([]);
-      } catch {
-        setComposerError("Network error while sending message. Please retry.");
-      }
-    });
+    // Immediate smooth UI update
+    setOptimisticMessages((prev) => [...prev, optimistic]);
+    setDraftBody("");
+    setSelectedFiles([]);
+
+    void deliverOptimisticMessage(optimistic);
+  }
+
+  function handleRetryOptimistic(clientId: string) {
+    const target = optimisticMessages.find((m) => m.clientId === clientId);
+    if (!target) return;
+    const retrying: OptimisticMessage = {
+      ...target,
+      status: "sending",
+      error: undefined,
+    };
+    setOptimisticMessages((prev) =>
+      prev.map((m) => (m.clientId === clientId ? retrying : m))
+    );
+    void deliverOptimisticMessage(retrying);
+  }
+
+  function handleDismissOptimistic(clientId: string) {
+    const target = optimisticMessages.find((m) => m.clientId === clientId);
+    if (target) revokePreviews(target);
+    setOptimisticMessages((prev) =>
+      prev.filter((m) => m.clientId !== clientId)
+    );
   }
 
   function handleLoadOlder() {
@@ -442,7 +734,6 @@ export function MessagesClient({
         </div>
       ) : null}
 
-      {/* Seller / Member Context */}
       <div className="rounded-xl border border-[#ECEAF3] bg-white p-4">
         <p className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-[#6B6779]">
           <Store className="h-3.5 w-3.5 text-[#4E2A84]" aria-hidden="true" />
@@ -588,7 +879,7 @@ export function MessagesClient({
         </ul>
       </aside>
 
-      {/* CENTER PANE: Active Chat + Compact Composer */}
+      {/* CENTER PANE: Active Chat + Optimistic Bubbles + Compact Composer */}
       <section
         aria-label="Active conversation"
         className={`flex min-h-[520px] flex-col lg:col-span-6 lg:min-h-0 lg:border-r lg:border-[#ECEAF3] ${
@@ -597,7 +888,6 @@ export function MessagesClient({
       >
         {activeConversation ? (
           <>
-            {/* Chat Header */}
             <header className="flex items-center justify-between gap-2 border-b border-[#ECEAF3] px-4 py-3">
               <div className="flex min-w-0 items-center gap-2.5">
                 <button
@@ -645,14 +935,13 @@ export function MessagesClient({
               </button>
             </header>
 
-            {/* Mobile collapsible listing details */}
             {showMobileDetails ? (
               <div className="border-b border-[#ECEAF3] bg-[#FAF9FC] p-3.5 lg:hidden">
                 {listingDetailsPanel}
               </div>
             ) : null}
 
-            {/* Scrollable Messages */}
+            {/* Scrollable Messages + Optimistic Pending/Failed Bubbles */}
             <div className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
               {hasOlder ? (
                 <div className="text-center">
@@ -673,90 +962,179 @@ export function MessagesClient({
                 </div>
               ) : null}
 
-              {messages.length === 0 ? (
+              {messages.length === 0 && optimisticMessages.length === 0 ? (
                 <p className="py-10 text-center text-xs text-[#6B6779]">
                   No messages yet. Say hello to start the conversation.
                 </p>
               ) : (
-                messages.map((msg) => {
-                  const isOwn = msg.senderId === currentUserId;
-                  return (
-                    <div
-                      key={msg.id}
-                      className={`flex flex-col ${
-                        isOwn ? "items-end" : "items-start"
-                      }`}
-                    >
+                <>
+                  {messages.map((msg) => {
+                    const isOwn = msg.senderId === currentUserId;
+                    return (
                       <div
-                        className={`max-w-[85%] rounded-2xl px-3.5 py-2.5 text-sm leading-relaxed sm:max-w-[78%] ${
-                          isOwn
-                            ? "bg-[#4E2A84] text-white"
-                            : "border border-[#E6E3EE] bg-[#FAF9FC] text-[#14121A]"
+                        key={msg.id}
+                        className={`flex flex-col ${
+                          isOwn ? "items-end" : "items-start"
                         }`}
                       >
-                        {msg.body ? (
-                          <p className="whitespace-pre-wrap break-words">
-                            {msg.body}
-                          </p>
-                        ) : null}
+                        <div
+                          className={`max-w-[85%] rounded-2xl px-3.5 py-2.5 text-sm leading-relaxed sm:max-w-[78%] ${
+                            isOwn
+                              ? "bg-[#4E2A84] text-white"
+                              : "border border-[#E6E3EE] bg-[#FAF9FC] text-[#14121A]"
+                          }`}
+                        >
+                          {msg.body ? (
+                            <p className="whitespace-pre-wrap break-words">
+                              {msg.body}
+                            </p>
+                          ) : null}
 
-                        {msg.imagePaths.length > 0 ? (
-                          <div className="mt-2 space-y-2">
-                            {msg.imagePaths.map((path) => {
-                              const href = attachmentProxyUrl(
-                                msg.conversationId,
-                                path
-                              );
-                              if (isImagePath(path)) {
+                          {msg.imagePaths.length > 0 ? (
+                            <div className="mt-2 space-y-2">
+                              {msg.imagePaths.map((path) => {
+                                const href = attachmentProxyUrl(
+                                  msg.conversationId,
+                                  path
+                                );
+                                if (isImagePath(path)) {
+                                  return (
+                                    <a
+                                      key={path}
+                                      href={href}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="block overflow-hidden rounded-xl border border-white/20"
+                                    >
+                                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                                      <img
+                                        src={href}
+                                        alt={getAttachmentName(path)}
+                                        className="max-h-56 w-auto rounded-xl object-cover"
+                                      />
+                                    </a>
+                                  );
+                                }
                                 return (
                                   <a
                                     key={path}
                                     href={href}
                                     target="_blank"
                                     rel="noopener noreferrer"
-                                    className="block overflow-hidden rounded-xl border border-white/20"
+                                    className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-semibold underline underline-offset-2 ${
+                                      isOwn
+                                        ? "border-white/30 text-white"
+                                        : "border-[#DCD9E6] bg-white text-[#4E2A84]"
+                                    }`}
                                   >
-                                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                                    <img
-                                      src={href}
-                                      alt={getAttachmentName(path)}
-                                      className="max-h-56 w-auto rounded-xl object-cover"
+                                    <FileText
+                                      className="h-3.5 w-3.5 shrink-0"
+                                      aria-hidden="true"
                                     />
+                                    <span className="max-w-[180px] truncate">
+                                      {getAttachmentName(path)}
+                                    </span>
                                   </a>
                                 );
-                              }
-                              return (
-                                <a
-                                  key={path}
-                                  href={href}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-semibold underline underline-offset-2 ${
-                                    isOwn
-                                      ? "border-white/30 text-white"
-                                      : "border-[#DCD9E6] bg-white text-[#4E2A84]"
-                                  }`}
+                              })}
+                            </div>
+                          ) : null}
+                        </div>
+
+                        <span className="mt-1 flex items-center gap-1 px-1 text-[11px] text-[#6B6779]">
+                          <span>{formatMessageTime(msg.createdAt)}</span>
+                          {isOwn ? (
+                            <Check
+                              className="h-3 w-3 text-[#008285]"
+                              aria-label="Sent"
+                            />
+                          ) : null}
+                        </span>
+                      </div>
+                    );
+                  })}
+
+                  {/* Optimistic Pending / Failed Bubbles */}
+                  {optimisticMessages.map((opt) => (
+                    <div key={opt.clientId} className="flex flex-col items-end">
+                      <div
+                        className={`max-w-[85%] rounded-2xl px-3.5 py-2.5 text-sm leading-relaxed sm:max-w-[78%] ${
+                          opt.status === "failed"
+                            ? "border border-[#B42318]/40 bg-[#4E2A84]/85 text-white"
+                            : "bg-[#4E2A84]/80 text-white"
+                        }`}
+                      >
+                        {opt.body ? (
+                          <p className="whitespace-pre-wrap break-words">
+                            {opt.body}
+                          </p>
+                        ) : null}
+
+                        {opt.attachments.length > 0 ? (
+                          <div className="mt-2 space-y-2">
+                            {opt.attachments.map((att, idx) =>
+                              att.isImage && att.previewUrl ? (
+                                // eslint-disable-next-line @next/next/no-img-element
+                                <img
+                                  key={`${att.name}-${idx}`}
+                                  src={att.previewUrl}
+                                  alt={att.name}
+                                  className="max-h-48 w-auto rounded-xl object-cover opacity-85"
+                                />
+                              ) : (
+                                <span
+                                  key={`${att.name}-${idx}`}
+                                  className="inline-flex items-center gap-1.5 rounded-lg border border-white/30 px-2.5 py-1 text-xs font-semibold text-white"
                                 >
                                   <FileText
                                     className="h-3.5 w-3.5 shrink-0"
                                     aria-hidden="true"
                                   />
-                                  <span className="truncate max-w-[180px]">
-                                    {getAttachmentName(path)}
+                                  <span className="max-w-[180px] truncate">
+                                    {att.name}
                                   </span>
-                                </a>
-                              );
-                            })}
+                                </span>
+                              )
+                            )}
                           </div>
                         ) : null}
                       </div>
 
-                      <span className="mt-1 px-1 text-[11px] text-[#6B6779]">
-                        {formatMessageTime(msg.createdAt)}
-                      </span>
+                      {opt.status === "sending" ? (
+                        <span className="mt-1 flex items-center gap-1 px-1 text-[11px] text-[#6B6779]">
+                          <Loader2
+                            className="h-3 w-3 animate-spin"
+                            aria-hidden="true"
+                          />
+                          <span>Sending...</span>
+                        </span>
+                      ) : (
+                        <div className="mt-1 flex flex-wrap items-center justify-end gap-2 px-1 text-[11px]">
+                          <span className="font-semibold text-[#B42318]">
+                            {opt.error || "Failed to send"}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => handleRetryOptimistic(opt.clientId)}
+                            className="inline-flex items-center gap-1 font-bold text-[#4E2A84] underline underline-offset-2"
+                          >
+                            <RefreshCw className="h-3 w-3" aria-hidden="true" />
+                            <span>Retry</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              handleDismissOptimistic(opt.clientId)
+                            }
+                            className="font-semibold text-[#6B6779] hover:text-[#14121A]"
+                          >
+                            Dismiss
+                          </button>
+                        </div>
+                      )}
                     </div>
-                  );
-                })
+                  ))}
+                </>
               )}
               <div ref={messagesEndRef} />
             </div>
@@ -825,10 +1203,7 @@ export function MessagesClient({
                     />
                     <button
                       type="button"
-                      disabled={
-                        isSending ||
-                        selectedFiles.length >= MAX_MESSAGE_ATTACHMENTS
-                      }
+                      disabled={selectedFiles.length >= MAX_MESSAGE_ATTACHMENTS}
                       onClick={() => fileInputRef.current?.click()}
                       aria-label="Attach image or file"
                       title="Attach image or PDF (max 5 MB)"
@@ -847,28 +1222,19 @@ export function MessagesClient({
                       onChange={(e) => setDraftBody(e.target.value)}
                       maxLength={2000}
                       placeholder="Write a message..."
-                      disabled={isSending}
                       className="h-9 min-w-0 flex-1 rounded-xl border border-[#DCD9E6] bg-[#FAF9FC] px-3 text-sm text-[#14121A] placeholder:text-[#6B6779] focus:border-[#4E2A84] focus:bg-white focus:outline-none"
                     />
 
                     <button
                       type="submit"
                       disabled={
-                        isSending ||
-                        (draftBody.trim().length === 0 &&
-                          selectedFiles.length === 0)
+                        draftBody.trim().length === 0 &&
+                        selectedFiles.length === 0
                       }
                       aria-label="Send message"
                       className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-xl bg-[#4E2A84] px-3.5 text-xs font-bold text-white transition hover:bg-[#3F216B] disabled:cursor-not-allowed disabled:bg-[#C9C4D6]"
                     >
-                      {isSending ? (
-                        <Loader2
-                          className="h-3.5 w-3.5 animate-spin"
-                          aria-hidden="true"
-                        />
-                      ) : (
-                        <Send className="h-3.5 w-3.5" aria-hidden="true" />
-                      )}
+                      <Send className="h-3.5 w-3.5" aria-hidden="true" />
                       <span className="hidden sm:inline">Send</span>
                     </button>
                   </div>
