@@ -268,6 +268,23 @@ export async function signInAdmin(
     };
   }
 
+  // Preserve any existing regular member session instead of silently logging them out.
+  const {
+    data: { user: existingUser },
+  } = await supabase.auth.getUser();
+  if (existingUser) {
+    const { data: existingIsAdmin } = await supabase.rpc("is_active_admin");
+    if (existingIsAdmin === true) {
+      revalidatePath("/", "layout");
+      redirect("/admin");
+    }
+    return {
+      status: "error",
+      message:
+        "You are currently signed in as a regular UMS member. Your marketplace session was kept active — sign out first if you need to switch to an administrator account.",
+    };
+  }
+
   const { data, error } = await supabase.auth.signInWithPassword({
     email,
     password,

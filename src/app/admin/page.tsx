@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import { redirect } from "next/navigation";
-import { LogOut, ShieldCheck } from "lucide-react";
+import { Lock, LogOut, ShieldCheck } from "lucide-react";
 import { signOutAction } from "@/app/auth/actions";
 import { getSessionSummary } from "@/lib/supabase/server";
 
@@ -12,9 +13,44 @@ export const metadata: Metadata = {
 export default async function AdminPage() {
   const session = await getSessionSummary();
 
-  // Enforce backend-verified admin_users + is_active_admin() check strictly.
-  if (!session.isAuthenticated || !session.isActiveAdmin) {
+  if (!session.isAuthenticated) {
     redirect("/admin/login");
+  }
+
+  // Regular signed-in UMS student/staff: deny admin access WITHOUT signing them out.
+  if (!session.isActiveAdmin) {
+    return (
+      <div className="mx-auto w-full max-w-xl px-4 py-12 sm:px-6">
+        <div className="border-2 border-[#14121A] bg-white p-6 sm:p-8">
+          <div className="flex items-center gap-2.5 text-[#4E2A84]">
+            <Lock className="h-5 w-5" aria-hidden="true" />
+            <h1 className="text-2xl font-extrabold tracking-tight text-[#14121A]">
+              Administrator Access Required
+            </h1>
+          </div>
+          <p className="mt-3 text-sm leading-relaxed text-[#4A4656]">
+            Your UMS member session (<code className="font-mono">{session.email}</code>)
+            is still active, but this account does not hold active Buy-U
+            administrator privileges verified by{" "}
+            <code className="font-mono">is_active_admin()</code>.
+          </p>
+          <div className="mt-6 flex flex-wrap gap-3">
+            <Link
+              href="/marketplace"
+              className="bg-[#4E2A84] px-5 py-2.5 text-sm font-bold text-white hover:bg-[#381C63] press-feedback"
+            >
+              Return to Marketplace
+            </Link>
+            <Link
+              href="/account"
+              className="border-2 border-[#14121A] bg-white px-5 py-2.5 text-sm font-bold text-[#14121A] hover:bg-[#F7F7F5]"
+            >
+              View Account
+            </Link>
+          </div>
+        </div>
+      </div>
+    );
   }
 
   return (
