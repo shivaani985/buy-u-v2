@@ -46,12 +46,13 @@ export interface VariantDraftInput {
   active: boolean;
 }
 
+export const MAX_EDIT_PHOTOS = 5;
+
 export interface ValidatedVariantPayload {
   id?: string;
   option_values: Record<string, string>;
   price_sen: number;
   quantity: number;
-  active: boolean;
 }
 
 const UUID_REGEX =
@@ -143,13 +144,14 @@ export function validateVariantsInput(input: {
     }
   | { ok: false; error: string } {
   if (!input.hasVariants || input.isService) {
-    // If disabling variants on a listing that had existing variants, ensure none are locked
+    // Disabling variants deactivates all existing variants via empty p_variants=[];
+    // block only if an existing variant currently has reserved stock.
     for (const ev of input.existingVariants) {
-      if (ev.reservedQuantity > 0 || input.referencedVariantIds.has(ev.id)) {
+      if (ev.reservedQuantity > 0) {
         return {
           ok: false,
           error:
-            "Cannot disable variants while an existing variant has reserved stock or active order references. Deactivate unused variants instead.",
+            "Cannot disable variants while an existing variant has reserved stock.",
         };
       }
     }
@@ -157,7 +159,7 @@ export function validateVariantsInput(input: {
       ok: true,
       hasVariants: false,
       optionGroups: [],
-      variants: null,
+      variants: [],
       totalQuantity: null,
       minPriceSen: null,
     };
@@ -184,32 +186,39 @@ export function validateVariantsInput(input: {
   }
 
   const existingMap = new Map(input.existingVariants.map((v) => [v.id, v]));
-  const submittedIds = new Set(
-    input.variants.map((v) => v.id).filter((id): id is string => Boolean(id))
+  const activeSubmittedIds = new Set(
+    input.variants
+      .filter((v) => v.active && v.id)
+      .map((v) => v.id as string)
   );
 
-  // Prevent removing any variant referenced by active orders/offers or with reserved stock
+  // Hosted update_listing_atomic sets submitted p_variants to active=true and
+  // deactivates (active=false) any omitted existing variant.
+  // Therefore, existing variants with reserved stock MUST remain active in p_variants.
   for (const ev of input.existingVariants) {
-    if (!submittedIds.has(ev.id)) {
-      if (ev.reservedQuantity > 0 || input.referencedVariantIds.has(ev.id)) {
-        return {
-          ok: false,
-          error:
-            "A variant referenced by active orders or reservations cannot be deleted. Set it to inactive instead.",
-        };
-      }
+    if (ev.reservedQuantity > 0 && !activeSubmittedIds.has(ev.id)) {
+      return {
+        ok: false,
+        error:
+          "A variant with active reserved stock cannot be removed or deactivated until reservations clear.",
+      };
     }
   }
 
   const seenKeys = new Set<string>();
-  const validated: ValidatedVariantPayload[] = [];
+  const validatedActive: ValidatedVariantPayload[] = [];
   let totalQuantity = 0;
   let minPriceSen: number | null = null;
-  let activeCount = 0;
 
   for (let i = 0; i < input.variants.length; i++) {
     const v = input.variants[i];
     if (!v) continue;
+
+    // Inactive variants are intentionally omitted from p_variants so the hosted RPC
+    // marks them active=false while preserving historical order_items references.
+    if (!v.active) {
+      continue;
+    }
 
     const cleanValues: Record<string, string> = {};
     for (const group of groups) {
@@ -238,7 +247,7 @@ export function validateVariantsInput(input: {
     if (!priceRes.ok) {
       return { ok: false, error: `Variant #${i + 1}: ${priceRes.error}` };
     }
-    if (input.targetStatus === "published" && v.active && priceRes.sen < 100) {
+    if (input.targetStatus === "published" && priceRes.sen < 100) {
       return {
         ok: false,
         error: `Variant #${i + 1}: Published variant price must be at least RM 1.00.`,
@@ -253,24 +262,20 @@ export function validateVariantsInput(input: {
       return { ok: false, error: `Variant #${i + 1}: ${stockRes.error}` };
     }
 
-    if (v.active) {
-      activeCount += 1;
-      totalQuantity += stockRes.quantity;
-      if (minPriceSen === null || priceRes.sen < minPriceSen) {
-        minPriceSen = priceRes.sen;
-      }
+    totalQuantity += stockRes.quantity;
+    if (minPriceSen === null || priceRes.sen < minPriceSen) {
+      minPriceSen = priceRes.sen;
     }
 
-    validated.push({
+    validatedActive.push({
       ...(v.id ? { id: v.id } : {}),
       option_values: cleanValues,
       price_sen: priceRes.sen,
       quantity: stockRes.quantity,
-      active: Boolean(v.active),
     });
   }
 
-  if (input.targetStatus === "published" && activeCount === 0) {
+  if (input.targetStatus === "published" && validatedActive.length === 0) {
     return {
       ok: false,
       error: "At least one variant must be active before publishing.",
@@ -281,7 +286,7 @@ export function validateVariantsInput(input: {
     ok: true,
     hasVariants: true,
     optionGroups: groups,
-    variants: validated,
+    variants: validatedActive,
     totalQuantity,
     minPriceSen,
   };
@@ -319,10 +324,10 @@ export function validateListingEditInput(input: ListingEditValidationInput) {
     return statusCheck;
   }
 
-  if (input.keptPhotoPaths.length + input.newPhotoCount > 4) {
+  if (input.keptPhotoPaths.length + input.newPhotoCount > MAX_EDIT_PHOTOS) {
     return {
       ok: false as const,
-      error: "A listing can have at most 4 photos in total.",
+      error: `A listing can have at most ${MAX_EDIT_PHOTOS} photos in total.`,
     };
   }
 

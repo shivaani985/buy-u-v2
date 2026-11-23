@@ -70,7 +70,7 @@ test("validateVariantsInput enforces unique options, reserved stock, locked dele
   ];
   const referenced = new Set(["v1"]);
 
-  // Valid update: v1 qty >= 2, v2 updated, new variant added
+  // Valid update: v1 active (qty >= 2), v2 active, XL inactive (omitted from p_variants so RPC sets active=false)
   const ok = validateVariantsInput({
     hasVariants: true,
     isService: false,
@@ -88,22 +88,43 @@ test("validateVariantsInput enforces unique options, reserved stock, locked dele
   if (ok.ok) {
     assert.equal(ok.totalQuantity, 7); // active only: 3 + 4
     assert.equal(ok.minPriceSen, 2500);
-    assert.equal(ok.variants?.length, 3);
+    assert.equal(ok.variants?.length, 2); // inactive XL omitted from p_variants!
+    assert.equal(ok.variants?.some((v) => v.option_values.Size === "XL"), false);
   }
 
-  // Blocks deleting locked variant v1
-  const delLocked = validateVariantsInput({
+  // Deactivating existing v2 (reservedQuantity=0) omits v2 from p_variants so RPC marks it active=false
+  const deactivateV2 = validateVariantsInput({
     hasVariants: true,
     isService: false,
     targetStatus: "published",
     optionGroups: ["Size"],
     variants: [
+      { id: "v1", optionValues: { Size: "M" }, priceRm: "25.00", quantity: 3, active: true },
+      { id: "v2", optionValues: { Size: "L" }, priceRm: "28.50", quantity: 4, active: false },
+    ],
+    existingVariants: existing,
+    referencedVariantIds: referenced,
+  });
+  assert.equal(deactivateV2.ok, true);
+  if (deactivateV2.ok) {
+    assert.equal(deactivateV2.variants?.length, 1);
+    assert.equal(deactivateV2.variants?.[0]?.id, "v1");
+  }
+
+  // Blocks deactivating or omitting variant v1 which has reservedQuantity=2
+  const delReserved = validateVariantsInput({
+    hasVariants: true,
+    isService: false,
+    targetStatus: "published",
+    optionGroups: ["Size"],
+    variants: [
+      { id: "v1", optionValues: { Size: "M" }, priceRm: "25.00", quantity: 3, active: false },
       { id: "v2", optionValues: { Size: "L" }, priceRm: "28.50", quantity: 4, active: true },
     ],
     existingVariants: existing,
     referencedVariantIds: referenced,
   });
-  assert.equal(delLocked.ok, false);
+  assert.equal(delReserved.ok, false);
 
   // Blocks reducing v1 quantity below its reservedQuantity (2)
   const lowQty = validateVariantsInput({
@@ -135,8 +156,33 @@ test("validateVariantsInput enforces unique options, reserved stock, locked dele
   assert.equal(dup.ok, false);
 });
 
-test("validateListingEditInput enforces photo cap, archiving, and out-of-stock edits", () => {
-  // Exceeding 4 total photos is blocked
+test("validateListingEditInput enforces 5-photo cap, archiving, and out-of-stock edits", () => {
+  // 5 total photos allowed (matches hosted RPC limit)
+  const fivePhotosOk = validateListingEditInput({
+    currentStatus: "published",
+    currentReservedQuantity: 0,
+    title: "IOT Box",
+    description: "Student robotics kit in great condition.",
+    listingType: "business",
+    categoryId: "electronics",
+    priceRm: "15.00",
+    quantity: 1,
+    collectionAreaId: "cafe-umskal",
+    condition: "New/Unused",
+    targetStatus: "published",
+    rulesAcknowledged: true,
+    allowOffers: false,
+    keptPhotoPaths: ["a.png", "b.png", "c.png"],
+    newPhotoCount: 2,
+    hasVariants: false,
+    optionGroups: [],
+    variants: [],
+    existingVariants: [],
+    referencedVariantIds: new Set(),
+  });
+  assert.equal(fivePhotosOk.ok, true);
+
+  // Exceeding 5 total photos is blocked
   const tooManyPhotos = validateListingEditInput({
     currentStatus: "published",
     currentReservedQuantity: 0,
@@ -151,7 +197,7 @@ test("validateListingEditInput enforces photo cap, archiving, and out-of-stock e
     targetStatus: "published",
     rulesAcknowledged: true,
     allowOffers: false,
-    keptPhotoPaths: ["a.png", "b.png", "c.png"],
+    keptPhotoPaths: ["a.png", "b.png", "c.png", "d.png"],
     newPhotoCount: 2,
     hasVariants: false,
     optionGroups: [],

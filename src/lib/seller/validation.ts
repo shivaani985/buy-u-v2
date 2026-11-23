@@ -337,6 +337,7 @@ export function maskPayoutAccount(
 
 const ALLOWED_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // 5 MB
+export const MAX_LISTING_PHOTOS = 5;
 
 export function validateImageFileMeta(file: {
   name: string;

@@ -32,7 +32,7 @@ import type {
   SellerListingDetail,
 } from "@/lib/seller/data";
 import type { VariantDraftInput } from "@/lib/seller/listing-edit";
-import { parseRmToSen, type SellListingKind } from "@/lib/seller/validation";
+import { MAX_LISTING_PHOTOS, parseRmToSen, type SellListingKind } from "@/lib/seller/validation";
 import type { Category } from "@/types/marketplace";
 
 interface EditListingFormProps {
@@ -116,7 +116,7 @@ export function EditListingForm({
     filteredCategories.length > 0 ? filteredCategories : categories;
 
   const parsedPrice = priceRm.trim() ? parseRmToSen(priceRm) : null;
-  const maxNewPhotos = Math.max(0, 4 - keptPhotos.length);
+  const maxNewPhotos = Math.max(0, MAX_LISTING_PHOTOS - keptPhotos.length);
   const st = statusDisplayText(
     listing.status,
     listing.availableStock,
@@ -728,11 +728,12 @@ export function EditListingForm({
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
             <h2 className="text-base font-extrabold italic text-[#14121A]">
-              Listing Photos ({keptPhotos.length + newPhotoPreviews.length}/4)
+              Listing Photos ({keptPhotos.length + newPhotoPreviews.length}/
+              {MAX_LISTING_PHOTOS})
             </h2>
             <p className="mt-0.5 text-xs text-[#6E6A7C]">
               The first photo is your cover image. Reorder, replace cover, or
-              add up to 4 photos total.
+              add up to {MAX_LISTING_PHOTOS} photos total.
             </p>
           </div>
         </div>
@@ -849,8 +850,8 @@ export function EditListingForm({
           </div>
         ) : (
           <p className="mt-3 text-xs text-[#6E6A7C]">
-            Maximum of 4 photos reached. Remove an existing photo to upload a
-            replacement.
+            Maximum of {MAX_LISTING_PHOTOS} photos reached. Remove an existing
+            photo to upload a replacement.
           </p>
         )}
       </div>

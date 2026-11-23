@@ -19,7 +19,11 @@ import {
   type SellerActionState,
 } from "@/app/seller/actions";
 import type { CollectionAreaOption } from "@/lib/seller/data";
-import { parseRmToSen, type SellListingKind } from "@/lib/seller/validation";
+import {
+  MAX_LISTING_PHOTOS,
+  parseRmToSen,
+  type SellListingKind,
+} from "@/lib/seller/validation";
 import type { Category } from "@/types/marketplace";
 
 interface SellListingFormProps {
@@ -94,7 +98,7 @@ export function SellListingForm({
   const parsedPrice = priceRm.trim() ? parseRmToSen(priceRm) : null;
 
   function handlePhotosChange(e: React.ChangeEvent<HTMLInputElement>) {
-    const files = Array.from(e.target.files ?? []).slice(0, 4);
+    const files = Array.from(e.target.files ?? []).slice(0, MAX_LISTING_PHOTOS);
     if (files.length === 0) {
       setPhotoPreviews([]);
       return;
@@ -384,7 +388,7 @@ export function SellListingForm({
             htmlFor="photos"
             className="block text-sm font-bold text-[#14121A]"
           >
-            Listing Photos (up to 4)
+            Listing Photos (up to {MAX_LISTING_PHOTOS})
           </label>
           <div className="mt-1.5 flex flex-wrap items-center gap-3 rounded-xl border border-dashed border-[#CFCBD9] bg-[#FAF9FC] p-4">
             <ImagePlus

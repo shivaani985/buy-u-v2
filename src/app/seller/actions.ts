@@ -13,6 +13,7 @@ import {
 } from "@/lib/seller/listing-edit";
 import {
   evaluateSellerEligibility,
+  MAX_LISTING_PHOTOS,
   validateImageFileMeta,
   validateListingInput,
   validateStorefrontInput,
@@ -239,8 +240,11 @@ export async function createListingAction(
   const rawFiles = formData.getAll("photos").filter(
     (entry): entry is File => entry instanceof File && entry.size > 0
   );
-  if (rawFiles.length > 4) {
-    return { status: "error", message: "Upload at most 4 listing photos." };
+  if (rawFiles.length > MAX_LISTING_PHOTOS) {
+    return {
+      status: "error",
+      message: `Upload at most ${MAX_LISTING_PHOTOS} listing photos.`,
+    };
   }
 
   const uploadedPaths: string[] = [];
