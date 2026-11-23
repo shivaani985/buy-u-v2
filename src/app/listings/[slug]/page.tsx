@@ -48,7 +48,11 @@ export default async function ListingDetailPage({
   const useDemo = sp.demo === "1";
   const result = await getListingById(slug, { useDemo });
 
-  if (result.source === "error") {
+  if (
+    result.source === "error" ||
+    result.source === "auth_required" ||
+    result.source === "restricted"
+  ) {
     return (
       <div className="mx-auto w-full max-w-[1200px] px-4 py-10 sm:px-6 lg:px-10">
         <Link
@@ -59,7 +63,7 @@ export default async function ListingDetailPage({
           <span>Back to Marketplace</span>
         </Link>
         <DataSourceBanner
-          source="error"
+          source={result.source}
           notice={result.notice}
           errorCode={result.errorCode}
           demoHref="/marketplace?demo=1"

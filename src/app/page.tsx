@@ -78,9 +78,11 @@ export default async function HomePage({ searchParams }: HomePageProps) {
           <CategoryGrid categories={categoriesResult.data} />
         ) : (
           <p className="border border-[#D9D6E2] bg-[#F7F7F5] p-6 text-sm text-[#4A4656]">
-            {categoriesResult.source === "error"
-              ? "Live categories are currently blocked for unauthenticated visitors by Supabase RLS/grants (42501). Use Preview Demo Mode above or sign in once Phase 2 Auth is enabled."
-              : "No active marketplace categories found."}
+            {categoriesResult.source === "auth_required"
+              ? "Sign in with your UMS student or staff email above to explore live UMSKAL categories, or choose Demo Preview."
+              : categoriesResult.source === "restricted"
+                ? "Verify or activate your UMS account to view live categories."
+                : "No active marketplace categories found."}
           </p>
         )}
       </section>
@@ -117,8 +119,8 @@ export default async function HomePage({ searchParams }: HomePageProps) {
           </div>
         ) : (
           <p className="border border-[#D9D6E2] bg-[#F7F7F5] p-6 text-sm text-[#4A4656]">
-            {listingsResult.source === "error"
-              ? "Live campus listings cannot be queried anonymously (42501 permission denied)."
+            {listingsResult.source === "auth_required"
+              ? "Sign in with your UMS email to view live campus listings."
               : "No published campus product listings found yet."}
           </p>
         )}

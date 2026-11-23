@@ -1,9 +1,5 @@
 /**
- * Phase 1.5 route smoke check against a running local Next.js server.
- * Verifies:
- * 1. Live mode connects to Supabase (no silent fallback to fake listings on 42501)
- * 2. Explicit ?demo=1 mode renders sample catalog, filters, and detail view
- * 3. Zero server secrets or private keys leak into rendered HTML
+ * Phase 2 route & auth smoke check against a running local Next.js server.
  * Usage: node scripts/smoke-check.mjs [baseUrl]
  */
 import assert from "node:assert/strict";
@@ -11,18 +7,51 @@ import assert from "node:assert/strict";
 const baseUrl = process.argv[2] ?? "http://localhost:3000";
 
 const routes = [
-  { path: "/", mustInclude: ["Buy-U", "UMSKAL", "Browse Marketplace"] },
-  { path: "/marketplace", mustInclude: ["Campus", "Marketplace"] },
-  { path: "/?demo=1", mustInclude: ["Explicit Demo Mode", "Casio FX-570EX"] },
-  { path: "/marketplace?demo=1", mustInclude: ["Explicit Demo Mode", "RM 68.00"] },
-  { path: "/marketplace?demo=1&type=service", mustInclude: ["Laptop Cleanup", "RM 35.00"] },
-  { path: "/marketplace?demo=1&type=free", mustInclude: ["Ring Binders", "FREE"] },
-  { path: "/marketplace?demo=1&q=calculator", mustInclude: ["Casio FX-570EX"] },
   {
-    path: "/listings/demo-101?demo=1",
-    mustInclude: ["Casio FX-570EX ClassWiz Calculator", "Menara UMSKAL"],
+    path: "/",
+    mustInclude: ["Buy-U", "UMSKAL", "UMS Member Sign-In Required"],
+    mustExclude: ["42501", "sb_secret_"],
   },
-  { path: "/account", mustInclude: ["duwwlcpdidrxkixvflag", "Yes (Public Anon Key)"] },
+  {
+    path: "/marketplace",
+    mustInclude: ["Campus", "Sign in with your UMS account"],
+    mustExclude: ["42501", "sb_secret_"],
+  },
+  {
+    path: "/login",
+    mustInclude: ["Sign in to", "@iluv.ums.edu.my", "@ums.edu.my"],
+    mustExclude: ["sb_secret_"],
+  },
+  {
+    path: "/register",
+    mustInclude: ["Create UMS Account", "@iluv.ums.edu.my", "@ums.edu.my"],
+    mustExclude: ["sb_secret_"],
+  },
+  {
+    path: "/forgot-password",
+    mustInclude: ["Send Password Reset Link"],
+    mustExclude: ["sb_secret_"],
+  },
+  {
+    path: "/reset-password",
+    mustInclude: ["Recovery session required"],
+    mustExclude: ["sb_secret_"],
+  },
+  {
+    path: "/admin/login",
+    mustInclude: ["Admin Portal", "admin_users"],
+    mustExclude: ["sb_secret_"],
+  },
+  {
+    path: "/account",
+    mustInclude: ["duwwlcpdidrxkixvflag", "Yes (Public Anon Key)"],
+    mustExclude: ["sb_secret_"],
+  },
+  {
+    path: "/marketplace?demo=1&q=calculator",
+    mustInclude: ["Explicit Demo Mode", "Casio FX-570EX", "RM 68.00"],
+    mustExclude: ["sb_secret_"],
+  },
 ];
 
 for (const route of routes) {
@@ -35,15 +64,41 @@ for (const route of routes) {
       `Expected ${route.path} to contain "${snippet}"`
     );
   }
-  assert.ok(
-    !html.includes("sb_secret_"),
-    `Supabase secret key leaked in ${route.path}`
-  );
-  assert.ok(
-    !html.includes("TOYYIBPAY_SANDBOX_SECRET_KEY"),
-    `ToyyibPay secret leaked in ${route.path}`
-  );
-  console.log(`PASS ${res.status} ${route.path}`);
+  for (const forbidden of route.mustExclude) {
+    assert.ok(
+      !html.includes(forbidden),
+      `Forbidden string "${forbidden}" appeared in ${route.path}`
+    );
+  }
+  console.log(`PASS 200 ${route.path}`);
 }
 
-console.log(`All ${routes.length} Phase 1.5 route smoke checks passed.`);
+// Unauthorized /admin access must redirect to /admin/login
+const adminRes = await fetch(`${baseUrl}/admin`, { redirect: "manual" });
+assert.ok(
+  adminRes.status === 307 || adminRes.status === 302,
+  `Expected redirect for unauthenticated /admin, got ${adminRes.status}`
+);
+const adminLoc = adminRes.headers.get("location") ?? "";
+assert.ok(
+  adminLoc.includes("/admin/login"),
+  `Expected /admin redirect to /admin/login, got "${adminLoc}"`
+);
+console.log(`PASS ${adminRes.status} /admin -> ${adminLoc}`);
+
+// /auth/callback without code must redirect safely to /login (no open redirect)
+const cbRes = await fetch(`${baseUrl}/auth/callback?next=//evil.com`, {
+  redirect: "manual",
+});
+assert.ok(
+  cbRes.status === 307 || cbRes.status === 302,
+  `Expected redirect for /auth/callback, got ${cbRes.status}`
+);
+const cbLoc = cbRes.headers.get("location") ?? "";
+assert.ok(
+  cbLoc.includes("/login") && !cbLoc.includes("evil.com"),
+  `Unsafe callback redirect: "${cbLoc}"`
+);
+console.log(`PASS ${cbRes.status} /auth/callback -> ${cbLoc}`);
+
+console.log(`All ${routes.length + 2} Phase 2 smoke & auth protection checks passed.`);

@@ -1,7 +1,10 @@
 import { DEMO_CATEGORIES, DEMO_LISTINGS } from "./demo-data";
 import { resolvePublicStorageUrl } from "./format";
 import { getPublicSupabaseEnv } from "./supabase/env";
-import { createSupabaseServerClient } from "./supabase/server";
+import {
+  createSupabaseServerClient,
+  getSessionSummary,
+} from "./supabase/server";
 import type {
   CatalogResult,
   Category,
@@ -105,16 +108,48 @@ function filterListings(
   });
 }
 
-function describeSupabaseError(code: string | undefined, message: string): string {
-  if (code === "42501") {
-    return "Connected to Supabase (duwwlcpdidrxkixvflag), but the public anon role is denied SELECT access (PostgreSQL 42501). Sign-in or explicit anon SELECT policies are required to display live catalog records.";
+/**
+ * Checks whether the current visitor is allowed to query the live UMS catalog.
+ * Never bypasses RLS or grants anonymous database access.
+ */
+async function checkMemberCatalogAccess(): Promise<
+  | { allowed: true }
+  | { allowed: false; source: "auth_required" | "restricted"; notice: string }
+> {
+  const session = await getSessionSummary();
+
+  if (!session.isAuthenticated) {
+    return {
+      allowed: false,
+      source: "auth_required",
+      notice:
+        "Sign in with your verified UMS student (@iluv.ums.edu.my) or staff (@ums.edu.my) account to browse live UMSKAL listings.",
+    };
   }
-  return `Supabase read-only query failed (${code ?? "unknown"}): ${message}`;
+
+  if (!session.isEmailVerified) {
+    return {
+      allowed: false,
+      source: "restricted",
+      notice:
+        "Verify your UMS email address via the link sent to your inbox before accessing the live campus catalog.",
+    };
+  }
+
+  if (!session.isActiveMember && !session.isActiveAdmin) {
+    const status = session.profile?.status ?? "inactive";
+    return {
+      allowed: false,
+      source: "restricted",
+      notice: `Your account status is "${status}". Only active verified UMS members can browse live listings.`,
+    };
+  }
+
+  return { allowed: true };
 }
 
 /**
- * Read-only category fetch strictly via publishable/anon key (respects RLS).
- * Never silently falls back to demo data on a real database error.
+ * Read-only category fetch strictly via authenticated member session + publishable key.
  */
 export async function getCategories(options?: {
   useDemo?: boolean;
@@ -126,7 +161,7 @@ export async function getCategories(options?: {
     return {
       data: DEMO_CATEGORIES,
       source: "demo",
-      notice: "Explicit Demo Mode enabled (?demo=1). Sample categories shown.",
+      notice: "Explicit Demo Mode (?demo=1). Sample categories shown.",
     };
   }
 
@@ -136,6 +171,11 @@ export async function getCategories(options?: {
       source: "demo",
       notice: "Supabase environment not configured. Showing demo categories.",
     };
+  }
+
+  const gate = await checkMemberCatalogAccess();
+  if (!gate.allowed) {
+    return { data: [], source: gate.source, notice: gate.notice };
   }
 
   const supabase = await createSupabaseServerClient();
@@ -159,7 +199,7 @@ export async function getCategories(options?: {
         data: [],
         source: "error",
         errorCode: error.code,
-        notice: describeSupabaseError(error.code, error.message),
+        notice: `Authenticated category query failed (${error.code}): ${error.message}`,
       };
     }
 
@@ -190,8 +230,7 @@ export async function getCategories(options?: {
 }
 
 /**
- * Read-only published listings + free_notices fetch via publishable/anon key.
- * Strictly respects RLS and never selects private member fields.
+ * Read-only published listings + free_notices fetch via authenticated member session.
  */
 export async function getListings(
   filters: MarketplaceFilters = {}
@@ -202,7 +241,7 @@ export async function getListings(
     return {
       data: filterListings(DEMO_LISTINGS, filters),
       source: "demo",
-      notice: "Explicit Demo Mode enabled (?demo=1). Sample listings shown.",
+      notice: "Explicit Demo Mode (?demo=1). Sample listings shown.",
     };
   }
 
@@ -212,6 +251,11 @@ export async function getListings(
       source: "demo",
       notice: "Supabase environment not configured. Showing demo listings.",
     };
+  }
+
+  const gate = await checkMemberCatalogAccess();
+  if (!gate.allowed) {
+    return { data: [], source: gate.source, notice: gate.notice };
   }
 
   const supabase = await createSupabaseServerClient();
@@ -234,14 +278,8 @@ export async function getListings(
           .eq("status", "published")
           .order("published_at", { ascending: false, nullsFirst: false })
           .limit(50),
-        supabase
-          .from("categories")
-          .select("id, name")
-          .eq("active", true),
-        supabase
-          .from("collection_areas")
-          .select("id, name")
-          .eq("active", true),
+        supabase.from("categories").select("id, name").eq("active", true),
+        supabase.from("collection_areas").select("id, name").eq("active", true),
         supabase
           .from("free_notices")
           .select(
@@ -250,10 +288,7 @@ export async function getListings(
           .eq("status", "published")
           .order("published_at", { ascending: false, nullsFirst: false })
           .limit(20),
-        supabase
-          .from("donation_spots")
-          .select("id, name")
-          .eq("active", true),
+        supabase.from("donation_spots").select("id, name").eq("active", true),
       ]);
 
     if (listingsRes.error) {
@@ -261,10 +296,7 @@ export async function getListings(
         data: [],
         source: "error",
         errorCode: listingsRes.error.code,
-        notice: describeSupabaseError(
-          listingsRes.error.code,
-          listingsRes.error.message
-        ),
+        notice: `Authenticated listings query failed (${listingsRes.error.code}): ${listingsRes.error.message}`,
       };
     }
 
@@ -297,7 +329,6 @@ export async function getListings(
       ? []
       : ((freeRes.data ?? []) as RawFreeNoticeRow[]);
 
-    // Fetch public-safe seller profiles via public_profiles view only (never private profiles table)
     const memberIds = Array.from(
       new Set([
         ...listingRows.map((r) => r.seller_id),
@@ -411,10 +442,14 @@ export async function getListingById(
   options?: { useDemo?: boolean }
 ): Promise<CatalogResult<Listing | null>> {
   const result = await getListings({ useDemo: options?.useDemo });
-  if (result.source === "error") {
+  if (
+    result.source === "error" ||
+    result.source === "auth_required" ||
+    result.source === "restricted"
+  ) {
     return {
       data: null,
-      source: "error",
+      source: result.source,
       errorCode: result.errorCode,
       notice: result.notice,
     };

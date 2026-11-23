@@ -143,13 +143,13 @@ export function MarketplaceFilterBar({
         </div>
 
         {/* Submit / Reset */}
-        <div className="flex items-end gap-2 md:col-span-2">
+        <div className="flex min-w-0 items-end gap-2 md:col-span-2">
           <button
             type="submit"
-            className="inline-flex flex-1 items-center justify-center gap-1.5 bg-[#4E2A84] px-4 py-2 text-sm font-bold text-white hover:bg-[#381C63] press-feedback"
+            className="inline-flex min-w-0 flex-1 items-center justify-center gap-1.5 bg-[#4E2A84] px-3 py-2 text-sm font-bold text-white hover:bg-[#381C63] press-feedback"
           >
-            <Search className="h-4 w-4" aria-hidden="true" />
-            <span>Filter</span>
+            <Search className="h-4 w-4 shrink-0" aria-hidden="true" />
+            <span className="truncate">Filter</span>
           </button>
 
           {hasActiveFilters ? (
@@ -157,7 +157,7 @@ export function MarketplaceFilterBar({
               type="button"
               onClick={handleReset}
               aria-label="Clear all filters"
-              className="flex h-[38px] w-[38px] shrink-0 items-center justify-center border border-[#14121A] bg-white text-[#14121A] hover:bg-[#EFEFF2]"
+              className="flex h-[38px] w-9 shrink-0 items-center justify-center border border-[#14121A] bg-white text-[#14121A] hover:bg-[#EFEFF2]"
             >
               <X className="h-4 w-4" aria-hidden="true" />
             </button>

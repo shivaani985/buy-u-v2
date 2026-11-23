@@ -5,7 +5,12 @@ export type ListingType =
   | "service"
   | "free";
 
-export type CatalogDataSource = "supabase" | "demo" | "error";
+export type CatalogDataSource =
+  | "supabase"
+  | "demo"
+  | "auth_required"
+  | "restricted"
+  | "error";
 
 export interface Category {
   id: string;
@@ -55,8 +60,26 @@ export interface CatalogResult<T> {
   errorCode?: string;
 }
 
+export interface MemberProfile {
+  id: string;
+  email: string;
+  university_role: string;
+  status: string;
+  restriction_reason: string | null;
+  full_name: string | null;
+  display_name: string | null;
+  faculty: string | null;
+  bio: string | null;
+  avatar_url: string | null;
+  created_at: string;
+}
+
 export interface AuthSessionSummary {
   isAuthenticated: boolean;
+  isEmailVerified: boolean;
+  isActiveMember: boolean;
+  isActiveAdmin: boolean;
   email: string | null;
+  profile: MemberProfile | null;
   source: "supabase" | "unconfigured";
 }

@@ -5,14 +5,17 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
   Bell,
+  LogOut,
   Menu,
   MessageSquare,
   PlusSquare,
   Search,
+  ShieldCheck,
   ShoppingBag,
   User,
   X,
 } from "lucide-react";
+import { signOutAction } from "@/app/auth/actions";
 import type { AuthSessionSummary } from "@/types/marketplace";
 
 interface SiteHeaderProps {
@@ -31,6 +34,11 @@ export function SiteHeader({ session }: SiteHeaderProps) {
   const router = useRouter();
   const [searchQuery, setSearchQuery] = useState("");
   const [mobileOpen, setMobileOpen] = useState(false);
+
+  const displayName =
+    session.profile?.display_name ||
+    session.email?.split("@")[0] ||
+    "Account";
 
   function handleSearchSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -88,6 +96,16 @@ export function SiteHeader({ session }: SiteHeaderProps) {
               </Link>
             );
           })}
+          {/* Admin link shown ONLY to backend-verified active admins */}
+          {session.isActiveAdmin ? (
+            <Link
+              href="/admin"
+              className="inline-flex items-center gap-1 px-3 py-2 text-sm font-bold text-[#4E2A84] hover:bg-[#F8F4FC]"
+            >
+              <ShieldCheck className="h-4 w-4" aria-hidden="true" />
+              <span>Admin</span>
+            </Link>
+          ) : null}
         </nav>
 
         {/* Search Form (Desktop & Tablet) */}
@@ -123,7 +141,7 @@ export function SiteHeader({ session }: SiteHeaderProps) {
             type="button"
             disabled
             aria-disabled="true"
-            title="Seller listing creation opens in Phase 2"
+            title="Seller listing creation opens in Phase 3 (Students only)"
             className="inline-flex items-center gap-1.5 border border-[#D9D6E2] bg-[#F7F7F5] px-3 py-2 text-xs font-bold uppercase tracking-wide text-[#5B5668] cursor-not-allowed"
           >
             <PlusSquare className="h-4 w-4" aria-hidden="true" />
@@ -134,8 +152,8 @@ export function SiteHeader({ session }: SiteHeaderProps) {
             type="button"
             disabled
             aria-disabled="true"
-            title="Multi-seller cart opens in Commerce phase"
-            aria-label="Cart (available in Commerce phase)"
+            title="Multi-seller cart opens in Phase 4"
+            aria-label="Cart (available in Phase 4)"
             className="flex h-9 w-9 items-center justify-center border border-[#D9D6E2] bg-[#F7F7F5] text-[#5B5668] cursor-not-allowed"
           >
             <ShoppingBag className="h-4 w-4" aria-hidden="true" />
@@ -145,8 +163,8 @@ export function SiteHeader({ session }: SiteHeaderProps) {
             type="button"
             disabled
             aria-disabled="true"
-            title="Campus chat opens in Communication phase"
-            aria-label="Messages (available in Communication phase)"
+            title="Campus chat opens in Phase 5"
+            aria-label="Messages (available in Phase 5)"
             className="flex h-9 w-9 items-center justify-center border border-[#D9D6E2] bg-[#F7F7F5] text-[#5B5668] cursor-not-allowed"
           >
             <MessageSquare className="h-4 w-4" aria-hidden="true" />
@@ -156,26 +174,48 @@ export function SiteHeader({ session }: SiteHeaderProps) {
             type="button"
             disabled
             aria-disabled="true"
-            title="Notifications open in Communication phase"
-            aria-label="Notifications (available in Communication phase)"
+            title="Notifications open in Phase 5"
+            aria-label="Notifications (available in Phase 5)"
             className="flex h-9 w-9 items-center justify-center border border-[#D9D6E2] bg-[#F7F7F5] text-[#5B5668] cursor-not-allowed"
           >
             <Bell className="h-4 w-4" aria-hidden="true" />
           </button>
 
-          <Link
-            href="/account"
-            className="inline-flex items-center gap-1.5 border-2 border-[#4E2A84] bg-white px-3 py-1.5 text-sm font-bold text-[#4E2A84] hover:bg-[#4E2A84] hover:text-white press-feedback"
-          >
-            <User className="h-4 w-4" aria-hidden="true" />
-            <span>{session.isAuthenticated ? "Account" : "Sign In"}</span>
-          </Link>
+          {session.isAuthenticated ? (
+            <>
+              <Link
+                href="/account"
+                className="inline-flex items-center gap-1.5 border-2 border-[#4E2A84] bg-white px-3 py-1.5 text-sm font-bold text-[#4E2A84] hover:bg-[#4E2A84] hover:text-white press-feedback"
+              >
+                <User className="h-4 w-4" aria-hidden="true" />
+                <span className="max-w-[120px] truncate">{displayName}</span>
+              </Link>
+              <form action={signOutAction}>
+                <button
+                  type="submit"
+                  aria-label="Sign out"
+                  title="Sign out"
+                  className="flex h-9 w-9 items-center justify-center border border-[#14121A] bg-white text-[#14121A] hover:bg-[#14121A] hover:text-white press-feedback"
+                >
+                  <LogOut className="h-4 w-4" aria-hidden="true" />
+                </button>
+              </form>
+            </>
+          ) : (
+            <Link
+              href="/login"
+              className="inline-flex items-center gap-1.5 border-2 border-[#4E2A84] bg-[#4E2A84] px-3.5 py-1.5 text-sm font-bold text-white hover:bg-[#381C63] press-feedback"
+            >
+              <User className="h-4 w-4" aria-hidden="true" />
+              <span>Sign In</span>
+            </Link>
+          )}
         </div>
 
         {/* Compact Account + Menu Toggle (Mobile / Tablet) */}
         <div className="flex items-center gap-2 xl:hidden">
           <Link
-            href="/account"
+            href={session.isAuthenticated ? "/account" : "/login"}
             aria-label={session.isAuthenticated ? "Account" : "Sign In"}
             className="flex h-9 w-9 items-center justify-center border-2 border-[#4E2A84] text-[#4E2A84] hover:bg-[#4E2A84] hover:text-white"
           >
@@ -241,33 +281,54 @@ export function SiteHeader({ session }: SiteHeaderProps) {
                 {link.label}
               </Link>
             ))}
-            <Link
-              href="/account"
-              onClick={() => setMobileOpen(false)}
-              className="border border-[#4E2A84] px-3 py-2.5 text-sm font-bold text-[#4E2A84]"
-            >
-              {session.isAuthenticated ? "Account & Session" : "Account / Sign In Foundation"}
-            </Link>
-          </nav>
 
-          <div className="mt-4 border-t border-[#D9D6E2] pt-3">
-            <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-[#4A4656]">
-              Upcoming Phases (Disabled in Phase 1)
-            </p>
-            <div className="grid grid-cols-2 gap-2">
-              {["Sell", "Cart", "Messages", "Notifications"].map((item) => (
-                <button
-                  key={item}
-                  type="button"
-                  disabled
-                  aria-disabled="true"
-                  className="border border-[#D9D6E2] bg-[#F7F7F5] px-3 py-2 text-left text-xs font-semibold text-[#5B5668] cursor-not-allowed"
+            {session.isActiveAdmin ? (
+              <Link
+                href="/admin"
+                onClick={() => setMobileOpen(false)}
+                className="border border-[#4E2A84] bg-[#F8F4FC] px-3 py-2.5 text-sm font-bold text-[#4E2A84]"
+              >
+                Admin Console
+              </Link>
+            ) : null}
+
+            {session.isAuthenticated ? (
+              <>
+                <Link
+                  href="/account"
+                  onClick={() => setMobileOpen(false)}
+                  className="border border-[#4E2A84] px-3 py-2.5 text-sm font-bold text-[#4E2A84]"
                 >
-                  {item}
-                </button>
-              ))}
-            </div>
-          </div>
+                  Account ({displayName})
+                </Link>
+                <form action={signOutAction} className="mt-1">
+                  <button
+                    type="submit"
+                    className="w-full border border-[#14121A] bg-white px-3 py-2.5 text-left text-sm font-bold text-[#14121A] hover:bg-[#F7F7F5]"
+                  >
+                    Sign Out
+                  </button>
+                </form>
+              </>
+            ) : (
+              <div className="mt-1 grid grid-cols-2 gap-2">
+                <Link
+                  href="/login"
+                  onClick={() => setMobileOpen(false)}
+                  className="bg-[#4E2A84] px-3 py-2.5 text-center text-sm font-bold text-white"
+                >
+                  Sign In
+                </Link>
+                <Link
+                  href="/register"
+                  onClick={() => setMobileOpen(false)}
+                  className="border border-[#14121A] px-3 py-2.5 text-center text-sm font-bold text-[#14121A]"
+                >
+                  Register
+                </Link>
+              </div>
+            )}
+          </nav>
         </div>
       ) : null}
     </header>

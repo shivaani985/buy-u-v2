@@ -95,23 +95,39 @@ export default async function MarketplacePage({
       ) : (
         <div className="mt-10 border-2 border-[#14121A] bg-[#F7F7F5] p-8 text-center">
           <h2 className="font-editorial text-2xl font-bold text-[#14121A]">
-            {listingsResult.source === "error"
-              ? "Live catalog access is restricted for anonymous visitors"
-              : "No matching campus listings"}
+            {listingsResult.source === "auth_required"
+              ? "Sign in with your UMS account to browse live listings"
+              : listingsResult.source === "restricted"
+                ? "Active UMS member account required"
+                : listingsResult.source === "error"
+                  ? "Unable to load live marketplace listings"
+                  : "No matching campus listings"}
           </h2>
           <p className="mx-auto mt-2 max-w-lg text-sm text-[#4A4656]">
-            {listingsResult.source === "error"
-              ? "Supabase rejected anonymous SELECT queries with PostgreSQL 42501. No fictional demo listings are silently substituted. You can inspect the UI using Explicit Demo Mode or enable public SELECT policies / Phase 2 Auth."
-              : "Try broadening your keywords, switching category, or clearing the listing type filter."}
+            {listingsResult.source === "auth_required"
+              ? "Buy-U protects student and staff listings inside the verified UMS community. Sign in with @iluv.ums.edu.my or @ums.edu.my, or inspect the layout in Explicit Demo Mode."
+              : listingsResult.source === "restricted"
+                ? listingsResult.notice
+                : listingsResult.source === "error"
+                  ? listingsResult.notice
+                  : "Try broadening your keywords, switching category, or clearing the listing type filter."}
           </p>
           <div className="mt-5 flex flex-wrap justify-center gap-3">
-            {listingsResult.source === "error" ? (
-              <Link
-                href="/marketplace?demo=1"
-                className="bg-[#4E2A84] px-5 py-2.5 text-sm font-bold text-white hover:bg-[#381C63] press-feedback"
-              >
-                Open Explicit Demo Mode
-              </Link>
+            {listingsResult.source === "auth_required" ? (
+              <>
+                <Link
+                  href="/login?next=/marketplace"
+                  className="bg-[#4E2A84] px-5 py-2.5 text-sm font-bold text-white hover:bg-[#381C63] press-feedback"
+                >
+                  Sign In with UMS Email
+                </Link>
+                <Link
+                  href="/marketplace?demo=1"
+                  className="border-2 border-[#14121A] bg-white px-5 py-2.5 text-sm font-bold text-[#14121A] hover:bg-[#EFEFF2]"
+                >
+                  Open Demo Preview
+                </Link>
+              </>
             ) : (
               <Link
                 href={useDemo ? "/marketplace?demo=1" : "/marketplace"}
