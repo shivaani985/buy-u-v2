@@ -1,10 +1,11 @@
 import Link from "next/link";
-import { ArrowRight } from "lucide-react";
+import { Info } from "lucide-react";
 import { CategoryGrid } from "@/components/home/CategoryGrid";
 import { EditorialHero } from "@/components/home/EditorialHero";
-import { ListingCard } from "@/components/marketplace/ListingCard";
-import { DataSourceBanner } from "@/components/shared/DataSourceBanner";
+import { HomeListingSection } from "@/components/home/HomeListingSection";
+import { PromoBanners } from "@/components/home/PromoBanners";
 import { getCategories, getListings } from "@/lib/catalog";
+import { getSessionSummary } from "@/lib/supabase/server";
 
 interface HomePageProps {
   searchParams: Promise<{ demo?: string }>;
@@ -14,195 +15,56 @@ export default async function HomePage({ searchParams }: HomePageProps) {
   const params = await searchParams;
   const useDemo = params.demo === "1";
 
-  const [categoriesResult, listingsResult] = await Promise.all([
+  const [session, categoriesResult, listingsResult] = await Promise.all([
+    getSessionSummary(),
     getCategories({ useDemo }),
     getListings({ useDemo }),
   ]);
 
-  const demoSuffix = useDemo ? "?demo=1" : "";
-  const latestCampusItems = listingsResult.data
-    .filter(
-      (item) => item.listingType !== "service" && item.listingType !== "free"
-    )
-    .slice(0, 4);
-
-  const studentServices = listingsResult.data
-    .filter((item) => item.listingType === "service")
-    .slice(0, 3);
-
-  const freeItems = listingsResult.data
-    .filter((item) => item.listingType === "free")
-    .slice(0, 3);
-
   return (
-    <div>
-      {/* 1–3. Editorial Hero + Browse Marketplace CTA + Sell an Item CTA */}
-      <EditorialHero />
-
-      {/* Explicit Data Source / RLS Status */}
-      <div className="mx-auto w-full max-w-[1680px] px-4 pt-6 sm:px-6 lg:px-10 xl:px-14">
-        <DataSourceBanner
-          source={listingsResult.source}
-          notice={listingsResult.notice}
-          errorCode={listingsResult.errorCode}
-          demoHref="/?demo=1"
-          liveHref="/"
-        />
-      </div>
-
-      {/* 4. Explore by Category */}
-      <section
-        aria-labelledby="categories-heading"
-        className="mx-auto w-full max-w-[1680px] px-4 pt-12 sm:px-6 lg:px-10 xl:px-14"
-      >
-        <div className="mb-6 flex flex-wrap items-end justify-between gap-4 border-b-2 border-[#14121A] pb-3">
-          <h2
-            id="categories-heading"
-            className="text-2xl font-extrabold tracking-[-0.02em] text-[#14121A] sm:text-3xl"
+    <div className="bg-white">
+      {/* Explicit Demo Mode notice shown ONLY when ?demo=1 is intentionally enabled */}
+      {useDemo ? (
+        <div className="bori-container pt-3">
+          <div
+            role="status"
+            className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-[#1D70B8]/40 bg-[#F2F8FD] px-4 py-2 text-xs font-semibold text-[#14538A]"
           >
-            Explore by{" "}
-            <span className="font-editorial italic font-bold text-[#4E2A84]">
-              Category
+            <span className="inline-flex items-center gap-2">
+              <Info className="h-4 w-4 shrink-0" aria-hidden="true" />
+              Explicit Demo Preview (?demo=1) — sample catalog items shown, never
+              mixed with live Supabase inventory.
             </span>
-          </h2>
-          <Link
-            href={`/marketplace${demoSuffix}`}
-            className="inline-flex items-center gap-1.5 text-sm font-bold text-[#1D70B8] hover:text-[#4E2A84] underline-offset-4 hover:underline"
-          >
-            <span>View full catalog</span>
-            <ArrowRight className="h-4 w-4" aria-hidden="true" />
-          </Link>
-        </div>
-
-        {categoriesResult.data.length > 0 ? (
-          <CategoryGrid categories={categoriesResult.data} />
-        ) : (
-          <p className="border border-[#D9D6E2] bg-[#F7F7F5] p-6 text-sm text-[#4A4656]">
-            {categoriesResult.source === "auth_required"
-              ? "Sign in with your UMS student or staff email above to explore live UMSKAL categories, or choose Demo Preview."
-              : categoriesResult.source === "restricted"
-                ? "Verify or activate your UMS account to view live categories."
-                : "No active marketplace categories found."}
-          </p>
-        )}
-      </section>
-
-      {/* 5. Latest on Campus */}
-      <section
-        aria-labelledby="latest-heading"
-        className="mx-auto w-full max-w-[1680px] px-4 pt-16 sm:px-6 lg:px-10 xl:px-14"
-      >
-        <div className="mb-6 flex flex-wrap items-end justify-between gap-4 border-b-2 border-[#14121A] pb-3">
-          <h2
-            id="latest-heading"
-            className="text-2xl font-extrabold tracking-[-0.02em] text-[#14121A] sm:text-3xl"
-          >
-            Latest on{" "}
-            <span className="font-editorial italic font-bold text-[#1D70B8]">
-              Campus
-            </span>
-          </h2>
-          <Link
-            href={`/marketplace${demoSuffix}`}
-            className="inline-flex items-center gap-1.5 text-sm font-bold text-[#4E2A84] hover:text-[#1D70B8] underline-offset-4 hover:underline"
-          >
-            <span>Browse all items</span>
-            <ArrowRight className="h-4 w-4" aria-hidden="true" />
-          </Link>
-        </div>
-
-        {latestCampusItems.length > 0 ? (
-          <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-4">
-            {latestCampusItems.map((listing) => (
-              <ListingCard key={listing.id} listing={listing} />
-            ))}
+            <Link
+              href="/"
+              className="rounded-md border border-[#1D70B8] bg-white px-2.5 py-1 text-xs font-bold text-[#14538A] hover:bg-[#1D70B8] hover:text-white"
+            >
+              Return to Live Mode
+            </Link>
           </div>
-        ) : (
-          <p className="border border-[#D9D6E2] bg-[#F7F7F5] p-6 text-sm text-[#4A4656]">
-            {listingsResult.source === "auth_required"
-              ? "Sign in with your UMS email to view live campus listings."
-              : "No published campus product listings found yet."}
-          </p>
-        )}
-      </section>
-
-      {/* 6. Student Services */}
-      <section
-        aria-labelledby="services-heading"
-        className="mx-auto w-full max-w-[1680px] px-4 pt-16 sm:px-6 lg:px-10 xl:px-14"
-      >
-        <div className="mb-6 flex flex-wrap items-end justify-between gap-4 border-b-2 border-[#00A3A6] pb-3">
-          <h2
-            id="services-heading"
-            className="text-2xl font-extrabold tracking-[-0.02em] text-[#14121A] sm:text-3xl"
-          >
-            Student{" "}
-            <span className="font-editorial italic font-bold text-[#007D80]">
-              Services
-            </span>
-          </h2>
-          <Link
-            href={`/marketplace?type=service${useDemo ? "&demo=1" : ""}`}
-            className="inline-flex items-center gap-1.5 text-sm font-bold text-[#007D80] hover:text-[#4E2A84] underline-offset-4 hover:underline"
-          >
-            <span>Explore all services</span>
-            <ArrowRight className="h-4 w-4" aria-hidden="true" />
-          </Link>
         </div>
+      ) : null}
 
-        {studentServices.length > 0 ? (
-          <div className="grid grid-cols-1 gap-5 md:grid-cols-3">
-            {studentServices.map((listing) => (
-              <ListingCard key={listing.id} listing={listing} />
-            ))}
-          </div>
-        ) : (
-          <p className="border border-[#D9D6E2] bg-[#F7F7F5] p-6 text-sm text-[#4A4656]">
-            {listingsResult.source === "error"
-              ? "Live student services require authenticated access or public SELECT grants."
-              : "No student services listed yet."}
-          </p>
-        )}
-      </section>
+      {/* 1. Locked Bori Hero */}
+      <EditorialHero session={session} />
 
-      {/* 7. Free Items */}
-      <section
-        aria-labelledby="free-heading"
-        className="mx-auto w-full max-w-[1680px] px-4 pt-16 sm:px-6 lg:px-10 xl:px-14"
-      >
-        <div className="mb-6 flex flex-wrap items-end justify-between gap-4 border-b-2 border-[#4E2A84] pb-3">
-          <h2
-            id="free-heading"
-            className="text-2xl font-extrabold tracking-[-0.02em] text-[#14121A] sm:text-3xl"
-          >
-            Free{" "}
-            <span className="font-editorial italic font-bold text-[#4E2A84]">
-              Items
-            </span>
-          </h2>
-          <Link
-            href={`/marketplace?type=free${useDemo ? "&demo=1" : ""}`}
-            className="inline-flex items-center gap-1.5 text-sm font-bold text-[#4E2A84] hover:text-[#1D70B8] underline-offset-4 hover:underline"
-          >
-            <span>See all giveaways</span>
-            <ArrowRight className="h-4 w-4" aria-hidden="true" />
-          </Link>
-        </div>
+      {/* 2. Explore by Category (Live Active Supabase Taxonomy) */}
+      <CategoryGrid
+        categories={categoriesResult.data}
+        source={categoriesResult.source}
+        useDemo={useDemo}
+      />
 
-        {freeItems.length > 0 ? (
-          <div className="grid grid-cols-1 gap-5 md:grid-cols-3">
-            {freeItems.map((listing) => (
-              <ListingCard key={listing.id} listing={listing} />
-            ))}
-          </div>
-        ) : (
-          <p className="border border-[#D9D6E2] bg-[#F7F7F5] p-6 text-sm text-[#4A4656]">
-            {listingsResult.source === "error"
-              ? "Live free notices require authenticated access or public SELECT grants."
-              : "No free items available right now."}
-          </p>
-        )}
-      </section>
+      {/* 3. Latest on Campus (Live Published Listings / Honest Low-Inventory or Member Gate) */}
+      <HomeListingSection
+        listings={listingsResult.data}
+        source={listingsResult.source}
+        notice={listingsResult.notice}
+        useDemo={useDemo}
+      />
+
+      {/* 4. Bottom Promotional Banners (Student Services & Free Items) */}
+      <PromoBanners useDemo={useDemo} />
     </div>
   );
 }

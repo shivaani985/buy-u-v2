@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Image from "next/image";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { Lock, LogOut, ShieldCheck } from "lucide-react";
@@ -56,17 +57,28 @@ export default async function AdminPage() {
   return (
     <div className="mx-auto w-full max-w-[1200px] px-4 py-10 sm:px-6 lg:px-10">
       <div className="flex flex-wrap items-center justify-between gap-4 border-b-2 border-[#14121A] pb-4">
-        <div>
-          <h1 className="text-3xl font-extrabold tracking-[-0.03em] text-[#14121A]">
-            Buy-U{" "}
-            <span className="font-editorial italic font-bold text-[#4E2A84]">
-              Admin Console
-            </span>
-          </h1>
-          <p className="mt-1 text-sm text-[#4A4656]">
-            Verified via backend <code className="font-mono">is_active_admin()</code>{" "}
-            ({session.email}).
-          </p>
+        <div className="flex items-center gap-3.5">
+          <Link href="/" className="press-feedback shrink-0" aria-label="Buy-U Home">
+            <Image
+              src="/images/logo/buyu-logo.png"
+              alt="Buy-U"
+              width={48}
+              height={54}
+              className="h-11 w-auto object-contain select-none"
+            />
+          </Link>
+          <div>
+            <h1 className="text-3xl font-extrabold tracking-[-0.03em] text-[#14121A]">
+              Buy-U{" "}
+              <span className="font-editorial italic font-bold text-[#4E2A84]">
+                Admin Console
+              </span>
+            </h1>
+            <p className="mt-1 text-sm text-[#4A4656]">
+              Verified via backend <code className="font-mono">is_active_admin()</code>{" "}
+              ({session.email}).
+            </p>
+          </div>
         </div>
 
         <form action={signOutAction}>

@@ -9,8 +9,15 @@ const baseUrl = process.argv[2] ?? "http://localhost:3000";
 const routes = [
   {
     path: "/",
-    mustInclude: ["Buy-U", "UMSKAL", "UMS Member Sign-In Required"],
-    mustExclude: ["42501", "sb_secret_"],
+    mustInclude: [
+      "The Campus",
+      "for UMS Students",
+      "Latest on",
+      "Student Services",
+      "Free Items",
+      "Sign in with your UMS email",
+    ],
+    mustExclude: ["42501", "sb_secret_", "Trending on Campus"],
   },
   {
     path: "/marketplace",

@@ -1,3 +1,4 @@
+import Image from "next/image";
 import Link from "next/link";
 
 interface AuthFormShellProps {
@@ -35,6 +36,23 @@ export function AuthFormShell({
         <div className={`h-2 w-full ${ACCENT_BAR[accentColor]}`} aria-hidden="true" />
 
         <div className="p-6 sm:p-8">
+          <div className="mb-4">
+            <Link
+              href="/"
+              className="inline-block rounded-md press-feedback focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4E2A84]"
+              aria-label="Return to Buy-U Home"
+            >
+              <Image
+                src="/images/logo/buyu-logo.png"
+                alt="Buy-U"
+                width={48}
+                height={54}
+                className="h-11 w-auto object-contain select-none"
+                priority
+              />
+            </Link>
+          </div>
+
           <h1 className="text-2xl font-extrabold tracking-[-0.03em] text-[#14121A] sm:text-3xl">
             {title}{" "}
             <span className={`font-editorial italic font-bold ${ACCENT_TEXT[accentColor]}`}>

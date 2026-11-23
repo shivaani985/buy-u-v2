@@ -1,3 +1,4 @@
+import Image from "next/image";
 import Link from "next/link";
 
 interface SiteFooterProps {
@@ -6,16 +7,22 @@ interface SiteFooterProps {
 
 export function SiteFooter({ dataSource }: SiteFooterProps) {
   return (
-    <footer className="mt-16 border-t-2 border-[#14121A] bg-[#14121A] text-white">
-      <div className="mx-auto w-full max-w-[1680px] px-4 py-12 sm:px-6 lg:px-10 xl:px-14">
+    <footer className="mt-8 border-t border-[#2E2A3B] bg-[#14121A] text-white">
+      <div className="bori-container py-10">
         <div className="grid gap-10 md:grid-cols-3">
           <div>
-            <div className="flex items-center gap-2.5">
-              <span className="flex h-8 w-8 items-center justify-center bg-[#00A3A6] text-sm font-extrabold text-[#14121A] editorial-cut-tr">
-                BU
-              </span>
-              <span className="text-lg font-extrabold tracking-tight">
-                Buy-U v2
+            <div className="flex items-center gap-3">
+              <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-white p-1 shadow-sm">
+                <Image
+                  src="/images/logo/buyu-logo.png"
+                  alt="Buy-U Logo"
+                  width={40}
+                  height={45}
+                  className="h-9 w-auto object-contain"
+                />
+              </div>
+              <span className="text-lg font-extrabold tracking-tight text-white">
+                Buy-U <span className="text-xs font-semibold text-[#00A3A6]">v2</span>
               </span>
             </div>
             <p className="mt-3 max-w-sm text-sm leading-relaxed text-[#D9D6E2]">

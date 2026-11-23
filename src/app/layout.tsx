@@ -8,6 +8,7 @@ import "./globals.css";
 const plusJakarta = Plus_Jakarta_Sans({
   subsets: ["latin"],
   weight: ["400", "500", "600", "700", "800"],
+  style: ["normal", "italic"],
   variable: "--font-plus-jakarta",
   display: "swap",
 });
@@ -22,11 +23,11 @@ const fraunces = Fraunces({
 
 export const metadata: Metadata = {
   title: {
-    default: "Buy-U — UMSKAL Campus Marketplace",
+    default: "Buy-U — UMS Student Marketplace",
     template: "%s | Buy-U UMSKAL",
   },
   description:
-    "A community-based university marketplace for Universiti Malaysia Sabah (UMSKAL, Labuan) students and staff to buy, sell, offer services, and share free items.",
+    "Buy, sell, book student services, or share free items within the Universiti Malaysia Sabah (UMSKAL, Labuan) community.",
 };
 
 export default async function RootLayout({
@@ -41,14 +42,14 @@ export default async function RootLayout({
       <body className="min-h-screen flex flex-col bg-white text-[#14121A]">
         <a
           href="#main-content"
-          className="sr-only focus:not-sr-only focus:fixed focus:top-3 focus:left-3 focus:z-50 focus:bg-[#4E2A84] focus:text-white focus:px-4 focus:py-2 focus:text-sm focus:font-semibold"
+          className="sr-only focus:not-sr-only focus:fixed focus:top-3 focus:left-3 focus:z-50 focus:rounded-md focus:bg-[#4E2A84] focus:px-4 focus:py-2 focus:text-sm focus:font-semibold focus:text-white"
         >
           Skip to main content
         </a>
 
         <SiteHeader session={session} />
 
-        <main id="main-content" className="flex-1">
+        <main id="main-content" className="flex-1 bg-white">
           {children}
         </main>
 
