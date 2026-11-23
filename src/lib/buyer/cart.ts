@@ -40,6 +40,12 @@ export interface CartItemView {
   issueCode: CartIssueCode | null;
   issueMessage: string | null;
   canAdjustToMax: boolean;
+  isFood?: boolean;
+  availabilityMode?: string | null;
+  pickupWindowStart?: string | null;
+  pickupWindowEnd?: string | null;
+  pickupNote?: string | null;
+  foodNotes?: string | null;
 }
 
 export interface CartSellerGroup {

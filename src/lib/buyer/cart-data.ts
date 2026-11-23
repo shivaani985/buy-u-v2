@@ -35,6 +35,7 @@ interface RawListingRow {
   id: string;
   seller_id: string;
   kind: string;
+  is_food: boolean | null;
   title: string;
   condition: string | null;
   price_sen: number | null;
@@ -42,6 +43,11 @@ interface RawListingRow {
   reserved_quantity: number | null;
   collection_area_id: string | null;
   has_variants: boolean | null;
+  availability_mode: string | null;
+  pickup_window_start: string | null;
+  pickup_window_end: string | null;
+  pickup_note: string | null;
+  food_notes: string | null;
   image_paths: string[] | null;
   status: string;
 }
@@ -134,7 +140,7 @@ export async function getCartPageData(
     supabase
       .from("listings")
       .select(
-        "id,seller_id,kind,title,condition,price_sen,quantity,reserved_quantity,collection_area_id,has_variants,image_paths,status"
+        "id,seller_id,kind,is_food,title,condition,price_sen,quantity,reserved_quantity,collection_area_id,has_variants,availability_mode,pickup_window_start,pickup_window_end,pickup_note,food_notes,image_paths,status"
       )
       .in("id", listingIds),
     variantIds.length > 0
@@ -311,6 +317,12 @@ export async function getCartPageData(
       issueCode: state.issueCode,
       issueMessage: state.issueMessage,
       canAdjustToMax: state.canAdjustToMax,
+      isFood: Boolean(rawListing?.is_food),
+      availabilityMode: rawListing?.availability_mode ?? null,
+      pickupWindowStart: rawListing?.pickup_window_start ?? null,
+      pickupWindowEnd: rawListing?.pickup_window_end ?? null,
+      pickupNote: rawListing?.pickup_note ?? null,
+      foodNotes: rawListing?.food_notes ?? null,
     };
   });
 

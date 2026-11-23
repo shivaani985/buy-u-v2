@@ -665,18 +665,29 @@ export function CartClient({ summary }: CartClientProps) {
         </dl>
 
         <div className="mt-5 space-y-3">
-          <button
-            type="button"
-            disabled
-            aria-disabled="true"
-            className="flex w-full cursor-not-allowed items-center justify-center gap-2 rounded-xl bg-[#C9C4D6] px-5 py-3 text-sm font-bold text-white"
-          >
-            <span>Checkout Not Yet Available</span>
-          </button>
+          {!summary.hasIssues && summary.validQuantity > 0 ? (
+            <Link
+              href="/checkout"
+              className="flex w-full items-center justify-center gap-2 rounded-xl bg-[#4E2A84] px-5 py-3 text-sm font-bold text-white transition hover:bg-[#3F216B] active:scale-[0.99]"
+            >
+              <span>Proceed to Checkout</span>
+              <ArrowRight className="h-4 w-4" aria-hidden="true" />
+            </Link>
+          ) : (
+            <button
+              type="button"
+              disabled
+              aria-disabled="true"
+              className="flex w-full cursor-not-allowed items-center justify-center gap-2 rounded-xl bg-[#C9C4D6] px-5 py-3 text-sm font-bold text-white"
+            >
+              <span>Resolve Cart Issues to Checkout</span>
+            </button>
+          )}
 
           <p className="text-xs leading-relaxed text-[#6B6779]">
-            Checkout and payment will open in the next release. No delivery or
-            platform fees are calculated at this stage.
+            Review your seller orders and campus collection details on the next
+            step. Payment integration is coming soon; no unverified fees are
+            calculated.
           </p>
 
           <p className="text-xs leading-relaxed text-[#6B6779]">
