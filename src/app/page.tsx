@@ -6,12 +6,20 @@ import { ListingCard } from "@/components/marketplace/ListingCard";
 import { DataSourceBanner } from "@/components/shared/DataSourceBanner";
 import { getCategories, getListings } from "@/lib/catalog";
 
-export default async function HomePage() {
+interface HomePageProps {
+  searchParams: Promise<{ demo?: string }>;
+}
+
+export default async function HomePage({ searchParams }: HomePageProps) {
+  const params = await searchParams;
+  const useDemo = params.demo === "1";
+
   const [categoriesResult, listingsResult] = await Promise.all([
-    getCategories(),
-    getListings(),
+    getCategories({ useDemo }),
+    getListings({ useDemo }),
   ]);
 
+  const demoSuffix = useDemo ? "?demo=1" : "";
   const latestCampusItems = listingsResult.data
     .filter(
       (item) => item.listingType !== "service" && item.listingType !== "free"
@@ -31,11 +39,14 @@ export default async function HomePage() {
       {/* 1–3. Editorial Hero + Browse Marketplace CTA + Sell an Item CTA */}
       <EditorialHero />
 
-      {/* Explicit Data Source Status */}
+      {/* Explicit Data Source / RLS Status */}
       <div className="mx-auto w-full max-w-[1680px] px-4 pt-6 sm:px-6 lg:px-10 xl:px-14">
         <DataSourceBanner
           source={listingsResult.source}
           notice={listingsResult.notice}
+          errorCode={listingsResult.errorCode}
+          demoHref="/?demo=1"
+          liveHref="/"
         />
       </div>
 
@@ -55,7 +66,7 @@ export default async function HomePage() {
             </span>
           </h2>
           <Link
-            href="/marketplace"
+            href={`/marketplace${demoSuffix}`}
             className="inline-flex items-center gap-1.5 text-sm font-bold text-[#1D70B8] hover:text-[#4E2A84] underline-offset-4 hover:underline"
           >
             <span>View full catalog</span>
@@ -63,7 +74,15 @@ export default async function HomePage() {
           </Link>
         </div>
 
-        <CategoryGrid categories={categoriesResult.data} />
+        {categoriesResult.data.length > 0 ? (
+          <CategoryGrid categories={categoriesResult.data} />
+        ) : (
+          <p className="border border-[#D9D6E2] bg-[#F7F7F5] p-6 text-sm text-[#4A4656]">
+            {categoriesResult.source === "error"
+              ? "Live categories are currently blocked for unauthenticated visitors by Supabase RLS/grants (42501). Use Preview Demo Mode above or sign in once Phase 2 Auth is enabled."
+              : "No active marketplace categories found."}
+          </p>
+        )}
       </section>
 
       {/* 5. Latest on Campus */}
@@ -82,7 +101,7 @@ export default async function HomePage() {
             </span>
           </h2>
           <Link
-            href="/marketplace"
+            href={`/marketplace${demoSuffix}`}
             className="inline-flex items-center gap-1.5 text-sm font-bold text-[#4E2A84] hover:text-[#1D70B8] underline-offset-4 hover:underline"
           >
             <span>Browse all items</span>
@@ -98,7 +117,9 @@ export default async function HomePage() {
           </div>
         ) : (
           <p className="border border-[#D9D6E2] bg-[#F7F7F5] p-6 text-sm text-[#4A4656]">
-            No published campus product listings found yet.
+            {listingsResult.source === "error"
+              ? "Live campus listings cannot be queried anonymously (42501 permission denied)."
+              : "No published campus product listings found yet."}
           </p>
         )}
       </section>
@@ -119,7 +140,7 @@ export default async function HomePage() {
             </span>
           </h2>
           <Link
-            href="/marketplace?type=service"
+            href={`/marketplace?type=service${useDemo ? "&demo=1" : ""}`}
             className="inline-flex items-center gap-1.5 text-sm font-bold text-[#007D80] hover:text-[#4E2A84] underline-offset-4 hover:underline"
           >
             <span>Explore all services</span>
@@ -135,7 +156,9 @@ export default async function HomePage() {
           </div>
         ) : (
           <p className="border border-[#D9D6E2] bg-[#F7F7F5] p-6 text-sm text-[#4A4656]">
-            No student services listed yet.
+            {listingsResult.source === "error"
+              ? "Live student services require authenticated access or public SELECT grants."
+              : "No student services listed yet."}
           </p>
         )}
       </section>
@@ -156,7 +179,7 @@ export default async function HomePage() {
             </span>
           </h2>
           <Link
-            href="/marketplace?type=free"
+            href={`/marketplace?type=free${useDemo ? "&demo=1" : ""}`}
             className="inline-flex items-center gap-1.5 text-sm font-bold text-[#4E2A84] hover:text-[#1D70B8] underline-offset-4 hover:underline"
           >
             <span>See all giveaways</span>
@@ -172,7 +195,9 @@ export default async function HomePage() {
           </div>
         ) : (
           <p className="border border-[#D9D6E2] bg-[#F7F7F5] p-6 text-sm text-[#4A4656]">
-            No free items available right now.
+            {listingsResult.source === "error"
+              ? "Live free notices require authenticated access or public SELECT grants."
+              : "No free items available right now."}
           </p>
         )}
       </section>

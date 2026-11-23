@@ -14,7 +14,7 @@ export const metadata: Metadata = {
 
 const VALID_TYPES = new Set<ListingType>([
   "preloved",
-  "student_business",
+  "business",
   "food",
   "service",
   "free",
@@ -25,6 +25,7 @@ interface MarketplacePageProps {
     q?: string;
     category?: string;
     type?: string;
+    demo?: string;
   }>;
 }
 
@@ -38,10 +39,11 @@ export default async function MarketplacePage({
   const type: ListingType | "all" = VALID_TYPES.has(rawType as ListingType)
     ? (rawType as ListingType)
     : "all";
+  const useDemo = params.demo === "1";
 
   const [categoriesResult, listingsResult] = await Promise.all([
-    getCategories(),
-    getListings({ q, category, type }),
+    getCategories({ useDemo }),
+    getListings({ q, category, type, useDemo }),
   ]);
 
   return (
@@ -55,7 +57,8 @@ export default async function MarketplacePage({
             </span>
           </h1>
           <p className="mt-1.5 text-sm text-[#4A4656]">
-            Read-only public catalog for UMSKAL, Labuan. Prices displayed in RM.
+            Read-only public catalog for UMSKAL, Labuan. Prices converted from
+            sen to RM.
           </p>
         </div>
 
@@ -69,6 +72,9 @@ export default async function MarketplacePage({
         <DataSourceBanner
           source={listingsResult.source}
           notice={listingsResult.notice}
+          errorCode={listingsResult.errorCode}
+          demoHref="/marketplace?demo=1"
+          liveHref="/marketplace"
         />
       </div>
 
@@ -77,6 +83,7 @@ export default async function MarketplacePage({
         initialQuery={q}
         initialCategory={category}
         initialType={type}
+        useDemo={useDemo}
       />
 
       {listingsResult.data.length > 0 ? (
@@ -88,18 +95,32 @@ export default async function MarketplacePage({
       ) : (
         <div className="mt-10 border-2 border-[#14121A] bg-[#F7F7F5] p-8 text-center">
           <h2 className="font-editorial text-2xl font-bold text-[#14121A]">
-            No matching campus listings
+            {listingsResult.source === "error"
+              ? "Live catalog access is restricted for anonymous visitors"
+              : "No matching campus listings"}
           </h2>
-          <p className="mx-auto mt-2 max-w-md text-sm text-[#4A4656]">
-            Try broadening your keywords, switching category, or clearing the
-            listing type filter.
+          <p className="mx-auto mt-2 max-w-lg text-sm text-[#4A4656]">
+            {listingsResult.source === "error"
+              ? "Supabase rejected anonymous SELECT queries with PostgreSQL 42501. No fictional demo listings are silently substituted. You can inspect the UI using Explicit Demo Mode or enable public SELECT policies / Phase 2 Auth."
+              : "Try broadening your keywords, switching category, or clearing the listing type filter."}
           </p>
-          <Link
-            href="/marketplace"
-            className="mt-5 inline-block bg-[#4E2A84] px-5 py-2.5 text-sm font-bold text-white hover:bg-[#381C63] press-feedback"
-          >
-            Reset all filters
-          </Link>
+          <div className="mt-5 flex flex-wrap justify-center gap-3">
+            {listingsResult.source === "error" ? (
+              <Link
+                href="/marketplace?demo=1"
+                className="bg-[#4E2A84] px-5 py-2.5 text-sm font-bold text-white hover:bg-[#381C63] press-feedback"
+              >
+                Open Explicit Demo Mode
+              </Link>
+            ) : (
+              <Link
+                href={useDemo ? "/marketplace?demo=1" : "/marketplace"}
+                className="bg-[#4E2A84] px-5 py-2.5 text-sm font-bold text-white hover:bg-[#381C63] press-feedback"
+              >
+                Reset all filters
+              </Link>
+            )}
+          </div>
         </div>
       )}
     </div>

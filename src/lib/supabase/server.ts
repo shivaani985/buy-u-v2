@@ -32,7 +32,7 @@ export async function createSupabaseServerClient(): Promise<SupabaseClient | nul
 export async function getSessionSummary(): Promise<AuthSessionSummary> {
   const supabase = await createSupabaseServerClient();
   if (!supabase) {
-    return { isAuthenticated: false, email: null, source: "demo" };
+    return { isAuthenticated: false, email: null, source: "unconfigured" };
   }
 
   try {
@@ -51,6 +51,6 @@ export async function getSessionSummary(): Promise<AuthSessionSummary> {
       source: "supabase",
     };
   } catch {
-    return { isAuthenticated: false, email: null, source: "demo" };
+    return { isAuthenticated: false, email: null, source: "unconfigured" };
   }
 }

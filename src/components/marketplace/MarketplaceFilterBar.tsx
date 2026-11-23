@@ -10,12 +10,13 @@ interface MarketplaceFilterBarProps {
   initialQuery: string;
   initialCategory: string;
   initialType: ListingType | "all";
+  useDemo?: boolean;
 }
 
 const LISTING_TYPES: Array<{ value: ListingType | "all"; label: string }> = [
   { value: "all", label: "All Types" },
   { value: "preloved", label: "Pre-Loved" },
-  { value: "student_business", label: "Student Business" },
+  { value: "business", label: "Student Business" },
   { value: "food", label: "Campus Food" },
   { value: "service", label: "Student Services" },
   { value: "free", label: "Free Items" },
@@ -26,6 +27,7 @@ export function MarketplaceFilterBar({
   initialQuery,
   initialCategory,
   initialType,
+  useDemo = false,
 }: MarketplaceFilterBarProps) {
   const router = useRouter();
   const [query, setQuery] = useState(initialQuery);
@@ -38,6 +40,7 @@ export function MarketplaceFilterBar({
     type: ListingType | "all";
   }) {
     const params = new URLSearchParams();
+    if (useDemo) params.set("demo", "1");
     if (next.q.trim()) params.set("q", next.q.trim());
     if (next.category) params.set("category", next.category);
     if (next.type !== "all") params.set("type", next.type);
@@ -54,7 +57,7 @@ export function MarketplaceFilterBar({
     setQuery("");
     setCategory("");
     setType("all");
-    router.push("/marketplace");
+    router.push(useDemo ? "/marketplace?demo=1" : "/marketplace");
   }
 
   const hasActiveFilters = Boolean(query.trim() || category || type !== "all");

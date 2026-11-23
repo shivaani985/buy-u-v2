@@ -1,28 +1,21 @@
 export type ListingType =
   | "preloved"
-  | "student_business"
+  | "business"
   | "food"
   | "service"
   | "free";
 
-export type CatalogDataSource = "supabase" | "demo";
+export type CatalogDataSource = "supabase" | "demo" | "error";
 
 export interface Category {
   id: string;
   slug: string;
   name: string;
+  kind: "product" | "service" | "free";
   description: string;
-  icon:
-    | "book"
-    | "laptop"
-    | "utensils"
-    | "shirt"
-    | "wrench"
-    | "gift"
-    | "sparkles"
-    | "home";
+  icon: string;
+  sortOrder: number;
   accent: "purple" | "teal" | "blue";
-  listingCount?: number;
 }
 
 export interface Listing {
@@ -30,16 +23,20 @@ export interface Listing {
   slug: string;
   title: string;
   description: string;
-  priceRm: number;
+  /** Always stored in integer sen (e.g. 1500 = RM 15.00). 0 for free items. */
+  priceSen: number;
   listingType: ListingType;
-  categorySlug: string;
+  categoryId: string;
   categoryName: string;
   campusArea: string;
-  condition?: string;
+  condition: string | null;
+  availableStock: number | null;
   imageUrl: string | null;
+  imageUrls: string[];
   imageAlt: string;
   sellerDisplayName: string;
-  sellerBadge: "Verified Student" | "UMS Staff" | "Student Venture";
+  sellerBadge: string;
+  sellerFaculty: string | null;
   createdAt: string;
   isDemo: boolean;
 }
@@ -48,16 +45,18 @@ export interface MarketplaceFilters {
   q?: string;
   category?: string;
   type?: ListingType | "all";
+  useDemo?: boolean;
 }
 
 export interface CatalogResult<T> {
   data: T;
   source: CatalogDataSource;
   notice?: string;
+  errorCode?: string;
 }
 
 export interface AuthSessionSummary {
   isAuthenticated: boolean;
   email: string | null;
-  source: CatalogDataSource;
+  source: "supabase" | "unconfigured";
 }
