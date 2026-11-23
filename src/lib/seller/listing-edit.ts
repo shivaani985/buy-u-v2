@@ -247,10 +247,10 @@ export function validateVariantsInput(input: {
     if (!priceRes.ok) {
       return { ok: false, error: `Variant #${i + 1}: ${priceRes.error}` };
     }
-    if (input.targetStatus === "published" && priceRes.sen < 100) {
+    if (priceRes.sen < 200) {
       return {
         ok: false,
-        error: `Variant #${i + 1}: Published variant price must be at least RM 1.00.`,
+        error: `Variant #${i + 1}: Variant price must be at least RM 2.00.`,
       };
     }
 
@@ -383,10 +383,10 @@ export function validateListingEditInput(input: ListingEditValidationInput) {
       error: "Listing title must be between 3 and 120 characters.",
     };
   }
-  if (validationStatus === "published" && description.length < 10) {
+  if (description.length < 10) {
     return {
       ok: false as const,
-      error: "Add at least 10 characters of description before publishing.",
+      error: "Add at least 10 characters of description.",
     };
   }
   if (description.length > 2000) {
@@ -400,10 +400,10 @@ export function validateListingEditInput(input: ListingEditValidationInput) {
   if (!priceRes.ok) {
     return { ok: false as const, error: priceRes.error };
   }
-  if (validationStatus === "published" && priceRes.sen < 100) {
+  if (priceRes.sen < 200) {
     return {
       ok: false as const,
-      error: "Published listings must be at least RM 1.00. Use Free Items for giveaways.",
+      error: "Listings must be at least RM 2.00. Use Free Items for giveaways.",
     };
   }
   if (!isService && validationStatus === "published" && !collectionAreaId) {
@@ -426,8 +426,12 @@ export function validateListingEditInput(input: ListingEditValidationInput) {
   }
 
   const isFood = input.listingType === "food";
-  const dbKind: "preloved" | "business" | "service" =
-    input.listingType === "food" ? "business" : input.listingType;
+  const dbKind: "pre_loved" | "business" | "service" =
+    input.listingType === "food"
+      ? "business"
+      : input.listingType === "preloved"
+        ? "pre_loved"
+        : input.listingType;
 
   return {
     ok: true as const,

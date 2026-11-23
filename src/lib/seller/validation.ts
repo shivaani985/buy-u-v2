@@ -163,7 +163,7 @@ export interface CreateListingInput {
 export interface ValidatedListingPayload {
   title: string;
   description: string;
-  dbKind: "preloved" | "business" | "service";
+  dbKind: "pre_loved" | "business" | "service";
   isFood: boolean;
   categoryId: string;
   priceSen: number;
@@ -204,10 +204,10 @@ export function validateListingInput(
     };
   }
 
-  if (status === "published" && description.length < 10) {
+  if (description.length < 10) {
     return {
       ok: false,
-      error: "Add at least 10 characters of description before publishing.",
+      error: "Add at least 10 characters of description.",
     };
   }
   if (description.length > 2000) {
@@ -225,11 +225,11 @@ export function validateListingInput(
   if (!priceResult.ok) {
     return { ok: false, error: priceResult.error };
   }
-  if (status === "published" && priceResult.sen < 100) {
+  if (priceResult.sen < 200) {
     return {
       ok: false,
       error:
-        "Published listings must be at least RM 1.00. Use Free Items for giveaways.",
+        "Listings must be at least RM 2.00. Use Free Items for giveaways.",
     };
   }
 
@@ -266,8 +266,12 @@ export function validateListingInput(
   }
 
   const isFood = input.listingType === "food";
-  const dbKind: "preloved" | "business" | "service" =
-    input.listingType === "food" ? "business" : input.listingType;
+  const dbKind: "pre_loved" | "business" | "service" =
+    input.listingType === "food"
+      ? "business"
+      : input.listingType === "preloved"
+        ? "pre_loved"
+        : input.listingType;
 
   return {
     ok: true,

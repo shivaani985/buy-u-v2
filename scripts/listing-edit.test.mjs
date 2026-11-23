@@ -236,12 +236,12 @@ test("validateListingEditInput enforces 5-photo cap, archiving, and out-of-stock
     assert.equal(outOfStock.data.status, "published");
   }
 
-  // Archiving relaxes publish-only rules
+  // Archiving relaxes publish-only rules (keeps valid DB description >= 10 chars)
   const archived = validateListingEditInput({
     currentStatus: "draft",
     currentReservedQuantity: 0,
     title: "Old Draft",
-    description: "",
+    description: "Archived draft listing description.",
     listingType: "preloved",
     categoryId: "books",
     priceRm: "10.00",
@@ -260,7 +260,10 @@ test("validateListingEditInput enforces 5-photo cap, archiving, and out-of-stock
     referencedVariantIds: new Set(),
   });
   assert.equal(archived.ok, true);
-  if (archived.ok) assert.equal(archived.data.status, "archived");
+  if (archived.ok) {
+    assert.equal(archived.data.status, "archived");
+    assert.equal(archived.data.dbKind, "pre_loved");
+  }
 });
 
 test("mapAtomicUpdateError maps concurrency conflicts and permission errors safely", () => {

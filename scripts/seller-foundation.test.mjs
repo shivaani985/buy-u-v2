@@ -130,10 +130,10 @@ test("validateStorefrontInput enforces name bounds and trims whitespace", () => 
 });
 
 test("validateListingInput enforces draft vs publish rules and maps food/service", () => {
-  // Draft allowed without rules acknowledgement or collection area
+  // Draft allowed without rules acknowledgement or collection area (description >= 10 chars per DB check)
   const draft = validateListingInput({
     title: "Casio Calculator",
-    description: "",
+    description: "Draft notes for Casio calculator.",
     listingType: "preloved",
     categoryId: "electronics",
     priceRm: "45.00",
@@ -146,6 +146,7 @@ test("validateListingInput enforces draft vs publish rules and maps food/service
   assert.equal(draft.ok, true);
   if (draft.ok) {
     assert.equal(draft.data.status, "draft");
+    assert.equal(draft.data.dbKind, "pre_loved");
     assert.equal(draft.data.priceSen, 4500);
   }
 

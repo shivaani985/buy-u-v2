@@ -109,6 +109,7 @@ export function EditListingForm({
   );
 
   const isService = listingType === "service";
+  const supportsVariants = listingType === "business" || listingType === "food";
   const filteredCategories = categories.filter((c) =>
     isService ? c.kind === "service" : c.kind !== "service"
   );
@@ -511,8 +512,8 @@ export function EditListingForm({
         </div>
       </div>
 
-      {/* Product Variants Section (Physical Goods Only) */}
-      {!isService ? (
+      {/* Product Variants Section (Student Business & Campus Food Only) */}
+      {supportsVariants ? (
         <div className="rounded-2xl border border-[#E6E3EE] bg-white p-5 shadow-[0_1px_4px_rgba(20,18,26,0.03)] sm:p-6">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
