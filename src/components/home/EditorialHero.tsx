@@ -36,7 +36,7 @@ export function EditorialHero({ session }: EditorialHeroProps) {
   return (
     <section
       aria-labelledby="hero-heading"
-      className="bg-white pt-2 pb-0.5 lg:pt-2 lg:pb-1"
+      className="bg-white pt-3 pb-1.5 lg:pt-3.5 lg:pb-2"
     >
       <div className="bori-container">
         <div className="grid grid-cols-1 items-center gap-4 lg:grid-cols-12 lg:gap-6">
@@ -44,32 +44,32 @@ export function EditorialHero({ session }: EditorialHeroProps) {
           <div className="anim-hero-copy lg:col-span-5 xl:col-span-5">
             <h1
               id="hero-heading"
-              className="text-[34px] font-extrabold italic leading-[1.03] tracking-[-0.03em] text-[#111018] sm:text-[40px] lg:text-[44px] xl:text-[50px]"
+              className="text-[38px] font-extrabold italic leading-[1.03] tracking-[-0.03em] text-[#111018] sm:text-[44px] lg:text-[48px] xl:text-[55px]"
             >
               <span className="block">The Campus</span>
-              <span className="mt-0.5 inline-block bg-[#4E2A84] px-3.5 py-0.5 text-white hero-marketplace-slab sm:px-4">
+              <span className="mt-0.5 inline-block bg-[#4E2A84] px-4 py-0.5 text-white hero-marketplace-slab sm:px-5">
                 Marketplace
               </span>
               <span className="mt-0.5 block">
                 <span className="inline-block">
                   for UMS Students
                   <span
-                    className="anim-teal-bar mt-1 block h-[5px] w-full bg-[#00A3A6]"
+                    className="anim-teal-bar mt-1.5 block h-[5.5px] w-full bg-[#00A3A6]"
                     aria-hidden="true"
                   />
                 </span>
               </span>
             </h1>
 
-            <p className="mt-2.5 max-w-[42ch] text-[14px] leading-[1.4] text-[#3E3B4B] sm:text-[14.5px]">
+            <p className="mt-3 max-w-[42ch] text-[14.5px] leading-[1.42] text-[#3E3B4B] sm:text-[15px]">
               Buy, sell, book student services, or share free items within the
               UMS community.
             </p>
 
-            <div className="mt-3.5 flex flex-wrap items-center gap-2.5">
+            <div className="mt-4 flex flex-wrap items-center gap-2.5">
               <Link
                 href="/marketplace"
-                className="inline-flex items-center gap-2 rounded-lg bg-[#4E2A84] px-4.5 py-2 text-[13.5px] font-bold text-white shadow-[0_2px_6px_rgba(78,42,132,0.22)] hover:bg-[#3A1E66] press-feedback"
+                className="inline-flex items-center gap-2 rounded-lg bg-[#4E2A84] px-5 py-2.5 text-[14px] font-bold text-white shadow-[0_2px_6px_rgba(78,42,132,0.22)] hover:bg-[#3A1E66] press-feedback"
               >
                 <span>Browse Marketplace</span>
                 <ArrowRight className="h-4 w-4" aria-hidden="true" />
@@ -78,7 +78,7 @@ export function EditorialHero({ session }: EditorialHeroProps) {
               <Link
                 href={secondaryCta.href}
                 title={secondaryCta.title}
-                className="inline-flex items-center gap-2 rounded-lg border-[1.5px] border-[#00A3A6] bg-white px-4.5 py-2 text-[13.5px] font-bold text-[#008386] hover:bg-[#EDF9F9] press-feedback"
+                className="inline-flex items-center gap-2 rounded-lg border-[1.5px] border-[#00A3A6] bg-white px-5 py-2.5 text-[14px] font-bold text-[#008386] hover:bg-[#EDF9F9] press-feedback"
               >
                 {secondaryCta.icon === "services" ? (
                   <Wrench className="h-4 w-4" aria-hidden="true" />
@@ -90,18 +90,18 @@ export function EditorialHero({ session }: EditorialHeroProps) {
             </div>
           </div>
 
-          {/* Right Bori Stage: 25% Compact Stage with Full 3D Props Scene */}
+          {/* Right Bori Stage: Balanced Hero Stage (+15% height from UI-1.2) */}
           <div className="relative lg:col-span-7 xl:col-span-7">
-            <div className="relative mx-auto flex h-[200px] w-full max-w-[490px] items-end justify-center overflow-visible sm:h-[235px] lg:h-[250px] xl:h-[270px]">
+            <div className="relative mx-auto flex h-[230px] w-full max-w-[545px] items-end justify-center overflow-visible sm:h-[270px] lg:h-[290px] xl:h-[312px]">
               {/* Back-left flat teal angular panel */}
               <div
-                className="hero-panel-teal pointer-events-none absolute inset-x-0 top-5 bottom-0 bg-[#00A3A6] sm:top-6"
+                className="hero-panel-teal pointer-events-none absolute inset-x-0 top-6 bottom-0 bg-[#00A3A6] sm:top-7"
                 aria-hidden="true"
               />
 
               {/* Back-right flat blue angular panel */}
               <div
-                className="hero-panel-blue pointer-events-none absolute inset-x-0 top-6 bottom-0 bg-[#1D70B8] sm:top-7"
+                className="hero-panel-blue pointer-events-none absolute inset-x-0 top-7 bottom-0 bg-[#1D70B8] sm:top-8"
                 aria-hidden="true"
               />
 
@@ -109,11 +109,11 @@ export function EditorialHero({ session }: EditorialHeroProps) {
               <div className="anim-hero-mascot relative z-10 flex h-full w-full items-end justify-center">
                 <div className="relative h-full w-full">
                   <Image
-                    src="/images/bori/bori-hero.png"
+                    src="/images/bori/bori-hero-scene.png"
                     alt="Bori, the friendly Buy-U campus mascot, surrounded by study essentials, laptop, headphones, and marketplace speech bubbles"
                     fill
                     priority
-                    sizes="(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 490px"
+                    sizes="(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 545px"
                     className="object-contain object-bottom select-none"
                   />
                 </div>

@@ -26,9 +26,26 @@ export function SiteHeader({ session }: SiteHeaderProps) {
   const pathname = usePathname();
   const router = useRouter();
   const [searchQuery, setSearchQuery] = useState("");
-  const [mobileOpen, setMobileOpen] = useState(false);
-  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
+  const [mobileOpenPath, setMobileOpenPath] = useState<string | null>(null);
+  const [accountMenuPath, setAccountMenuPath] = useState<string | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+
+  const mobileOpen = mobileOpenPath === pathname;
+  const accountMenuOpen = accountMenuPath === pathname;
+  const setMobileOpen = (next: boolean | ((prev: boolean) => boolean)) => {
+    setMobileOpenPath((prev) => {
+      const curr = prev === pathname;
+      const val = typeof next === "function" ? next(curr) : next;
+      return val ? pathname : null;
+    });
+  };
+  const setAccountMenuOpen = (next: boolean | ((prev: boolean) => boolean)) => {
+    setAccountMenuPath((prev) => {
+      const curr = prev === pathname;
+      const val = typeof next === "function" ? next(curr) : next;
+      return val ? pathname : null;
+    });
+  };
 
   const role = (session.profile?.university_role ?? "").toLowerCase();
   const isStaff = session.isAuthenticated && role === "staff";
@@ -61,17 +78,17 @@ export function SiteHeader({ session }: SiteHeaderProps) {
       : []),
   ];
 
-  // Close menus on outside click, Escape key, or navigation
+  // Close menus on outside click or Escape key (auto-closes on route change via pathname match)
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
       if (e.key === "Escape") {
-        setAccountMenuOpen(false);
-        setMobileOpen(false);
+        setAccountMenuPath(null);
+        setMobileOpenPath(null);
       }
     }
     function handleClickOutside(e: MouseEvent) {
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-        setAccountMenuOpen(false);
+        setAccountMenuPath(null);
       }
     }
     if (accountMenuOpen) {
@@ -83,11 +100,6 @@ export function SiteHeader({ session }: SiteHeaderProps) {
       };
     }
   }, [accountMenuOpen]);
-
-  useEffect(() => {
-    setAccountMenuOpen(false);
-    setMobileOpen(false);
-  }, [pathname]);
 
   function handleSearchSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();

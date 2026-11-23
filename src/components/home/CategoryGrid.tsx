@@ -44,7 +44,7 @@ export function CategoryGrid({
   return (
     <section
       aria-labelledby="categories-heading"
-      className="bori-container py-2 lg:py-2.5"
+      className="bori-container py-2.5 lg:py-3"
     >
       <div className="flex flex-col gap-3 md:flex-row md:items-center md:gap-5">
         {/* Left Title + Teal Underline + Divider */}
@@ -52,7 +52,7 @@ export function CategoryGrid({
           <div>
             <h2
               id="categories-heading"
-              className="text-[19px] font-extrabold italic leading-[1.12] tracking-[-0.02em] text-[#111018] sm:text-[21px]"
+              className="text-[20px] font-extrabold italic leading-[1.12] tracking-[-0.02em] text-[#111018] sm:text-[22px]"
             >
               <span className="block">Explore by</span>
               <span className="block">Category</span>
@@ -63,18 +63,18 @@ export function CategoryGrid({
             />
           </div>
           <span
-            className="hidden h-14 w-px bg-[#D7D4E2] md:block"
+            className="hidden h-16 w-px bg-[#D7D4E2] md:block"
             aria-hidden="true"
           />
         </div>
 
-        {/* Right Compact Rounded-Square Tiles (Scrollable Strip with Smooth Feedback) */}
+        {/* Right Enlarged Rounded-Square Tiles (+15% size, icons & labels) */}
         <div className="min-w-0 flex-1">
           {categories.length > 0 ? (
             <div
               role="list"
               aria-label="Campus marketplace categories"
-              className="flex items-center gap-2.5 overflow-x-auto pb-1.5 pt-0.5 no-scrollbar sm:gap-3"
+              className="flex items-center gap-3 overflow-x-auto pb-1.5 pt-0.5 no-scrollbar sm:gap-3.5"
             >
               {categories.map((category) => {
                 const style =
@@ -84,17 +84,17 @@ export function CategoryGrid({
                     key={category.id}
                     role="listitem"
                     href={`/marketplace?category=${encodeURIComponent(category.slug)}${demoParam}`}
-                    className={`group flex h-[90px] w-[92px] shrink-0 flex-col items-center justify-center rounded-2xl border ${style.border} ${style.bg} p-2 text-center shadow-[0_1px_3px_rgba(20,18,26,0.04)] transition-all hover:-translate-y-0.5 hover:shadow-[0_4px_12px_rgba(20,18,26,0.08)] press-feedback sm:h-[94px] sm:w-[96px]`}
+                    className={`group flex h-[104px] w-[106px] shrink-0 flex-col items-center justify-center rounded-2xl border ${style.border} ${style.bg} p-2.5 text-center shadow-[0_1px_3px_rgba(20,18,26,0.04)] transition-all hover:-translate-y-0.5 hover:shadow-[0_4px_12px_rgba(20,18,26,0.08)] press-feedback sm:h-[108px] sm:w-[110px]`}
                   >
                     <div
-                      className={`flex h-9 w-9 items-center justify-center rounded-xl shadow-xs ${style.iconBg}`}
+                      className={`flex h-10 w-10 items-center justify-center rounded-xl shadow-xs sm:h-11 sm:w-11 ${style.iconBg}`}
                     >
                       <CategoryIcon
                         icon={category.icon}
-                        className="h-5 w-5"
+                        className="h-[22px] w-[22px] sm:h-6 sm:w-6"
                       />
                     </div>
-                    <span className="mt-1.5 line-clamp-2 w-full text-[11px] font-bold leading-tight text-[#14121A] group-hover:text-[#4E2A84]">
+                    <span className="mt-2 line-clamp-2 w-full text-[12px] font-bold leading-tight text-[#14121A] group-hover:text-[#4E2A84] sm:text-[12.5px]">
                       {category.name}
                     </span>
                   </Link>
@@ -105,12 +105,12 @@ export function CategoryGrid({
               <Link
                 role="listitem"
                 href={`/marketplace?type=free${demoParam}`}
-                className="group flex h-[90px] w-[92px] shrink-0 flex-col items-center justify-center rounded-2xl border border-[#DDF2F2] bg-[#F2FAFA] p-2 text-center shadow-[0_1px_3px_rgba(20,18,26,0.04)] transition-all hover:-translate-y-0.5 hover:bg-[#E7F6F6] hover:shadow-[0_4px_12px_rgba(20,18,26,0.08)] press-feedback sm:h-[94px] sm:w-[96px]"
+                className="group flex h-[104px] w-[106px] shrink-0 flex-col items-center justify-center rounded-2xl border border-[#DDF2F2] bg-[#F2FAFA] p-2.5 text-center shadow-[0_1px_3px_rgba(20,18,26,0.04)] transition-all hover:-translate-y-0.5 hover:bg-[#E7F6F6] hover:shadow-[0_4px_12px_rgba(20,18,26,0.08)] press-feedback sm:h-[108px] sm:w-[110px]"
               >
-                <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-white text-[#008386] shadow-xs">
-                  <Gift className="h-5 w-5" aria-hidden="true" />
+                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-white text-[#008386] shadow-xs sm:h-11 sm:w-11">
+                  <Gift className="h-[22px] w-[22px] sm:h-6 sm:w-6" aria-hidden="true" />
                 </div>
-                <span className="mt-1.5 line-clamp-2 w-full text-[11px] font-bold leading-tight text-[#14121A] group-hover:text-[#008386]">
+                <span className="mt-2 line-clamp-2 w-full text-[12px] font-bold leading-tight text-[#14121A] group-hover:text-[#008386] sm:text-[12.5px]">
                   Free Items
                 </span>
               </Link>
@@ -119,54 +119,54 @@ export function CategoryGrid({
               <Link
                 role="listitem"
                 href={`/marketplace${demoOnly}`}
-                className="group flex h-[90px] w-[92px] shrink-0 flex-col items-center justify-center rounded-2xl border border-[#ECE7F6] bg-[#F8F6FD] p-2 text-center shadow-[0_1px_3px_rgba(20,18,26,0.04)] transition-all hover:-translate-y-0.5 hover:bg-[#F1EDFB] hover:shadow-[0_4px_12px_rgba(20,18,26,0.08)] press-feedback sm:h-[94px] sm:w-[96px]"
+                className="group flex h-[104px] w-[106px] shrink-0 flex-col items-center justify-center rounded-2xl border border-[#ECE7F6] bg-[#F8F6FD] p-2.5 text-center shadow-[0_1px_3px_rgba(20,18,26,0.04)] transition-all hover:-translate-y-0.5 hover:bg-[#F1EDFB] hover:shadow-[0_4px_12px_rgba(20,18,26,0.08)] press-feedback sm:h-[108px] sm:w-[110px]"
               >
-                <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-white text-[#4E2A84] shadow-xs">
-                  <LayoutGrid className="h-5 w-5" aria-hidden="true" />
+                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-white text-[#4E2A84] shadow-xs sm:h-11 sm:w-11">
+                  <LayoutGrid className="h-[22px] w-[22px] sm:h-6 sm:w-6" aria-hidden="true" />
                 </div>
-                <span className="mt-1.5 line-clamp-2 w-full text-[11px] font-bold leading-tight text-[#4E2A84]">
+                <span className="mt-2 line-clamp-2 w-full text-[12px] font-bold leading-tight text-[#4E2A84] sm:text-[12.5px]">
                   All Categories
                 </span>
               </Link>
             </div>
           ) : source === "auth_required" ? (
-            <div className="flex flex-wrap items-center gap-2.5">
+            <div className="flex flex-wrap items-center gap-3">
               <Link
                 href="/marketplace"
-                className="group flex h-[90px] w-[92px] shrink-0 flex-col items-center justify-center rounded-2xl border border-[#ECE7F6] bg-[#F8F6FD] p-2 text-center shadow-xs hover:border-[#4E2A84]"
+                className="group flex h-[104px] w-[106px] shrink-0 flex-col items-center justify-center rounded-2xl border border-[#ECE7F6] bg-[#F8F6FD] p-2.5 text-center shadow-xs hover:border-[#4E2A84] sm:h-[108px] sm:w-[110px]"
               >
-                <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-white text-[#4E2A84] shadow-xs">
-                  <LayoutGrid className="h-5 w-5" aria-hidden="true" />
+                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-white text-[#4E2A84] shadow-xs sm:h-11 sm:w-11">
+                  <LayoutGrid className="h-[22px] w-[22px] sm:h-6 sm:w-6" aria-hidden="true" />
                 </div>
-                <span className="mt-1.5 text-[11px] font-bold text-[#14121A]">
+                <span className="mt-2 text-[12px] font-bold text-[#14121A] sm:text-[12.5px]">
                   Marketplace
                 </span>
               </Link>
               <Link
                 href="/marketplace?type=service"
-                className="group flex h-[90px] w-[92px] shrink-0 flex-col items-center justify-center rounded-2xl border border-[#DEECF8] bg-[#F2F7FC] p-2 text-center shadow-xs hover:border-[#1D70B8]"
+                className="group flex h-[104px] w-[106px] shrink-0 flex-col items-center justify-center rounded-2xl border border-[#DEECF8] bg-[#F2F7FC] p-2.5 text-center shadow-xs hover:border-[#1D70B8] sm:h-[108px] sm:w-[110px]"
               >
-                <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-white text-[#1D70B8] shadow-xs">
-                  <CategoryIcon icon="wrench" className="h-5 w-5" />
+                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-white text-[#1D70B8] shadow-xs sm:h-11 sm:w-11">
+                  <CategoryIcon icon="wrench" className="h-[22px] w-[22px] sm:h-6 sm:w-6" />
                 </div>
-                <span className="mt-1.5 text-[11px] font-bold text-[#14121A]">
+                <span className="mt-2 text-[12px] font-bold text-[#14121A] sm:text-[12.5px]">
                   Services
                 </span>
               </Link>
               <Link
                 href="/marketplace?type=free"
-                className="group flex h-[90px] w-[92px] shrink-0 flex-col items-center justify-center rounded-2xl border border-[#DDF2F2] bg-[#F2FAFA] p-2 text-center shadow-xs hover:border-[#008386]"
+                className="group flex h-[104px] w-[106px] shrink-0 flex-col items-center justify-center rounded-2xl border border-[#DDF2F2] bg-[#F2FAFA] p-2.5 text-center shadow-xs hover:border-[#008386] sm:h-[108px] sm:w-[110px]"
               >
-                <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-white text-[#008386] shadow-xs">
-                  <Gift className="h-5 w-5" aria-hidden="true" />
+                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-white text-[#008386] shadow-xs sm:h-11 sm:w-11">
+                  <Gift className="h-[22px] w-[22px] sm:h-6 sm:w-6" aria-hidden="true" />
                 </div>
-                <span className="mt-1.5 text-[11px] font-bold text-[#14121A]">
+                <span className="mt-2 text-[12px] font-bold text-[#14121A] sm:text-[12.5px]">
                   Free Items
                 </span>
               </Link>
               <Link
                 href="/login"
-                className="inline-flex items-center gap-2 rounded-xl border border-[#4E2A84]/35 bg-[#F7F3FC] px-4 py-3 text-[13px] font-bold text-[#4E2A84] hover:bg-[#4E2A84] hover:text-white press-feedback"
+                className="inline-flex items-center gap-2 rounded-xl border border-[#4E2A84]/35 bg-[#F7F3FC] px-4 py-3 text-[13.5px] font-bold text-[#4E2A84] hover:bg-[#4E2A84] hover:text-white press-feedback"
               >
                 <LogIn className="h-4 w-4" aria-hidden="true" />
                 <span>Sign in to view all live categories</span>

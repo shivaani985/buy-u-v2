@@ -2,10 +2,8 @@ import Link from "next/link";
 import { Info } from "lucide-react";
 import { CategoryGrid } from "@/components/home/CategoryGrid";
 import { EditorialHero } from "@/components/home/EditorialHero";
-import { FreeItemsSection } from "@/components/home/FreeItemsSection";
 import { HomeListingSection } from "@/components/home/HomeListingSection";
-import { PromoBanners } from "@/components/home/PromoBanners";
-import { StudentServicesSection } from "@/components/home/StudentServicesSection";
+import { ServicesAndFreeColumns } from "@/components/home/ServicesAndFreeColumns";
 import { getCategories, getListings } from "@/lib/catalog";
 import { getSessionSummary } from "@/lib/supabase/server";
 
@@ -23,7 +21,6 @@ export default async function HomePage({ searchParams }: HomePageProps) {
     getListings({ useDemo }),
   ]);
 
-  // Separate listings by kind for dedicated preview sections
   const serviceListings = listingsResult.data.filter(
     (item) => item.listingType === "service"
   );
@@ -55,17 +52,17 @@ export default async function HomePage({ searchParams }: HomePageProps) {
         </div>
       ) : null}
 
-      {/* 1. Compact Bori Hero (~25% lower vertical height) */}
+      {/* 1. Balanced Bori Hero */}
       <EditorialHero session={session} />
 
-      {/* 2. Compact Rounded-Square Category Navigation */}
+      {/* 2. Enlarged Rounded-Square Category Navigation */}
       <CategoryGrid
         categories={categoriesResult.data}
         source={categoriesResult.source}
         useDemo={useDemo}
       />
 
-      {/* 3. Latest on Campus (Product-First Grid with Heading, Subheading & View All) */}
+      {/* 3. Latest on Campus (Compact Product-First Grid) */}
       <HomeListingSection
         listings={listingsResult.data}
         source={listingsResult.source}
@@ -73,18 +70,9 @@ export default async function HomePage({ searchParams }: HomePageProps) {
         useDemo={useDemo}
       />
 
-      {/* 4. Compact Promotional Banners (Student Services & Free Items Highlights) */}
-      <PromoBanners useDemo={useDemo} />
-
-      {/* 5. Student Services Discovery Preview */}
-      <StudentServicesSection
+      {/* 4. Side-by-Side Student Services & Free Items Columns (Banner + Previews) */}
+      <ServicesAndFreeColumns
         services={serviceListings}
-        source={listingsResult.source}
-        useDemo={useDemo}
-      />
-
-      {/* 6. Free Items Community Discovery Preview */}
-      <FreeItemsSection
         freeItems={freeListings}
         source={listingsResult.source}
         useDemo={useDemo}
