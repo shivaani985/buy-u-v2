@@ -33,6 +33,21 @@ export function formatShortDate(iso: string): string {
   }).format(date);
 }
 
+export function formatRelativeTime(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "Recently";
+  const now = Date.now();
+  const diffSec = Math.max(0, Math.floor((now - date.getTime()) / 1000));
+  if (diffSec < 60) return "Just now";
+  const diffMin = Math.floor(diffSec / 60);
+  if (diffMin < 60) return `${diffMin}m ago`;
+  const diffHr = Math.floor(diffMin / 60);
+  if (diffHr < 24) return `${diffHr}h ago`;
+  const diffDays = Math.floor(diffHr / 24);
+  if (diffDays < 7) return `${diffDays}d ago`;
+  return formatShortDate(iso);
+}
+
 const PUBLIC_BUCKETS = new Set(["listings", "free-items"]);
 
 /**

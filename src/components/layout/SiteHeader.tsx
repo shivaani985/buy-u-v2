@@ -1,17 +1,17 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
   Bell,
-  ChevronDown,
   LogOut,
   Menu,
   MessageCircle,
   Search,
   ShieldCheck,
+  ShoppingCart,
   User,
   X,
 } from "lucide-react";
@@ -27,6 +27,8 @@ export function SiteHeader({ session }: SiteHeaderProps) {
   const router = useRouter();
   const [searchQuery, setSearchQuery] = useState("");
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
 
   const role = (session.profile?.university_role ?? "").toLowerCase();
   const isStaff = session.isAuthenticated && role === "staff";
@@ -34,6 +36,7 @@ export function SiteHeader({ session }: SiteHeaderProps) {
     session.profile?.display_name ||
     session.email?.split("@")[0] ||
     "Account";
+  const initials = displayName.slice(0, 2).toUpperCase();
 
   // Role-aware Sell link: Staff never see a misleading Sell entry
   const sellHref = session.isAuthenticated
@@ -57,6 +60,34 @@ export function SiteHeader({ session }: SiteHeaderProps) {
         ]
       : []),
   ];
+
+  // Close menus on outside click, Escape key, or navigation
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        setAccountMenuOpen(false);
+        setMobileOpen(false);
+      }
+    }
+    function handleClickOutside(e: MouseEvent) {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setAccountMenuOpen(false);
+      }
+    }
+    if (accountMenuOpen) {
+      window.addEventListener("keydown", handleKeyDown);
+      document.addEventListener("mousedown", handleClickOutside);
+      return () => {
+        window.removeEventListener("keydown", handleKeyDown);
+        document.removeEventListener("mousedown", handleClickOutside);
+      };
+    }
+  }, [accountMenuOpen]);
+
+  useEffect(() => {
+    setAccountMenuOpen(false);
+    setMobileOpen(false);
+  }, [pathname]);
 
   function handleSearchSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -86,10 +117,10 @@ export function SiteHeader({ session }: SiteHeaderProps) {
             priority
           />
           <span
-            className="hidden h-7 w-[1.5px] bg-[#C9C5D6] sm:block"
+            className="hidden h-7 w-[1.5px] bg-[#C9C5D6] xl:block"
             aria-hidden="true"
           />
-          <span className="hidden flex-col leading-[1.15] sm:flex">
+          <span className="hidden flex-col leading-[1.15] xl:flex">
             <span className="text-[11px] font-bold tracking-tight text-[#14121A]">
               UMS
             </span>
@@ -102,7 +133,7 @@ export function SiteHeader({ session }: SiteHeaderProps) {
         {/* Primary Navigation (Desktop) */}
         <nav
           aria-label="Primary"
-          className="hidden items-center gap-1 lg:flex xl:gap-1.5"
+          className="hidden items-center gap-0.5 lg:flex xl:gap-1.5"
         >
           {navLinks.map((link) => {
             const isHomeActive = link.href === "/" && pathname === "/";
@@ -114,7 +145,7 @@ export function SiteHeader({ session }: SiteHeaderProps) {
                 key={link.label}
                 href={link.href}
                 title={link.title}
-                className={`rounded-lg px-3.5 py-2 text-[14px] font-semibold transition-colors whitespace-nowrap ${
+                className={`rounded-lg px-2.5 py-1.5 text-[13px] font-semibold transition-colors whitespace-nowrap xl:px-3.5 xl:py-2 xl:text-[14px] ${
                   isActive
                     ? "bg-[#4E2A84] text-white"
                     : "text-[#14121A] hover:bg-[#F4F2FA] hover:text-[#4E2A84]"
@@ -129,7 +160,7 @@ export function SiteHeader({ session }: SiteHeaderProps) {
           {session.isActiveAdmin ? (
             <Link
               href="/admin"
-              className="inline-flex items-center gap-1 rounded-lg px-3 py-2 text-[14px] font-bold text-[#4E2A84] hover:bg-[#F4F2FA] whitespace-nowrap"
+              className="inline-flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-[13px] font-bold text-[#4E2A84] hover:bg-[#F4F2FA] whitespace-nowrap xl:px-3 xl:py-2 xl:text-[14px]"
             >
               <ShieldCheck className="h-4 w-4" aria-hidden="true" />
               <span>Admin</span>
@@ -142,7 +173,7 @@ export function SiteHeader({ session }: SiteHeaderProps) {
           onSubmit={handleSearchSubmit}
           role="search"
           aria-label="Search campus marketplace"
-          className="hidden min-w-[160px] flex-1 max-w-[340px] items-center rounded-full border border-[#CFCBD9] bg-[#FAFAFC] px-3.5 py-1.5 transition-colors focus-within:border-[#4E2A84] focus-within:bg-white md:flex"
+          className="hidden min-w-[110px] flex-1 max-w-[170px] items-center rounded-full border border-[#CFCBD9] bg-[#FAFAFC] px-3 py-1.5 transition-colors focus-within:border-[#4E2A84] focus-within:bg-white md:flex xl:max-w-[300px]"
         >
           <button
             type="submit"
@@ -160,62 +191,138 @@ export function SiteHeader({ session }: SiteHeaderProps) {
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             placeholder="Search items, services..."
-            className="w-full bg-transparent text-[13.5px] text-[#14121A] placeholder:text-[#656173] focus:outline-none"
+            className="w-full bg-transparent text-[13px] text-[#14121A] placeholder:text-[#656173] focus:outline-none"
           />
         </form>
 
-        {/* Utility Icons + Profile (Desktop) */}
-        <div className="hidden items-center gap-2 lg:flex">
+        {/* Desktop Utility Group: Cart | Messages | Notifications | Account Hamburger */}
+        <div className="hidden items-center gap-1.5 lg:flex xl:gap-2">
+          {/* Shopping Cart (Task 4: Honest coming-soon / disabled state) */}
+          <button
+            type="button"
+            disabled
+            aria-disabled="true"
+            title="Shopping Cart — coming in Phase 3"
+            aria-label="Shopping Cart (Coming in Phase 3)"
+            className="flex h-9 w-9 items-center justify-center rounded-full border border-[#E6E4EE] text-[#555062] opacity-80 cursor-not-allowed hover:border-[#4E2A84]"
+          >
+            <ShoppingCart className="h-[18px] w-[18px]" aria-hidden="true" />
+          </button>
+
+          {/* Messages (Shown on xl screens to maintain breathing room on tablet) */}
           <button
             type="button"
             disabled
             aria-disabled="true"
             title="Messages — coming in Phase 5"
             aria-label="Messages (coming in Phase 5)"
-            className="flex h-9 w-9 items-center justify-center rounded-full text-[#706C7E] opacity-70 cursor-not-allowed"
+            className="hidden h-9 w-9 items-center justify-center rounded-full text-[#706C7E] opacity-70 cursor-not-allowed xl:flex"
           >
             <MessageCircle className="h-[19px] w-[19px]" aria-hidden="true" />
           </button>
 
+          {/* Notifications (Shown on xl screens to maintain breathing room on tablet) */}
           <button
             type="button"
             disabled
             aria-disabled="true"
             title="Notifications — coming in Phase 5"
             aria-label="Notifications (coming in Phase 5)"
-            className="flex h-9 w-9 items-center justify-center rounded-full text-[#706C7E] opacity-70 cursor-not-allowed"
+            className="hidden h-9 w-9 items-center justify-center rounded-full text-[#706C7E] opacity-70 cursor-not-allowed xl:flex"
           >
             <Bell className="h-[19px] w-[19px]" aria-hidden="true" />
           </button>
 
-          <span className="h-5 w-px bg-[#DCD9E6]" aria-hidden="true" />
+          <span className="hidden h-5 w-px bg-[#DCD9E6] xl:block" aria-hidden="true" />
 
+          {/* Task 5: Compact Animated Account Hamburger Menu */}
           {session.isAuthenticated ? (
-            <div className="flex items-center gap-1.5">
-              <Link
-                href="/account"
-                title={`Signed in as ${displayName}`}
-                className="inline-flex items-center gap-1.5 rounded-full border border-[#4E2A84]/30 bg-[#F6F3FB] py-1 pl-1.5 pr-2.5 text-xs font-bold text-[#4E2A84] hover:border-[#4E2A84] hover:bg-[#EFE9F9] press-feedback"
+            <div className="relative" ref={menuRef}>
+              <button
+                type="button"
+                onClick={() => setAccountMenuOpen((prev) => !prev)}
+                aria-expanded={accountMenuOpen}
+                aria-haspopup="menu"
+                aria-controls="account-dropdown-menu"
+                aria-label={`Account menu for ${displayName}`}
+                className="flex items-center gap-2 rounded-full border border-[#DCD9E6] bg-white p-1 pl-2.5 text-[#14121A] transition-all hover:border-[#4E2A84] hover:bg-[#F8F6FD] press-feedback focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4E2A84]"
               >
-                <span className="flex h-7 w-7 items-center justify-center rounded-full bg-[#4E2A84] text-white">
-                  <User className="h-3.5 w-3.5" aria-hidden="true" />
+                <Menu className="h-4 w-4 text-[#3E3B4B]" aria-hidden="true" />
+                <span className="flex h-7 w-7 items-center justify-center rounded-full bg-[#4E2A84] text-xs font-bold text-white shadow-xs">
+                  {initials}
                 </span>
-                <span className="hidden max-w-[100px] truncate xl:inline">
-                  {displayName}
-                </span>
-                <ChevronDown className="h-3.5 w-3.5 text-[#4E2A84]" aria-hidden="true" />
-              </Link>
+              </button>
 
-              <form action={signOutAction}>
-                <button
-                  type="submit"
-                  aria-label="Sign out"
-                  title="Sign out"
-                  className="flex h-8 w-8 items-center justify-center rounded-full border border-[#DCD9E6] bg-white text-[#3E3B4B] hover:border-[#14121A] hover:text-[#14121A] press-feedback"
+              {/* Animated Floating Dropdown */}
+              {accountMenuOpen ? (
+                <div
+                  id="account-dropdown-menu"
+                  role="menu"
+                  aria-orientation="vertical"
+                  className="absolute right-0 top-full mt-2 w-64 origin-top-right rounded-2xl border border-[#E6E3EE] bg-white p-3 shadow-[0_12px_32px_rgba(20,18,26,0.12)] transition-all animate-in fade-in-50 zoom-in-95 duration-150 z-50"
                 >
-                  <LogOut className="h-3.5 w-3.5" aria-hidden="true" />
-                </button>
-              </form>
+                  {/* Account Header */}
+                  <div className="flex items-center gap-3 border-b border-[#F0EDF5] pb-3 px-1">
+                    <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[#4E2A84] text-sm font-bold text-white">
+                      {initials}
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm font-bold text-[#14121A]">
+                        {displayName}
+                      </p>
+                      <p className="truncate text-xs text-[#716C7D]">
+                        {session.email}
+                      </p>
+                      <span className="mt-1 inline-block rounded-md bg-[#F4F1FA] px-1.5 py-0.5 text-[10px] font-bold text-[#4E2A84]">
+                        {role === "student"
+                          ? "Verified Student"
+                          : role === "staff"
+                            ? "UMS Staff"
+                            : "Campus Member"}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Menu Items */}
+                  <div className="py-2 space-y-1">
+                    <Link
+                      href="/account"
+                      role="menuitem"
+                      onClick={() => setAccountMenuOpen(false)}
+                      className="flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm font-semibold text-[#14121A] hover:bg-[#F8F6FD] hover:text-[#4E2A84] transition-colors"
+                    >
+                      <User className="h-4 w-4 text-[#716C7D]" aria-hidden="true" />
+                      <span>My Profile &amp; Overview</span>
+                    </Link>
+
+                    {session.isActiveAdmin ? (
+                      <Link
+                        href="/admin"
+                        role="menuitem"
+                        onClick={() => setAccountMenuOpen(false)}
+                        className="flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm font-bold text-[#4E2A84] hover:bg-[#F4F1FA] transition-colors"
+                      >
+                        <ShieldCheck className="h-4 w-4 text-[#4E2A84]" aria-hidden="true" />
+                        <span>Admin Console</span>
+                      </Link>
+                    ) : null}
+                  </div>
+
+                  {/* Sign Out Item */}
+                  <div className="border-t border-[#F0EDF5] pt-2">
+                    <form action={signOutAction}>
+                      <button
+                        type="submit"
+                        role="menuitem"
+                        className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm font-semibold text-[#BA1A1A] hover:bg-[#FDF2F2] transition-colors"
+                      >
+                        <LogOut className="h-4 w-4" aria-hidden="true" />
+                        <span>Sign Out</span>
+                      </button>
+                    </form>
+                  </div>
+                </div>
+              ) : null}
             </div>
           ) : (
             <Link
@@ -242,7 +349,9 @@ export function SiteHeader({ session }: SiteHeaderProps) {
             onClick={() => setMobileOpen((prev) => !prev)}
             aria-expanded={mobileOpen}
             aria-controls="mobile-nav-drawer"
-            aria-label={mobileOpen ? "Close navigation menu" : "Open navigation menu"}
+            aria-label={
+              mobileOpen ? "Close navigation menu" : "Open navigation menu"
+            }
             className="flex h-10 w-10 items-center justify-center rounded-lg border border-[#DCD9E6] bg-white text-[#14121A] hover:bg-[#F7F7F9]"
           >
             {mobileOpen ? (
@@ -258,20 +367,16 @@ export function SiteHeader({ session }: SiteHeaderProps) {
       {mobileOpen ? (
         <div
           id="mobile-nav-drawer"
-          className="border-t border-[#E6E4EE] bg-white px-4 py-4 sm:px-6 lg:hidden"
+          className="border-t border-[#E6E4EE] bg-white p-4 lg:hidden"
         >
           <form
             onSubmit={handleSearchSubmit}
             role="search"
-            aria-label="Mobile marketplace search"
-            className="mb-4 flex items-center rounded-full border border-[#CFCBD9] bg-[#FAFAFC] px-3.5 py-2 focus-within:border-[#4E2A84] focus-within:bg-white"
+            aria-label="Mobile search campus marketplace"
+            className="mb-3 flex items-center rounded-full border border-[#CFCBD9] bg-[#FAFAFC] px-3.5 py-2"
           >
-            <Search className="mr-2 h-4 w-4 shrink-0 text-[#4A4656]" aria-hidden="true" />
-            <label htmlFor="mobile-search" className="sr-only">
-              Search listings
-            </label>
+            <Search className="mr-2 h-4 w-4 text-[#3E3B4B]" aria-hidden="true" />
             <input
-              id="mobile-search"
               type="search"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
@@ -321,7 +426,7 @@ export function SiteHeader({ session }: SiteHeaderProps) {
                   <form action={signOutAction}>
                     <button
                       type="submit"
-                      className="w-full rounded-lg border border-[#DCD9E6] bg-white px-3 py-2.5 text-left text-sm font-semibold text-[#14121A] hover:bg-[#F7F7F9]"
+                      className="w-full rounded-lg border border-[#DCD9E6] bg-white px-3 py-2.5 text-left text-sm font-semibold text-[#BA1A1A] hover:bg-[#FDF2F2]"
                     >
                       Sign Out
                     </button>
