@@ -12,6 +12,7 @@ import {
   Search,
   ShieldCheck,
   ShoppingCart,
+  Store,
   User,
   X,
 } from "lucide-react";
@@ -48,7 +49,13 @@ export function SiteHeader({ session }: SiteHeaderProps) {
   };
 
   const role = (session.profile?.university_role ?? "").toLowerCase();
+  const status = (session.profile?.status ?? "").toLowerCase();
   const isStaff = session.isAuthenticated && role === "staff";
+  const isEligibleStudent =
+    session.isAuthenticated &&
+    session.isEmailVerified &&
+    role === "student" &&
+    status === "active";
   const displayName =
     session.profile?.display_name ||
     session.email?.split("@")[0] ||
@@ -56,9 +63,11 @@ export function SiteHeader({ session }: SiteHeaderProps) {
   const initials = displayName.slice(0, 2).toUpperCase();
 
   // Role-aware Sell link: Staff never see a misleading Sell entry
-  const sellHref = session.isAuthenticated
-    ? "/account#sell-roadmap"
-    : "/login?next=%2Faccount%23sell-roadmap";
+  const sellHref = isEligibleStudent
+    ? "/seller"
+    : session.isAuthenticated
+      ? "/seller"
+      : "/login?next=%2Fseller";
 
   const navLinks = [
     { href: "/", label: "Home" },
@@ -70,9 +79,9 @@ export function SiteHeader({ session }: SiteHeaderProps) {
           {
             href: sellHref,
             label: "Sell",
-            title: session.isAuthenticated
-              ? "Seller onboarding — Coming Soon in Phase 3"
-              : "Sign in with UMS email for seller onboarding roadmap",
+            title: isEligibleStudent
+              ? "Open your Seller Hub and create campus listings"
+              : "Sign in with a verified UMS student email to sell",
           },
         ]
       : []),
@@ -151,7 +160,10 @@ export function SiteHeader({ session }: SiteHeaderProps) {
             const isHomeActive = link.href === "/" && pathname === "/";
             const isMarketActive =
               link.href === "/marketplace" && pathname === "/marketplace";
-            const isActive = isHomeActive || isMarketActive;
+            const isSellerActive =
+              link.label === "Sell" &&
+              (pathname.startsWith("/seller") || pathname === "/sell");
+            const isActive = isHomeActive || isMarketActive || isSellerActive;
             return (
               <Link
                 key={link.label}
@@ -306,6 +318,18 @@ export function SiteHeader({ session }: SiteHeaderProps) {
                       <User className="h-4 w-4 text-[#716C7D]" aria-hidden="true" />
                       <span>My Profile &amp; Overview</span>
                     </Link>
+
+                    {isEligibleStudent ? (
+                      <Link
+                        href="/seller"
+                        role="menuitem"
+                        onClick={() => setAccountMenuOpen(false)}
+                        className="flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm font-semibold text-[#14121A] hover:bg-[#F8F6FD] hover:text-[#4E2A84] transition-colors"
+                      >
+                        <Store className="h-4 w-4 text-[#008386]" aria-hidden="true" />
+                        <span>Seller Hub</span>
+                      </Link>
+                    ) : null}
 
                     {session.isActiveAdmin ? (
                       <Link

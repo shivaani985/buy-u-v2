@@ -23,13 +23,11 @@ export function EditorialHero({ session }: EditorialHeroProps) {
         icon: "services" as const,
       }
     : {
-        href: session.isAuthenticated
-          ? "/account#sell-roadmap"
-          : "/login?next=%2Faccount%23sell-roadmap",
+        href: session.isAuthenticated ? "/sell" : "/login?next=%2Fsell",
         label: "Sell an Item",
         title: session.isAuthenticated
-          ? "Seller onboarding — Coming Soon in Phase 3"
-          : "Sign in with your UMS email to view upcoming seller onboarding",
+          ? "Create a campus listing or open your storefront"
+          : "Sign in with your UMS student email to start selling",
         icon: "sell" as const,
       };
 

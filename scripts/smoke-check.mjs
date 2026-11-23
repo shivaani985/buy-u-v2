@@ -59,6 +59,21 @@ const routes = [
     mustInclude: ["Explicit Demo Mode", "Casio FX-570EX", "RM 68.00"],
     mustExclude: ["sb_secret_"],
   },
+  {
+    path: "/seller",
+    mustInclude: ["Student Sign-In Required", "@iluv.ums.edu.my"],
+    mustExclude: ["sb_secret_", "account_number"],
+  },
+  {
+    path: "/seller/storefront",
+    mustInclude: ["Student Sign-In Required", "@iluv.ums.edu.my"],
+    mustExclude: ["sb_secret_"],
+  },
+  {
+    path: "/sell",
+    mustInclude: ["Student Sign-In Required", "@iluv.ums.edu.my"],
+    mustExclude: ["sb_secret_"],
+  },
 ];
 
 for (const route of routes) {
