@@ -1,0 +1,233 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import {
+  isValidUuid,
+  mapAtomicUpdateError,
+  validateListingEditInput,
+  validateStatusTransition,
+  validateStockUpdate,
+  validateVariantsInput,
+} from "../src/lib/seller/listing-edit.ts";
+
+test("isValidUuid validates UUIDs strictly", () => {
+  assert.equal(isValidUuid("2990db4c-11d6-4ec9-b4dd-5209a80ed74f"), true);
+  assert.equal(isValidUuid("not-a-uuid"), false);
+  assert.equal(isValidUuid("../etc/passwd"), false);
+});
+
+test("validateStatusTransition allows draft/published/archived and blocks removed", () => {
+  assert.deepEqual(validateStatusTransition("draft", "published"), {
+    ok: true,
+    status: "published",
+  });
+  assert.deepEqual(validateStatusTransition("published", "archived"), {
+    ok: true,
+    status: "archived",
+  });
+  assert.deepEqual(validateStatusTransition("archived", "draft"), {
+    ok: true,
+    status: "draft",
+  });
+  assert.equal(validateStatusTransition("removed", "published").ok, false);
+  assert.equal(validateStatusTransition("draft", "deleted").ok, false);
+});
+
+test("validateStockUpdate protects reserved_quantity and allows 0 for Out of Stock", () => {
+  assert.deepEqual(validateStockUpdate(0, 0, false), {
+    ok: true,
+    quantity: 0,
+    availableStock: 0,
+  });
+  assert.deepEqual(validateStockUpdate(5, 2, false), {
+    ok: true,
+    quantity: 5,
+    availableStock: 3,
+  });
+  // Cannot drop below reserved units
+  assert.equal(validateStockUpdate(1, 2, false).ok, false);
+  // Cannot be negative
+  assert.equal(validateStockUpdate(-1, 0, false).ok, false);
+});
+
+test("validateVariantsInput enforces unique options, reserved stock, locked deletions and computes totals", () => {
+  const existing = [
+    {
+      id: "v1",
+      optionValues: { Size: "M" },
+      priceSen: 2500,
+      quantity: 5,
+      reservedQuantity: 2,
+      active: true,
+    },
+    {
+      id: "v2",
+      optionValues: { Size: "L" },
+      priceSen: 3000,
+      quantity: 4,
+      reservedQuantity: 0,
+      active: true,
+    },
+  ];
+  const referenced = new Set(["v1"]);
+
+  // Valid update: v1 qty >= 2, v2 updated, new variant added
+  const ok = validateVariantsInput({
+    hasVariants: true,
+    isService: false,
+    targetStatus: "published",
+    optionGroups: ["Size"],
+    variants: [
+      { id: "v1", optionValues: { Size: "M" }, priceRm: "25.00", quantity: 3, active: true },
+      { id: "v2", optionValues: { Size: "L" }, priceRm: "28.50", quantity: 4, active: true },
+      { optionValues: { Size: "XL" }, priceRm: "30.00", quantity: 2, active: false },
+    ],
+    existingVariants: existing,
+    referencedVariantIds: referenced,
+  });
+  assert.equal(ok.ok, true);
+  if (ok.ok) {
+    assert.equal(ok.totalQuantity, 7); // active only: 3 + 4
+    assert.equal(ok.minPriceSen, 2500);
+    assert.equal(ok.variants?.length, 3);
+  }
+
+  // Blocks deleting locked variant v1
+  const delLocked = validateVariantsInput({
+    hasVariants: true,
+    isService: false,
+    targetStatus: "published",
+    optionGroups: ["Size"],
+    variants: [
+      { id: "v2", optionValues: { Size: "L" }, priceRm: "28.50", quantity: 4, active: true },
+    ],
+    existingVariants: existing,
+    referencedVariantIds: referenced,
+  });
+  assert.equal(delLocked.ok, false);
+
+  // Blocks reducing v1 quantity below its reservedQuantity (2)
+  const lowQty = validateVariantsInput({
+    hasVariants: true,
+    isService: false,
+    targetStatus: "published",
+    optionGroups: ["Size"],
+    variants: [
+      { id: "v1", optionValues: { Size: "M" }, priceRm: "25.00", quantity: 1, active: true },
+    ],
+    existingVariants: existing,
+    referencedVariantIds: referenced,
+  });
+  assert.equal(lowQty.ok, false);
+
+  // Blocks duplicate option combinations
+  const dup = validateVariantsInput({
+    hasVariants: true,
+    isService: false,
+    targetStatus: "draft",
+    optionGroups: ["Size"],
+    variants: [
+      { id: "v1", optionValues: { Size: "M" }, priceRm: "25.00", quantity: 2, active: true },
+      { optionValues: { Size: "m" }, priceRm: "26.00", quantity: 2, active: true },
+    ],
+    existingVariants: existing,
+    referencedVariantIds: referenced,
+  });
+  assert.equal(dup.ok, false);
+});
+
+test("validateListingEditInput enforces photo cap, archiving, and out-of-stock edits", () => {
+  // Exceeding 4 total photos is blocked
+  const tooManyPhotos = validateListingEditInput({
+    currentStatus: "published",
+    currentReservedQuantity: 0,
+    title: "IOT Box",
+    description: "Student robotics kit in great condition.",
+    listingType: "business",
+    categoryId: "electronics",
+    priceRm: "15.00",
+    quantity: 0,
+    collectionAreaId: "cafe-umskal",
+    condition: "New/Unused",
+    targetStatus: "published",
+    rulesAcknowledged: true,
+    allowOffers: false,
+    keptPhotoPaths: ["a.png", "b.png", "c.png"],
+    newPhotoCount: 2,
+    hasVariants: false,
+    optionGroups: [],
+    variants: [],
+    existingVariants: [],
+    referencedVariantIds: new Set(),
+  });
+  assert.equal(tooManyPhotos.ok, false);
+
+  // Valid Out-of-Stock (qty=0) edit on published listing
+  const outOfStock = validateListingEditInput({
+    currentStatus: "published",
+    currentReservedQuantity: 0,
+    title: "IOT Box",
+    description: "Student robotics kit in great condition.",
+    listingType: "business",
+    categoryId: "electronics",
+    priceRm: "15.00",
+    quantity: 0,
+    collectionAreaId: "cafe-umskal",
+    condition: "New/Unused",
+    targetStatus: "published",
+    rulesAcknowledged: true,
+    allowOffers: false,
+    keptPhotoPaths: ["a.png"],
+    newPhotoCount: 0,
+    hasVariants: false,
+    optionGroups: [],
+    variants: [],
+    existingVariants: [],
+    referencedVariantIds: new Set(),
+  });
+  assert.equal(outOfStock.ok, true);
+  if (outOfStock.ok) {
+    assert.equal(outOfStock.data.quantity, 0);
+    assert.equal(outOfStock.data.status, "published");
+  }
+
+  // Archiving relaxes publish-only rules
+  const archived = validateListingEditInput({
+    currentStatus: "draft",
+    currentReservedQuantity: 0,
+    title: "Old Draft",
+    description: "",
+    listingType: "preloved",
+    categoryId: "books",
+    priceRm: "10.00",
+    quantity: 1,
+    collectionAreaId: "",
+    condition: "",
+    targetStatus: "archived",
+    rulesAcknowledged: false,
+    allowOffers: false,
+    keptPhotoPaths: [],
+    newPhotoCount: 0,
+    hasVariants: false,
+    optionGroups: [],
+    variants: [],
+    existingVariants: [],
+    referencedVariantIds: new Set(),
+  });
+  assert.equal(archived.ok, true);
+  if (archived.ok) assert.equal(archived.data.status, "archived");
+});
+
+test("mapAtomicUpdateError maps concurrency conflicts and permission errors safely", () => {
+  assert.match(
+    mapAtomicUpdateError("concurrent modification: expected updated_at mismatch"),
+    /Reload the page/i
+  );
+  assert.match(
+    mapAtomicUpdateError("quantity cannot be less than reserved_quantity"),
+    /reserved/i
+  );
+  assert.match(
+    mapAtomicUpdateError("permission denied: not owner"),
+    /permission/i
+  );
+});

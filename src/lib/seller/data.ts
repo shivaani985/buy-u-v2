@@ -13,9 +13,14 @@ import {
   type SellerFinancialSummary,
 } from "./financials";
 import {
+  isValidUuid,
+  type ExistingVariantRecord,
+} from "./listing-edit";
+import {
   evaluateSellerEligibility,
   maskPayoutAccount,
   type MaskedPayoutStatus,
+  type SellListingKind,
 } from "./validation";
 
 export interface SellerStorefront {
@@ -393,4 +398,229 @@ export async function getSellFormOptions(session: AuthSessionSummary): Promise<{
     : null;
 
   return { categories, collectionAreas, storefront };
+}
+
+export interface EditablePhotoItem {
+  path: string;
+  url: string;
+}
+
+export interface SellerListingDetail {
+  id: string;
+  sellerId: string;
+  title: string;
+  description: string;
+  listingType: SellListingKind;
+  categoryId: string;
+  priceSen: number;
+  quantity: number;
+  reservedQuantity: number;
+  availableStock: number;
+  collectionAreaId: string;
+  condition: string;
+  status: string;
+  allowOffers: boolean;
+  rulesAcknowledged: boolean;
+  hasVariants: boolean;
+  optionGroups: string[];
+  photos: EditablePhotoItem[];
+  variants: ExistingVariantRecord[];
+  lockedVariantIds: string[];
+  updatedAt: string;
+  publishedAt: string | null;
+}
+
+export type SellerListingEditLoadResult =
+  | {
+      status: "ok";
+      listing: SellerListingDetail;
+      categories: Category[];
+      collectionAreas: CollectionAreaOption[];
+    }
+  | { status: "not_found" | "forbidden" | "error"; message: string };
+
+/**
+ * Loads a listing strictly for its verified Student owner, including its
+ * variants and which variants are referenced by active order_items.
+ */
+export async function getSellerListingForEdit(
+  session: AuthSessionSummary,
+  listingId: string
+): Promise<SellerListingEditLoadResult> {
+  const eligibility = evaluateSellerEligibility(session);
+  const userId = session.profile?.id;
+  if (!eligibility.eligible || !userId) {
+    return { status: "forbidden", message: "Seller access required." };
+  }
+  if (!isValidUuid(listingId)) {
+    return { status: "not_found", message: "Listing not found." };
+  }
+
+  const env = getPublicSupabaseEnv();
+  const supabase = await createSupabaseServerClient();
+  if (!supabase || !env) {
+    return { status: "error", message: "Supabase client is not configured." };
+  }
+
+  const [listingRes, variantsRes, categoriesRes, areasRes] = await Promise.all([
+    supabase
+      .from("listings")
+      .select(
+        "id, seller_id, kind, is_food, title, description, category_id, condition, price_sen, quantity, reserved_quantity, collection_area_id, allow_offers, has_variants, option_groups, image_paths, rules_acknowledged, status, published_at, updated_at"
+      )
+      .eq("id", listingId)
+      .maybeSingle(),
+    supabase
+      .from("listing_variants")
+      .select("id, option_values, price_sen, quantity, reserved_quantity, active")
+      .eq("listing_id", listingId)
+      .order("id", { ascending: true }),
+    supabase
+      .from("categories")
+      .select("id, name, kind, icon, sort_order, active")
+      .eq("active", true)
+      .order("sort_order", { ascending: true }),
+    supabase
+      .from("collection_areas")
+      .select("id, name")
+      .eq("active", true)
+      .order("name", { ascending: true }),
+  ]);
+
+  if (listingRes.error) {
+    return { status: "error", message: listingRes.error.message };
+  }
+  const row = listingRes.data as {
+    id: string;
+    seller_id: string;
+    kind: string;
+    is_food: boolean;
+    title: string;
+    description: string;
+    category_id: string;
+    condition: string | null;
+    price_sen: number;
+    quantity: number;
+    reserved_quantity: number;
+    collection_area_id: string | null;
+    allow_offers: boolean;
+    has_variants: boolean;
+    option_groups: string[] | null;
+    image_paths: string[] | null;
+    rules_acknowledged: boolean;
+    status: string;
+    published_at: string | null;
+    updated_at: string;
+  } | null;
+
+  if (!row) {
+    return { status: "not_found", message: "Listing not found." };
+  }
+  if (row.seller_id !== userId) {
+    return {
+      status: "forbidden",
+      message: "You can only edit listings that belong to your own storefront.",
+    };
+  }
+
+  const rawVariants = (variantsRes.data ?? []) as Array<{
+    id: string;
+    option_values: Record<string, string> | null;
+    price_sen: number;
+    quantity: number;
+    reserved_quantity: number;
+    active: boolean;
+  }>;
+
+  const variantIds = rawVariants.map((v) => v.id);
+  const lockedSet = new Set<string>();
+  for (const v of rawVariants) {
+    if ((v.reserved_quantity ?? 0) > 0) lockedSet.add(v.id);
+  }
+
+  if (variantIds.length > 0) {
+    const orderItemsRes = await supabase
+      .from("order_items")
+      .select("variant_id")
+      .in("variant_id", variantIds);
+    if (!orderItemsRes.error && orderItemsRes.data) {
+      for (const oi of orderItemsRes.data as Array<{ variant_id: string | null }>) {
+        if (oi.variant_id) lockedSet.add(oi.variant_id);
+      }
+    }
+  }
+
+  const listingType: SellListingKind = row.is_food
+    ? "food"
+    : row.kind === "service"
+      ? "service"
+      : row.kind === "business"
+        ? "business"
+        : "preloved";
+
+  const photos: EditablePhotoItem[] = (row.image_paths ?? [])
+    .map((path) => {
+      const url = resolvePublicStorageUrl("listings", path, env.url);
+      return url ? { path, url } : null;
+    })
+    .filter((p): p is EditablePhotoItem => p !== null);
+
+  const accents: Category["accent"][] = ["purple", "blue", "teal"];
+  const categories: Category[] = (
+    (categoriesRes.data ?? []) as Array<{
+      id: string;
+      name: string;
+      kind: string | null;
+      icon: string | null;
+      sort_order: number | null;
+    }>
+  ).map((c, idx) => ({
+    id: c.id,
+    slug: c.id,
+    name: c.name,
+    kind: c.kind === "service" ? "service" : "product",
+    description: "",
+    icon: c.icon ?? "package",
+    sortOrder: c.sort_order ?? idx + 1,
+    accent: accents[idx % accents.length] ?? "purple",
+  }));
+
+  const collectionAreas = (areasRes.data ?? []) as CollectionAreaOption[];
+
+  return {
+    status: "ok",
+    listing: {
+      id: row.id,
+      sellerId: row.seller_id,
+      title: row.title,
+      description: row.description ?? "",
+      listingType,
+      categoryId: row.category_id,
+      priceSen: row.price_sen ?? 0,
+      quantity: row.quantity ?? 0,
+      reservedQuantity: row.reserved_quantity ?? 0,
+      availableStock: Math.max(0, (row.quantity ?? 0) - (row.reserved_quantity ?? 0)),
+      collectionAreaId: row.collection_area_id ?? "",
+      condition: row.condition ?? "",
+      status: row.status,
+      allowOffers: Boolean(row.allow_offers),
+      rulesAcknowledged: Boolean(row.rules_acknowledged),
+      hasVariants: Boolean(row.has_variants),
+      optionGroups: row.option_groups ?? [],
+      photos,
+      variants: rawVariants.map((v) => ({
+        id: v.id,
+        optionValues: v.option_values ?? {},
+        priceSen: v.price_sen ?? 0,
+        quantity: v.quantity ?? 0,
+        reservedQuantity: v.reserved_quantity ?? 0,
+        active: Boolean(v.active),
+      })),
+      lockedVariantIds: Array.from(lockedSet),
+      updatedAt: row.updated_at,
+      publishedAt: row.published_at,
+    },
+    categories,
+    collectionAreas,
+  };
 }

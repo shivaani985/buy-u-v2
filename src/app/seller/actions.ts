@@ -4,6 +4,14 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { createSupabaseServerClient, getSessionSummary } from "@/lib/supabase/server";
 import {
+  isValidUuid,
+  mapAtomicUpdateError,
+  validateListingEditInput,
+  type EditableListingStatus,
+  type ExistingVariantRecord,
+  type VariantDraftInput,
+} from "@/lib/seller/listing-edit";
+import {
   evaluateSellerEligibility,
   validateImageFileMeta,
   validateListingInput,
@@ -316,5 +324,253 @@ export async function createListingAction(
       validated.data.status === "published"
         ? "Listing published to the UMS campus marketplace."
         : "Listing saved as a draft in your Seller Hub.",
+  };
+}
+
+function safeParseJson<T>(raw: FormDataEntryValue | null, fallback: T): T {
+  if (typeof raw !== "string" || !raw.trim()) return fallback;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+export async function updateListingAction(
+  _prevState: SellerActionState,
+  formData: FormData
+): Promise<SellerActionState> {
+  const auth = await requireEligibleStudent();
+  if (!auth.ok) {
+    return { status: "error", message: auth.error };
+  }
+
+  const listingId = String(formData.get("listingId") ?? "").trim();
+  const expectedUpdatedAt = String(
+    formData.get("expectedUpdatedAt") ?? ""
+  ).trim();
+  if (!isValidUuid(listingId) || !expectedUpdatedAt) {
+    return { status: "error", message: "Invalid listing reference." };
+  }
+
+  // Verify ownership and load authoritative server state (never trust client reserved_quantity)
+  const [existingRes, existingVariantsRes] = await Promise.all([
+    auth.supabase
+      .from("listings")
+      .select("id, seller_id, status, reserved_quantity, published_at, image_paths")
+      .eq("id", listingId)
+      .maybeSingle(),
+    auth.supabase
+      .from("listing_variants")
+      .select("id, option_values, price_sen, quantity, reserved_quantity, active")
+      .eq("listing_id", listingId),
+  ]);
+
+  if (existingRes.error || !existingRes.data) {
+    return { status: "error", message: "Listing not found." };
+  }
+
+  const existing = existingRes.data as {
+    id: string;
+    seller_id: string;
+    status: string;
+    reserved_quantity: number;
+    published_at: string | null;
+    image_paths: string[] | null;
+  };
+
+  if (existing.seller_id !== auth.userId) {
+    return {
+      status: "error",
+      message: "You do not have permission to edit another seller's listing.",
+    };
+  }
+
+  const existingVariants: ExistingVariantRecord[] = (
+    (existingVariantsRes.data ?? []) as Array<{
+      id: string;
+      option_values: Record<string, string> | null;
+      price_sen: number;
+      quantity: number;
+      reserved_quantity: number;
+      active: boolean;
+    }>
+  ).map((v) => ({
+    id: v.id,
+    optionValues: v.option_values ?? {},
+    priceSen: v.price_sen ?? 0,
+    quantity: v.quantity ?? 0,
+    reservedQuantity: v.reserved_quantity ?? 0,
+    active: Boolean(v.active),
+  }));
+
+  const referencedVariantIds = new Set<string>();
+  const existingVarIds = existingVariants.map((v) => v.id);
+  if (existingVarIds.length > 0) {
+    const oiRes = await auth.supabase
+      .from("order_items")
+      .select("variant_id")
+      .in("variant_id", existingVarIds);
+    if (!oiRes.error && oiRes.data) {
+      for (const row of oiRes.data as Array<{ variant_id: string | null }>) {
+        if (row.variant_id) referencedVariantIds.add(row.variant_id);
+      }
+    }
+  }
+
+  // Only allow keeping photo paths that already belong to this listing
+  const allowedExistingPaths = new Set(existing.image_paths ?? []);
+  const keptPhotoPaths = safeParseJson<string[]>(
+    formData.get("keptPhotoPaths"),
+    []
+  ).filter((p) => typeof p === "string" && allowedExistingPaths.has(p));
+
+  const rawFiles = formData
+    .getAll("photos")
+    .filter((entry): entry is File => entry instanceof File && entry.size > 0);
+
+  const hasVariants = formData.get("hasVariants") === "on";
+  const optionGroups = safeParseJson<string[]>(
+    formData.get("optionGroupsJson"),
+    []
+  );
+  const variantsInput = safeParseJson<VariantDraftInput[]>(
+    formData.get("variantsJson"),
+    []
+  );
+
+  const intent = String(
+    formData.get("intent") ?? existing.status
+  ) as EditableListingStatus;
+  const listingType = String(
+    formData.get("listingType") ?? "preloved"
+  ) as SellListingKind;
+
+  const validated = validateListingEditInput({
+    currentStatus: existing.status,
+    currentReservedQuantity: existing.reserved_quantity ?? 0,
+    title: String(formData.get("title") ?? ""),
+    description: String(formData.get("description") ?? ""),
+    listingType,
+    categoryId: String(formData.get("categoryId") ?? ""),
+    priceRm: String(formData.get("priceRm") ?? ""),
+    quantity: String(formData.get("quantity") ?? "0"),
+    collectionAreaId: String(formData.get("collectionAreaId") ?? ""),
+    condition: String(formData.get("condition") ?? ""),
+    targetStatus: intent,
+    rulesAcknowledged: formData.get("rulesAcknowledged") === "on",
+    allowOffers: formData.get("allowOffers") === "on",
+    keptPhotoPaths,
+    newPhotoCount: rawFiles.length,
+    hasVariants,
+    optionGroups,
+    variants: variantsInput,
+    existingVariants,
+    referencedVariantIds,
+  });
+
+  if (!validated.ok) {
+    return { status: "error", message: validated.error };
+  }
+
+  // Upload any newly added photos (track separately for safe rollback cleanup)
+  const newlyUploadedPaths: string[] = [];
+  for (let i = 0; i < rawFiles.length; i++) {
+    const file = rawFiles[i];
+    if (!file) continue;
+    const metaCheck = validateImageFileMeta({
+      name: file.name,
+      type: file.type,
+      size: file.size,
+    });
+    if (!metaCheck.ok) {
+      if (newlyUploadedPaths.length > 0) {
+        await auth.supabase.storage.from("listings").remove(newlyUploadedPaths);
+      }
+      return { status: "error", message: metaCheck.error };
+    }
+
+    const storagePath = `${auth.userId}/${Date.now()}-${i}.${metaCheck.ext}`;
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const { error: uploadErr } = await auth.supabase.storage
+      .from("listings")
+      .upload(storagePath, bytes, {
+        contentType: file.type,
+        upsert: false,
+      });
+
+    if (uploadErr) {
+      if (newlyUploadedPaths.length > 0) {
+        await auth.supabase.storage.from("listings").remove(newlyUploadedPaths);
+      }
+      return {
+        status: "error",
+        message: `Photo upload failed: ${uploadErr.message}`,
+      };
+    }
+    newlyUploadedPaths.push(storagePath);
+  }
+
+  const finalPhotoPaths = [...keptPhotoPaths, ...newlyUploadedPaths];
+  const now = new Date().toISOString();
+
+  const pPayload = {
+    title: validated.data.title,
+    description: validated.data.description,
+    kind: validated.data.dbKind,
+    is_food: validated.data.isFood,
+    category_id: validated.data.categoryId,
+    condition: validated.data.condition,
+    price_sen: validated.data.priceSen,
+    quantity: validated.data.quantity,
+    collection_area_id: validated.data.collectionAreaId,
+    allow_offers: validated.data.allowOffers,
+    has_variants: validated.data.hasVariants,
+    option_groups: validated.data.optionGroups,
+    image_paths: finalPhotoPaths,
+    rules_acknowledged: validated.data.rulesAcknowledged,
+    status: validated.data.status,
+    published_at:
+      validated.data.status === "published"
+        ? existing.published_at ?? now
+        : existing.published_at,
+  };
+
+  // Atomic update with optimistic concurrency check via existing DB RPC
+  const { error: rpcError } = await auth.supabase.rpc("update_listing_atomic", {
+    p_listing_id: listingId,
+    p_expected_updated_at: expectedUpdatedAt,
+    p_payload: pPayload,
+    p_variants: validated.data.variants,
+  });
+
+  if (rpcError) {
+    // Roll back any newly uploaded orphan images without touching existing order-referenced files
+    if (newlyUploadedPaths.length > 0) {
+      await auth.supabase.storage.from("listings").remove(newlyUploadedPaths);
+    }
+    return {
+      status: "error",
+      message: mapAtomicUpdateError(rpcError.message),
+    };
+  }
+
+  revalidatePath("/seller");
+  revalidatePath(`/sell/${listingId}`);
+  revalidatePath(`/listings/${listingId}`);
+  revalidatePath("/marketplace");
+  revalidatePath("/");
+
+  const successLabel =
+    validated.data.status === "published"
+      ? "Listing updated and published."
+      : validated.data.status === "archived"
+        ? "Listing archived and hidden from the public marketplace."
+        : "Listing changes saved as draft.";
+
+  return {
+    status: "success",
+    createdId: listingId,
+    message: successLabel,
   };
 }

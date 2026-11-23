@@ -74,6 +74,11 @@ const routes = [
     mustInclude: ["Student Sign-In Required", "@iluv.ums.edu.my"],
     mustExclude: ["sb_secret_"],
   },
+  {
+    path: "/sell/2990db4c-11d6-4ec9-b4dd-5209a80ed74f",
+    mustInclude: ["Student Sign-In Required", "@iluv.ums.edu.my"],
+    mustExclude: ["sb_secret_", "IOT Box"],
+  },
 ];
 
 for (const route of routes) {

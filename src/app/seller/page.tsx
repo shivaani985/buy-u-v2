@@ -485,22 +485,26 @@ export default async function SellerHubPage({
                                 {formatRelativeTime(item.updatedAt)}
                               </td>
                               <td className="px-4 py-3 text-right text-xs">
-                                {item.status === "published" ? (
+                                <div className="inline-flex items-center justify-end gap-3">
                                   <Link
-                                    href={`/listings/${encodeURIComponent(item.id)}`}
-                                    className="inline-flex items-center gap-1 font-bold text-[#4E2A84] hover:underline"
+                                    href={`/sell/${encodeURIComponent(item.id)}`}
+                                    className="font-bold text-[#4E2A84] hover:underline"
                                   >
-                                    <span>View</span>
-                                    <ExternalLink
-                                      className="h-3 w-3"
-                                      aria-hidden="true"
-                                    />
+                                    Edit
                                   </Link>
-                                ) : (
-                                  <span className="text-[#858094]">
-                                    Edit soon
-                                  </span>
-                                )}
+                                  {item.status === "published" ? (
+                                    <Link
+                                      href={`/listings/${encodeURIComponent(item.id)}`}
+                                      className="inline-flex items-center gap-1 font-semibold text-[#555062] hover:text-[#14121A] hover:underline"
+                                    >
+                                      <span>View</span>
+                                      <ExternalLink
+                                        className="h-3 w-3"
+                                        aria-hidden="true"
+                                      />
+                                    </Link>
+                                  ) : null}
+                                </div>
                               </td>
                             </tr>
                           );
@@ -554,16 +558,22 @@ export default async function SellerHubPage({
                                     : `Stock: ${item.availableStock}`}
                                 </span>
                               </span>
-                              {item.status === "published" ? (
+                              <div className="flex items-center gap-3">
                                 <Link
-                                  href={`/listings/${encodeURIComponent(item.id)}`}
+                                  href={`/sell/${encodeURIComponent(item.id)}`}
                                   className="font-bold text-[#4E2A84] hover:underline"
                                 >
-                                  View
+                                  Edit
                                 </Link>
-                              ) : (
-                                <span className="text-[#858094]">Draft</span>
-                              )}
+                                {item.status === "published" ? (
+                                  <Link
+                                    href={`/listings/${encodeURIComponent(item.id)}`}
+                                    className="font-semibold text-[#555062] hover:underline"
+                                  >
+                                    View
+                                  </Link>
+                                ) : null}
+                              </div>
                             </div>
                           </div>
                         </div>
