@@ -12,6 +12,7 @@ import {
   Clock,
   Heart,
   MapPin,
+  MessageCircle,
   Minus,
   Package,
   Pencil,
@@ -27,6 +28,7 @@ import {
   toggleFavouriteAction,
   type AddToCartActionState,
 } from "@/app/listings/actions";
+import { startConversationAction } from "@/app/messages/actions";
 import { ListingImage } from "@/components/shared/ListingImage";
 import type { ProductDetail } from "@/lib/buyer/data";
 import type { BuyerEligibilityResult } from "@/lib/buyer/validation";
@@ -93,6 +95,8 @@ export function ProductDetailClient({
     text: string;
   } | null>(null);
   const [isFavPending, startFavTransition] = useTransition();
+  const [chatError, setChatError] = useState<string | null>(null);
+  const [isChatPending, startChatTransition] = useTransition();
 
   const [cartState, cartFormAction, isCartPending] = useActionState(
     addToCartAction,
@@ -767,6 +771,48 @@ export function ProductDetailClient({
                     }`}
                   >
                     {favFeedback.text}
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
+
+            {/* Chat with Seller (eligible products & services; never self-messaging) */}
+            {!product.isOwner &&
+            !product.isDemo &&
+            !product.isFreeNotice &&
+            isPublished &&
+            Boolean(product.seller.sellerId) ? (
+              <div className="space-y-1.5">
+                <button
+                  type="button"
+                  disabled={!buyerEligibility.eligible || isChatPending}
+                  onClick={() => {
+                    if (!buyerEligibility.eligible || isChatPending) return;
+                    setChatError(null);
+                    startChatTransition(async () => {
+                      const res = await startConversationAction({
+                        sellerId: product.seller.sellerId,
+                        listingId: product.id,
+                      });
+                      if (res.ok && res.href) {
+                        router.push(res.href);
+                      } else {
+                        setChatError(
+                          res.error || "Could not open chat right now."
+                        );
+                      }
+                    });
+                  }}
+                  className="flex w-full items-center justify-center gap-2 rounded-xl border border-[#4E2A84] bg-white px-5 py-2.5 text-sm font-semibold text-[#4E2A84] transition hover:bg-[#FAF8FD] active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <MessageCircle className="h-4 w-4" aria-hidden="true" />
+                  <span>
+                    {isChatPending ? "Opening Chat..." : "Chat with Seller"}
+                  </span>
+                </button>
+                {chatError ? (
+                  <p role="alert" className="text-xs font-semibold text-[#B42318]">
+                    {chatError}
                   </p>
                 ) : null}
               </div>

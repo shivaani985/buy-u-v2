@@ -257,22 +257,24 @@ export function SiteHeader({
             ) : null}
           </Link>
 
-          {/* Messages (Real unread message count when > 0; hidden when 0) */}
-          <button
-            type="button"
-            disabled
-            aria-disabled="true"
+          {/* Messages (Live /messages link with real unread notification count) */}
+          <Link
+            href="/messages"
             title={
               unreadMessageCount > 0
-                ? `Messages (${unreadMessageCount} unread) — inbox coming soon`
-                : "Messages — inbox coming soon"
+                ? `Messages (${unreadMessageCount} unread)`
+                : "Messages"
             }
             aria-label={
               unreadMessageCount > 0
                 ? `Messages, ${unreadMessageCount} unread`
                 : "Messages"
             }
-            className="relative hidden h-9 w-9 items-center justify-center rounded-full text-[#706C7E] opacity-75 cursor-not-allowed xl:flex"
+            className={`relative hidden h-9 w-9 items-center justify-center rounded-full border transition-colors press-feedback xl:flex focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4E2A84] ${
+              pathname === "/messages"
+                ? "border-[#4E2A84] bg-[#F4F0FA] text-[#4E2A84]"
+                : "border-transparent text-[#3E3B4B] hover:border-[#4E2A84] hover:text-[#4E2A84]"
+            }`}
           >
             <MessageCircle className="h-[19px] w-[19px]" aria-hidden="true" />
             {unreadMessageCount > 0 ? (
@@ -283,7 +285,7 @@ export function SiteHeader({
                 {unreadMessageCount > 99 ? "99+" : unreadMessageCount}
               </span>
             ) : null}
-          </button>
+          </Link>
 
           {/* Notifications (Shown on xl screens to maintain breathing room on tablet) */}
           <button
@@ -370,6 +372,23 @@ export function SiteHeader({
                         <span>Seller Hub</span>
                       </Link>
                     ) : null}
+
+                    <Link
+                      href="/messages"
+                      role="menuitem"
+                      onClick={() => setAccountMenuOpen(false)}
+                      className="flex items-center justify-between gap-2 rounded-lg px-2.5 py-2 text-sm font-semibold text-[#14121A] hover:bg-[#F4F1FA] hover:text-[#4E2A84] transition-colors"
+                    >
+                      <span className="flex items-center gap-2.5">
+                        <MessageCircle className="h-4 w-4 text-[#4E2A84]" aria-hidden="true" />
+                        <span>Messages</span>
+                      </span>
+                      {unreadMessageCount > 0 ? (
+                        <span className="text-xs font-bold text-[#4E2A84]">
+                          {unreadMessageCount}
+                        </span>
+                      ) : null}
+                    </Link>
 
                     {session.isActiveAdmin ? (
                       <Link
@@ -497,6 +516,19 @@ export function SiteHeader({
                 {link.label}
               </Link>
             ))}
+
+            <Link
+              href="/messages"
+              onClick={() => setMobileOpen(false)}
+              className="flex items-center justify-between rounded-lg px-3 py-2.5 text-sm font-semibold text-[#14121A] hover:bg-[#F4F2FA] hover:text-[#4E2A84]"
+            >
+              <span>Messages</span>
+              {unreadMessageCount > 0 ? (
+                <span className="text-xs font-bold text-[#4E2A84]">
+                  {unreadMessageCount} unread
+                </span>
+              ) : null}
+            </Link>
 
             {session.isActiveAdmin ? (
               <Link
