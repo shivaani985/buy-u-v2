@@ -19,6 +19,7 @@ import {
   Send,
   ShieldCheck,
   Store,
+  Tag,
   X,
 } from "lucide-react";
 import {
@@ -26,11 +27,26 @@ import {
   markConversationReadAction,
   sendMessageAction,
 } from "@/app/messages/actions";
+import {
+  acceptOfferAction,
+  cancelOfferAction,
+  createOfferAction,
+  declineOfferAction,
+} from "@/app/messages/offer-actions";
+import { OfferCard } from "@/components/messages/OfferCard";
 import type {
   ChatMessageItem,
   ConversationListItem,
   LinkedListingContext,
 } from "@/lib/messages/data";
+import {
+  computeOfferExpiresAt,
+  computeReservationExpiresAt,
+  mergeChatTimeline,
+  resolveEffectiveOfferStatus,
+  type OfferCardItem,
+  type OfferStatus,
+} from "@/lib/messages/offers";
 import {
   buildChatAttachmentPath,
   CHAT_ATTACHMENTS_BUCKET,
@@ -46,6 +62,7 @@ interface MessagesClientProps {
   initialConversations: ConversationListItem[];
   initialActiveConversationId: string | null;
   initialMessages: ChatMessageItem[];
+  initialOffers: OfferCardItem[];
   initialHasOlder: boolean;
   activeListing: LinkedListingContext | null;
   hasExplicitConversationParam: boolean;
@@ -125,6 +142,7 @@ export function MessagesClient({
   initialConversations,
   initialActiveConversationId,
   initialMessages,
+  initialOffers,
   initialHasOlder,
   activeListing,
   hasExplicitConversationParam,
@@ -132,6 +150,16 @@ export function MessagesClient({
   const [conversations, setConversations] =
     useState<ConversationListItem[]>(initialConversations);
   const [messages, setMessages] = useState<ChatMessageItem[]>(initialMessages);
+  const [offers, setOffers] = useState<OfferCardItem[]>(initialOffers);
+  const [nowMs, setNowMs] = useState<number>(() => getCurrentTimestampMs());
+  const [offerPanelOpen, setOfferPanelOpen] = useState(false);
+  const [offerAmountRm, setOfferAmountRm] = useState("");
+  const [offerFormError, setOfferFormError] = useState<string | null>(null);
+  const [isSubmittingOffer, setIsSubmittingOffer] = useState(false);
+  const [busyOfferIds, setBusyOfferIds] = useState<Record<string, boolean>>({});
+  const [offerRowErrors, setOfferRowErrors] = useState<
+    Record<string, string | null>
+  >({});
   const [optimisticMessages, setOptimisticMessages] = useState<
     OptimisticMessage[]
   >([]);
@@ -155,10 +183,24 @@ export function MessagesClient({
   const activeConversation =
     conversations.find((c) => c.id === initialActiveConversationId) ?? null;
 
-  // Auto-scroll smoothly when messages or optimistic bubbles change
+  // Refresh countdown timers every 30 seconds while offers exist
+  useEffect(() => {
+    if (offers.length === 0) return;
+    const timer = window.setInterval(() => {
+      setNowMs(getCurrentTimestampMs());
+    }, 30000);
+    return () => window.clearInterval(timer);
+  }, [offers.length]);
+
+  // Auto-scroll smoothly when messages, offers, or optimistic bubbles change
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [messages.length, optimisticMessages.length, initialActiveConversationId]);
+  }, [
+    messages.length,
+    offers.length,
+    optimisticMessages.length,
+    initialActiveConversationId,
+  ]);
 
   // Mark active conversation unread notifications as read on open and sync navbar
   useEffect(() => {
@@ -188,6 +230,7 @@ export function MessagesClient({
     let disposed = false;
     let msgChannel: ReturnType<typeof supabase.channel> | null = null;
     let notifChannel: ReturnType<typeof supabase.channel> | null = null;
+    let offersChannel: ReturnType<typeof supabase.channel> | null = null;
 
     const {
       data: { subscription: authSub },
@@ -364,6 +407,85 @@ export function MessagesClient({
           }
         )
         .subscribe();
+
+      // Realtime offer card updates (INSERT / UPDATE) for the active conversation
+      if (initialActiveConversationId) {
+        offersChannel = supabase
+          .channel(`chat-offers-${initialActiveConversationId}`)
+          .on(
+            "postgres_changes",
+            {
+              event: "*",
+              schema: "public",
+              table: "offers",
+              filter: `conversation_id=eq.${initialActiveConversationId}`,
+            },
+            (payload) => {
+              const raw = payload.new as {
+                id?: string;
+                conversation_id?: string;
+                listing_id?: string;
+                buyer_id?: string;
+                seller_id?: string;
+                offer_price_sen?: number;
+                status?: string;
+                order_id?: string | null;
+                created_at?: string;
+                responded_at?: string | null;
+                expires_at?: string | null;
+                reservation_expires_at?: string | null;
+                reservation_released_at?: string | null;
+              };
+              if (!raw?.id || !raw.conversation_id || !raw.created_at) return;
+
+              const status = (
+                [
+                  "pending",
+                  "accepted",
+                  "declined",
+                  "cancelled",
+                  "expired",
+                ].includes(raw.status ?? "")
+                  ? raw.status
+                  : "pending"
+              ) as OfferStatus;
+
+              const mapped: OfferCardItem = {
+                id: raw.id,
+                conversationId: raw.conversation_id,
+                listingId: raw.listing_id ?? "",
+                buyerId: raw.buyer_id ?? "",
+                sellerId: raw.seller_id ?? "",
+                offerPriceSen: Number(raw.offer_price_sen ?? 0),
+                status,
+                orderId: raw.order_id ?? null,
+                createdAt: raw.created_at,
+                respondedAt: raw.responded_at ?? null,
+                expiresAt: computeOfferExpiresAt(
+                  raw.created_at,
+                  raw.expires_at
+                ),
+                reservationExpiresAt:
+                  status === "accepted"
+                    ? computeReservationExpiresAt(
+                        raw.responded_at ?? null,
+                        raw.reservation_expires_at
+                      )
+                    : raw.reservation_expires_at ?? null,
+                reservationReleasedAt: raw.reservation_released_at ?? null,
+              };
+
+              setOffers((prev) => {
+                const exists = prev.some((o) => o.id === mapped.id);
+                if (exists) {
+                  return prev.map((o) => (o.id === mapped.id ? mapped : o));
+                }
+                return [...prev, mapped];
+              });
+            }
+          )
+          .subscribe();
+      }
     }
 
     void setupRealtime();
@@ -373,6 +495,7 @@ export function MessagesClient({
       authSub.unsubscribe();
       if (msgChannel) void supabase.removeChannel(msgChannel);
       if (notifChannel) void supabase.removeChannel(notifChannel);
+      if (offersChannel) void supabase.removeChannel(offersChannel);
     };
   }, [initialActiveConversationId, currentUserId]);
 
@@ -607,6 +730,98 @@ export function MessagesClient({
       prev.filter((m) => m.clientId !== clientId)
     );
   }
+
+  function upsertOffer(nextOffer: OfferCardItem) {
+    setOffers((prev) => {
+      const exists = prev.some((o) => o.id === nextOffer.id);
+      return exists
+        ? prev.map((o) => (o.id === nextOffer.id ? nextOffer : o))
+        : [...prev, nextOffer];
+    });
+  }
+
+  async function handleCreateOffer(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    if (!activeConversation || !activeListing || isSubmittingOffer) return;
+    setOfferFormError(null);
+    setIsSubmittingOffer(true);
+
+    try {
+      const res = await createOfferAction({
+        conversationId: activeConversation.id,
+        listingId: activeListing.id,
+        amountRm: offerAmountRm,
+      });
+
+      if (!res.ok || !res.offer) {
+        setOfferFormError(res.error || "Could not submit offer. Please retry.");
+        return;
+      }
+
+      upsertOffer(res.offer);
+      setOfferAmountRm("");
+      setOfferPanelOpen(false);
+    } catch {
+      setOfferFormError("Network error while submitting offer. Please retry.");
+    } finally {
+      setIsSubmittingOffer(false);
+    }
+  }
+
+  async function runOfferAction(
+    offerId: string,
+    fn: (id: string) => Promise<{
+      ok: boolean;
+      offer?: OfferCardItem;
+      error?: string;
+    }>
+  ) {
+    if (busyOfferIds[offerId]) return;
+    setBusyOfferIds((prev) => ({ ...prev, [offerId]: true }));
+    setOfferRowErrors((prev) => ({ ...prev, [offerId]: null }));
+
+    try {
+      const res = await fn(offerId);
+      if (!res.ok) {
+        setOfferRowErrors((prev) => ({
+          ...prev,
+          [offerId]: res.error || "Action failed. Please try again.",
+        }));
+      } else if (res.offer) {
+        upsertOffer(res.offer);
+      }
+    } catch {
+      setOfferRowErrors((prev) => ({
+        ...prev,
+        [offerId]: "Network error. Please try again.",
+      }));
+    } finally {
+      setBusyOfferIds((prev) => ({ ...prev, [offerId]: false }));
+    }
+  }
+
+  const canMakeOffer = Boolean(
+    activeConversation &&
+      !activeConversation.isBlocked &&
+      activeListing &&
+      activeListing.status === "published" &&
+      activeListing.kind === "pre_loved" &&
+      activeListing.allowOffers &&
+      activeListing.sellerId.toLowerCase() !== currentUserId.toLowerCase() &&
+      (activeListing.availableStock ?? 0) >= 1
+  );
+
+  const hasActivePendingOffer = Boolean(
+    activeListing &&
+      offers.some(
+        (o) =>
+          o.listingId === activeListing.id &&
+          o.buyerId.toLowerCase() === currentUserId.toLowerCase() &&
+          resolveEffectiveOfferStatus(o, nowMs) === "pending"
+      )
+  );
+
+  const timelineEntries = mergeChatTimeline(messages, offers);
 
   function handleLoadOlder() {
     if (!activeConversation || !hasOlder || isLoadingOlder) return;
@@ -962,13 +1177,47 @@ export function MessagesClient({
                 </div>
               ) : null}
 
-              {messages.length === 0 && optimisticMessages.length === 0 ? (
+              {timelineEntries.length === 0 &&
+              optimisticMessages.length === 0 ? (
                 <p className="py-10 text-center text-xs text-[#6B6779]">
                   No messages yet. Say hello to start the conversation.
                 </p>
               ) : (
                 <>
-                  {messages.map((msg) => {
+                  {timelineEntries.map((entry) => {
+                    if (entry.kind === "offer") {
+                      const offer = entry.offer;
+                      return (
+                        <OfferCard
+                          key={`offer-${offer.id}`}
+                          offer={offer}
+                          currentUserId={currentUserId}
+                          peerName={
+                            activeConversation.peer.shopName ||
+                            activeConversation.peer.displayName
+                          }
+                          listingTitle={
+                            activeListing && activeListing.id === offer.listingId
+                              ? activeListing.title
+                              : null
+                          }
+                          nowMs={nowMs}
+                          isBusy={Boolean(busyOfferIds[offer.id])}
+                          error={offerRowErrors[offer.id] ?? null}
+                          onAccept={(id) =>
+                            void runOfferAction(id, acceptOfferAction)
+                          }
+                          onDecline={(id) =>
+                            void runOfferAction(id, declineOfferAction)
+                          }
+                          onCancel={(id) =>
+                            void runOfferAction(id, cancelOfferAction)
+                          }
+                        />
+                      );
+                    }
+
+                    const msg = entry.message;
                     const isOwn = msg.senderId === currentUserId;
                     return (
                       <div
@@ -1138,6 +1387,101 @@ export function MessagesClient({
               )}
               <div ref={messagesEndRef} />
             </div>
+
+            {/* Compact Collapsible Make an Offer Panel (Pre-Loved allow_offers only) */}
+            {canMakeOffer && activeListing ? (
+              <div className="border-t border-[#ECEAF3] bg-[#FAF9FC] px-3.5 py-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setOfferFormError(null);
+                      setOfferPanelOpen((v) => !v);
+                    }}
+                    aria-expanded={offerPanelOpen}
+                    className="inline-flex items-center gap-1.5 text-xs font-bold text-[#4E2A84] transition hover:underline"
+                  >
+                    <Tag className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span>
+                      {offerPanelOpen ? "Hide Offer Form" : "Make an Offer"}
+                    </span>
+                  </button>
+                  <span className="text-[11px] text-[#6B6779]">
+                    Listed at {formatSenToRm(activeListing.priceSen)} · Min RM
+                    2.00
+                  </span>
+                </div>
+
+                {offerPanelOpen ? (
+                  <form
+                    onSubmit={handleCreateOffer}
+                    className="mt-2.5 space-y-2"
+                  >
+                    {hasActivePendingOffer ? (
+                      <p className="text-xs font-semibold text-[#1D70B8]">
+                        You already have a pending offer on this listing. Cancel
+                        it or wait for a response before sending another.
+                      </p>
+                    ) : (
+                      <div className="flex flex-wrap items-center gap-2">
+                        <label htmlFor="offer-amount-rm" className="sr-only">
+                          Offer amount in RM
+                        </label>
+                        <div className="flex min-w-[140px] flex-1 items-center rounded-xl border border-[#DCD9E6] bg-white px-3 py-1.5 focus-within:border-[#4E2A84]">
+                          <span className="mr-1.5 text-xs font-bold text-[#6B6779]">
+                            RM
+                          </span>
+                          <input
+                            id="offer-amount-rm"
+                            type="text"
+                            inputMode="decimal"
+                            value={offerAmountRm}
+                            onChange={(e) => setOfferAmountRm(e.target.value)}
+                            placeholder="e.g. 12.00"
+                            disabled={isSubmittingOffer}
+                            className="w-full bg-transparent text-sm font-semibold text-[#14121A] placeholder:text-[#7A7588] focus:outline-none"
+                          />
+                        </div>
+                        <button
+                          type="submit"
+                          disabled={
+                            isSubmittingOffer ||
+                            offerAmountRm.trim().length === 0
+                          }
+                          className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-xl bg-[#4E2A84] px-4 text-xs font-bold text-white transition hover:bg-[#3F216B] disabled:cursor-not-allowed disabled:bg-[#C9C4D6]"
+                        >
+                          {isSubmittingOffer ? (
+                            <Loader2
+                              className="h-3.5 w-3.5 animate-spin"
+                              aria-hidden="true"
+                            />
+                          ) : null}
+                          <span>Send Offer</span>
+                        </button>
+                      </div>
+                    )}
+
+                    {offerFormError ? (
+                      <p
+                        role="alert"
+                        className="flex items-center gap-1.5 text-xs font-semibold text-[#B42318]"
+                      >
+                        <AlertCircle
+                          className="h-3.5 w-3.5 shrink-0"
+                          aria-hidden="true"
+                        />
+                        <span>{offerFormError}</span>
+                      </p>
+                    ) : null}
+
+                    <p className="text-[11px] text-[#6B6779]">
+                      Offers expire in 24 hours. Accepted offers hold 1 unit for
+                      30 minutes.
+                    </p>
+                  </form>
+                ) : null}
+              </div>
+            ) : null}
 
             {/* Compact Composer */}
             <div className="border-t border-[#ECEAF3] bg-white px-3.5 py-3">

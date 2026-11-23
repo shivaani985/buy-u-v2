@@ -115,6 +115,7 @@ export default async function MessagesPage({
           initialConversations={data.conversations}
           initialActiveConversationId={data.activeConversationId}
           initialMessages={data.activeMessages}
+          initialOffers={data.activeOffers}
           initialHasOlder={data.hasOlderMessages}
           activeListing={data.activeListing}
           hasExplicitConversationParam={Boolean(requestedConvId)}

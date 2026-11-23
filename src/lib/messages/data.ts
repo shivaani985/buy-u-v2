@@ -3,6 +3,12 @@ import { getPublicSupabaseEnv } from "@/lib/supabase/env";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import type { AuthSessionSummary } from "@/types/marketplace";
 import {
+  computeOfferExpiresAt,
+  computeReservationExpiresAt,
+  type OfferCardItem,
+  type OfferStatus,
+} from "./offers";
+import {
   countUnreadByConversation,
   evaluateMessagingEligibility,
   isValidUuid,
@@ -64,6 +70,7 @@ export interface MessagesPageData {
   conversations: ConversationListItem[];
   activeConversationId: string | null;
   activeMessages: ChatMessageItem[];
+  activeOffers: OfferCardItem[];
   hasOlderMessages: boolean;
   activeListing: LinkedListingContext | null;
   totalUnread: number;
@@ -90,6 +97,54 @@ interface RawMessageRow {
   service_request_id: string | null;
   edited_at: string | null;
   created_at: string;
+}
+
+export interface RawOfferRow {
+  id: string;
+  conversation_id: string;
+  listing_id: string;
+  buyer_id: string;
+  seller_id: string;
+  offer_price_sen: number;
+  status: string;
+  order_id: string | null;
+  created_at: string;
+  responded_at: string | null;
+  expires_at?: string | null;
+  reservation_expires_at?: string | null;
+  reservation_released_at?: string | null;
+}
+
+export function mapRawOffer(row: RawOfferRow): OfferCardItem {
+  const status = (
+    ["pending", "accepted", "declined", "cancelled", "expired"].includes(
+      row.status
+    )
+      ? row.status
+      : "pending"
+  ) as OfferStatus;
+
+  return {
+    id: row.id,
+    conversationId: row.conversation_id,
+    listingId: row.listing_id,
+    buyerId: row.buyer_id,
+    sellerId: row.seller_id,
+    offerPriceSen: Number(row.offer_price_sen ?? 0),
+    status,
+    orderId: row.order_id ?? null,
+    createdAt: row.created_at,
+    respondedAt: row.responded_at ?? null,
+    expiresAt: computeOfferExpiresAt(row.created_at, row.expires_at),
+    reservationExpiresAt:
+      status === "accepted"
+        ? computeReservationExpiresAt(
+            row.responded_at,
+            row.reservation_expires_at
+          )
+        : row.reservation_expires_at ?? null,
+    reservationReleasedAt: row.reservation_released_at ?? null,
+  };
 }
 
 export function mapRawMessage(row: RawMessageRow): ChatMessageItem {
@@ -120,6 +175,7 @@ export async function getMessagesPageData(
       conversations: [],
       activeConversationId: null,
       activeMessages: [],
+      activeOffers: [],
       hasOlderMessages: false,
       activeListing: null,
       totalUnread: 0,
@@ -134,6 +190,7 @@ export async function getMessagesPageData(
       conversations: [],
       activeConversationId: null,
       activeMessages: [],
+      activeOffers: [],
       hasOlderMessages: false,
       activeListing: null,
       totalUnread: 0,
@@ -168,6 +225,7 @@ export async function getMessagesPageData(
       conversations: [],
       activeConversationId: null,
       activeMessages: [],
+      activeOffers: [],
       hasOlderMessages: false,
       activeListing: null,
       totalUnread: 0,
@@ -195,6 +253,7 @@ export async function getMessagesPageData(
       conversations: [],
       activeConversationId: null,
       activeMessages: [],
+      activeOffers: [],
       hasOlderMessages: false,
       activeListing: null,
       totalUnread,
@@ -216,7 +275,7 @@ export async function getMessagesPageData(
       : null) ?? convRows[0];
   const activeConversationId = activeConv?.id ?? null;
 
-  const [profilesRes, storefrontsRes, recentMsgsRes, activeMsgsRes] =
+  const [profilesRes, storefrontsRes, recentMsgsRes, activeMsgsRes, activeOffersRes] =
     await Promise.all([
       supabase
         .from("public_profiles")
@@ -241,6 +300,16 @@ export async function getMessagesPageData(
             .eq("conversation_id", activeConversationId)
             .order("created_at", { ascending: false })
             .limit(MESSAGE_PAGE_SIZE + 1)
+        : Promise.resolve({ data: [], error: null }),
+      activeConversationId
+        ? supabase
+            .from("offers")
+            .select(
+              "id,conversation_id,listing_id,buyer_id,seller_id,offer_price_sen,status,order_id,created_at,responded_at"
+            )
+            .eq("conversation_id", activeConversationId)
+            .order("created_at", { ascending: true })
+            .limit(100)
         : Promise.resolve({ data: [], error: null }),
     ]);
 
@@ -307,6 +376,9 @@ export async function getMessagesPageData(
     ? rawActiveMessages.slice(0, MESSAGE_PAGE_SIZE)
     : rawActiveMessages;
   const activeMessages = trimmedActiveDesc.reverse().map(mapRawMessage);
+  const activeOffers = ((activeOffersRes.data ?? []) as RawOfferRow[]).map(
+    mapRawOffer
+  );
 
   // Collect listing IDs to resolve titles + active listing right-pane details
   const listingIdsToFetch = new Set<string>(latestListingByConv.values());
@@ -455,6 +527,7 @@ export async function getMessagesPageData(
     conversations,
     activeConversationId,
     activeMessages,
+    activeOffers,
     hasOlderMessages,
     activeListing,
     totalUnread,
