@@ -60,6 +60,16 @@ export function evaluateBuyerEligibility(
     };
   }
 
+  const role = (session.profile?.university_role ?? "").toLowerCase();
+  if (role !== "student" && role !== "staff") {
+    return {
+      eligible: false,
+      userId,
+      code: "restricted",
+      reason: "Only active UMS Students and Staff can shop on Buy-U.",
+    };
+  }
+
   return {
     eligible: true,
     userId,

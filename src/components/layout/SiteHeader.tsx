@@ -227,22 +227,24 @@ export function SiteHeader({
 
         {/* Desktop Utility Group: Cart | Messages | Notifications | Account Hamburger */}
         <div className="hidden items-center gap-1.5 lg:flex xl:gap-2">
-          {/* Shopping Cart (Real cart_items count when > 0; honest disabled state until checkout phase) */}
-          <button
-            type="button"
-            disabled
-            aria-disabled="true"
+          {/* Shopping Cart (Live /cart link with real cart_items badge) */}
+          <Link
+            href="/cart"
             title={
               cartCount > 0
-                ? `Shopping Cart (${cartCount} items) — checkout coming soon`
-                : "Shopping Cart — checkout coming soon"
+                ? `Shopping Cart (${cartCount} items)`
+                : "Shopping Cart"
             }
             aria-label={
               cartCount > 0
                 ? `Shopping Cart, ${cartCount} items`
                 : "Shopping Cart"
             }
-            className="relative flex h-9 w-9 items-center justify-center rounded-full border border-[#E6E4EE] text-[#555062] opacity-80 cursor-not-allowed hover:border-[#4E2A84]"
+            className={`relative flex h-9 w-9 items-center justify-center rounded-full border transition-colors press-feedback focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4E2A84] ${
+              pathname === "/cart"
+                ? "border-[#4E2A84] bg-[#F4F0FA] text-[#4E2A84]"
+                : "border-[#E6E4EE] text-[#3E3B4B] hover:border-[#4E2A84] hover:text-[#4E2A84]"
+            }`}
           >
             <ShoppingCart className="h-[18px] w-[18px]" aria-hidden="true" />
             {cartCount > 0 ? (
@@ -253,7 +255,7 @@ export function SiteHeader({
                 {cartCount > 99 ? "99+" : cartCount}
               </span>
             ) : null}
-          </button>
+          </Link>
 
           {/* Messages (Real unread message count when > 0; hidden when 0) */}
           <button
@@ -411,6 +413,25 @@ export function SiteHeader({
 
         {/* Mobile Compact Actions */}
         <div className="flex items-center gap-2 lg:hidden">
+          <Link
+            href="/cart"
+            aria-label={
+              cartCount > 0
+                ? `Shopping Cart, ${cartCount} items`
+                : "Shopping Cart"
+            }
+            className="relative flex h-10 w-10 items-center justify-center rounded-full border border-[#DCD9E6] bg-white text-[#14121A] hover:border-[#4E2A84] hover:text-[#4E2A84]"
+          >
+            <ShoppingCart className="h-4 w-4" aria-hidden="true" />
+            {cartCount > 0 ? (
+              <span
+                aria-hidden="true"
+                className="absolute -top-0.5 -right-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-[#4E2A84] px-1 text-[10px] font-bold leading-none text-white"
+              >
+                {cartCount > 99 ? "99+" : cartCount}
+              </span>
+            ) : null}
+          </Link>
           <Link
             href={session.isAuthenticated ? "/account" : "/login"}
             aria-label={session.isAuthenticated ? "Account" : "Sign In"}

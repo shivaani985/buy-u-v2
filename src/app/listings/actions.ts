@@ -297,6 +297,7 @@ export async function addToCartAction(
   }
 
   revalidatePath("/");
+  revalidatePath("/cart");
   revalidatePath("/marketplace");
   revalidatePath(`/listings/${listing.id}`);
 
