@@ -383,14 +383,14 @@ export function validateListingEditInput(input: ListingEditValidationInput) {
       error: "Listing title must be between 3 and 120 characters.",
     };
   }
-  if (description.length < 10) {
+  if (description.length < 20) {
     return {
       ok: false as const,
-      error: "Add at least 10 characters of description.",
+      error: "Add at least 20 characters of description.",
     };
   }
-  if (description.length > 2000) {
-    return { ok: false as const, error: "Description cannot exceed 2,000 characters." };
+  if (description.length > 3000) {
+    return { ok: false as const, error: "Description cannot exceed 3,000 characters." };
   }
   if (!categoryId) {
     return { ok: false as const, error: "Select a campus category." };

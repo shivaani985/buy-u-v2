@@ -504,10 +504,15 @@ export function EditListingForm({
               id="description"
               name="description"
               rows={4}
-              maxLength={2000}
+              minLength={20}
+              maxLength={3000}
+              required
               defaultValue={listing.description}
               className="mt-1.5 w-full rounded-xl border border-[#CFCBD9] bg-white px-3.5 py-2.5 text-sm text-[#14121A] focus:border-[#4E2A84] focus:outline-none"
             />
+            <p className="mt-1 text-xs text-[#6E6A7C]">
+              Between 20 and 3,000 characters required.
+            </p>
           </div>
         </div>
       </div>

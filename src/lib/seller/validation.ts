@@ -204,16 +204,16 @@ export function validateListingInput(
     };
   }
 
-  if (description.length < 10) {
+  if (description.length < 20) {
     return {
       ok: false,
-      error: "Add at least 10 characters of description.",
+      error: "Add at least 20 characters of description.",
     };
   }
-  if (description.length > 2000) {
+  if (description.length > 3000) {
     return {
       ok: false,
-      error: "Description cannot exceed 2,000 characters.",
+      error: "Description cannot exceed 3,000 characters.",
     };
   }
 

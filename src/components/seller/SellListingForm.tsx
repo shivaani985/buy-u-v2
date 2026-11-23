@@ -372,13 +372,15 @@ export function SellListingForm({
             id="description"
             name="description"
             rows={4}
-            maxLength={2000}
+            minLength={20}
+            maxLength={3000}
+            required
             placeholder="Describe item details, specs, any wear or defects, or service scope and turnaround notes."
             className="mt-1.5 w-full rounded-xl border border-[#CFCBD9] bg-white px-3.5 py-2.5 text-sm text-[#14121A] placeholder:text-[#858094] focus:border-[#4E2A84] focus:outline-none"
           />
           <p className="mt-1 text-xs text-[#6E6A7C]">
-            At least 10 characters required to publish. Drafts can be saved
-            earlier and completed later.
+            Between 20 and 3,000 characters required for drafts and published
+            listings.
           </p>
         </div>
 

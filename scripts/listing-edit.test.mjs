@@ -280,3 +280,57 @@ test("mapAtomicUpdateError maps concurrency conflicts and permission errors safe
     /permission/i
   );
 });
+
+test("description length boundaries enforce 20-3000 trimmed characters on create and edit", async () => {
+  const { validateListingInput } = await import("../src/lib/seller/validation.ts");
+
+  const baseCreate = {
+    title: "Casio FX-570EX",
+    listingType: "preloved",
+    categoryId: "electronics",
+    priceRm: "45.00",
+    quantity: 1,
+    collectionAreaId: "cafe-umskal",
+    condition: "Like New",
+    status: "draft",
+    rulesAcknowledged: false,
+  };
+
+  const baseEdit = {
+    currentStatus: "draft",
+    currentReservedQuantity: 0,
+    title: "Casio FX-570EX",
+    listingType: "preloved",
+    categoryId: "electronics",
+    priceRm: "45.00",
+    quantity: 1,
+    collectionAreaId: "cafe-umskal",
+    condition: "Like New",
+    targetStatus: "draft",
+    rulesAcknowledged: false,
+    allowOffers: false,
+    keptPhotoPaths: [],
+    newPhotoCount: 0,
+    hasVariants: false,
+    optionGroups: [],
+    variants: [],
+    existingVariants: [],
+    referencedVariantIds: new Set(),
+  };
+
+  // 19 trimmed chars (even with padding spaces) -> rejected
+  assert.equal(validateListingInput({ ...baseCreate, description: `   ${"a".repeat(19)}   ` }).ok, false);
+  assert.equal(validateListingEditInput({ ...baseEdit, description: `   ${"a".repeat(19)}   ` }).ok, false);
+
+  // 20 trimmed chars -> accepted
+  assert.equal(validateListingInput({ ...baseCreate, description: "a".repeat(20) }).ok, true);
+  assert.equal(validateListingEditInput({ ...baseEdit, description: "a".repeat(20) }).ok, true);
+
+  // 3000 trimmed chars -> accepted
+  assert.equal(validateListingInput({ ...baseCreate, description: "a".repeat(3000) }).ok, true);
+  assert.equal(validateListingEditInput({ ...baseEdit, description: "a".repeat(3000) }).ok, true);
+
+  // 3001 trimmed chars -> rejected
+  assert.equal(validateListingInput({ ...baseCreate, description: "a".repeat(3001) }).ok, false);
+  assert.equal(validateListingEditInput({ ...baseEdit, description: "a".repeat(3001) }).ok, false);
+});
