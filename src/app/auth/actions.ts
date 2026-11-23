@@ -5,6 +5,7 @@ import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import {
   sanitizeNextPath,
+  validateAnyEmailFormat,
   validatePassword,
   validateUniversityEmail,
 } from "@/lib/auth/validation";
@@ -160,7 +161,9 @@ export async function requestPasswordReset(
   formData: FormData
 ): Promise<AuthActionState> {
   const emailRaw = String(formData.get("email") ?? "");
-  const emailCheck = validateUniversityEmail(emailRaw);
+  // Allow standard email syntax so recovered admin Gmail can also use password recovery.
+  // resetPasswordForEmail never creates accounts or elevates privileges.
+  const emailCheck = validateAnyEmailFormat(emailRaw);
   if (!emailCheck.valid) {
     return { status: "error", message: emailCheck.error };
   }

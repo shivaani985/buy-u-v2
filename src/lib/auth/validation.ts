@@ -67,6 +67,26 @@ export function validateUniversityEmail(raw: string): EmailValidationResult {
   };
 }
 
+/**
+ * Validates standard email syntax for password recovery only.
+ * Does NOT bypass university domain checks on /login or /register.
+ */
+export function validateAnyEmailFormat(raw: string): {
+  valid: boolean;
+  normalizedEmail: string;
+  error?: string;
+} {
+  const normalized = raw.trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)) {
+    return {
+      valid: false,
+      normalizedEmail: normalized,
+      error: "Enter a valid email address.",
+    };
+  }
+  return { valid: true, normalizedEmail: normalized };
+}
+
 export function validatePassword(password: string): string | null {
   if (!password || password.length < 8) {
     return "Password must be at least 8 characters long.";

@@ -42,7 +42,7 @@ export function ForgotPasswordForm() {
           htmlFor="forgot-email"
           className="block text-xs font-bold uppercase tracking-wider text-[#14121A]"
         >
-          UMS Email Address
+          Account Email Address
         </label>
         <input
           id="forgot-email"
@@ -50,7 +50,7 @@ export function ForgotPasswordForm() {
           type="email"
           autoComplete="email"
           required
-          placeholder="student@iluv.ums.edu.my or staff@ums.edu.my"
+          placeholder="UMS email or registered administrator email"
           className="mt-1.5 w-full border border-[#14121A] bg-white px-3.5 py-2.5 text-sm text-[#14121A] placeholder:text-[#5B5668] focus:border-[#4E2A84]"
         />
       </div>

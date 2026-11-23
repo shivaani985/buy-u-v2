@@ -38,7 +38,7 @@ export function AdminLoginForm() {
           type="email"
           autoComplete="email"
           required
-          placeholder="admin@ums.edu.my"
+          placeholder="Enter administrator email"
           className="mt-1.5 w-full border border-[#14121A] bg-white px-3.5 py-2.5 text-sm text-[#14121A] placeholder:text-[#5B5668] focus:border-[#4E2A84]"
         />
       </div>
