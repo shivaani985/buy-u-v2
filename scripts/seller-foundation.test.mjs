@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { computeSellerFinancials } from "../src/lib/seller/financials.ts";
 import {
   evaluateSellerEligibility,
   maskPayoutAccount,
@@ -231,5 +232,82 @@ test("validateImageFileMeta enforces MIME whitelist and 5MB cap", () => {
   assert.equal(
     validateImageFileMeta({ name: "huge.png", type: "image/png", size: 6 * 1024 * 1024 }).ok,
     false
+  );
+});
+
+test("computeSellerFinancials excludes unpaid orders, deducts commissions/refunds/payouts accurately", () => {
+  const now = new Date("2026-11-23T12:00:00Z");
+  const result = computeSellerFinancials({
+    now,
+    range: "7d",
+    orders: [
+      {
+        id: "o1",
+        order_code: "BU-2611-0DB3",
+        subtotal_sen: 1500,
+        commission_sen: 30,
+        seller_net_sen: 1470,
+        total_paid_sen: 1600,
+        status: "completed",
+        paid_at: "2026-11-22T10:00:00Z",
+        completed_at: "2026-11-22T11:00:00Z",
+        created_at: "2026-11-22T09:50:00Z",
+      },
+      {
+        id: "o2",
+        order_code: "BU-2611-0DB4",
+        subtotal_sen: 2500,
+        commission_sen: 50,
+        seller_net_sen: 2450,
+        total_paid_sen: 2600,
+        status: "paid",
+        paid_at: "2026-11-23T08:00:00Z",
+        completed_at: null,
+        created_at: "2026-11-23T07:55:00Z",
+      },
+      {
+        // Unpaid order must NEVER count toward sales or pending settlement
+        id: "o3",
+        order_code: "BU-2611-UNPD",
+        subtotal_sen: 9900,
+        commission_sen: 198,
+        seller_net_sen: 9702,
+        total_paid_sen: 10000,
+        status: "pending_payment",
+        paid_at: null,
+        completed_at: null,
+        created_at: "2026-11-23T09:00:00Z",
+      },
+    ],
+    orderItems: [
+      { order_id: "o1", title_snapshot: "IOT Box", quantity: 1 },
+      { order_id: "o2", title_snapshot: "Study Notes", quantity: 2 },
+    ],
+    payments: [
+      { order_id: "o1", status: "paid", verified_at: "2026-11-22T10:00:00Z" },
+      { order_id: "o2", status: "paid", verified_at: "2026-11-23T08:00:00Z" },
+    ],
+    payoutRequests: [
+      {
+        id: "p1",
+        amount_sen: 500,
+        status: "paid",
+        processed_at: "2026-11-23T06:00:00Z",
+        created_at: "2026-11-23T05:00:00Z",
+      },
+    ],
+    disputes: [],
+  });
+
+  assert.equal(result.available, true);
+  assert.equal(result.totalSalesSen, 4000); // o1 (1500) + o2 (2500), excludes o3 (unpaid)
+  assert.equal(result.pendingSettlementSen, 2450); // o2 net awaiting handover
+  assert.equal(result.availableForPayoutSen, 970); // o1 net (1470) - paid payout (500)
+  assert.equal(result.totalPaidOutSen, 500);
+  assert.equal(result.verifiedOrderCount, 2);
+  assert.equal(result.chartPoints.length, 7);
+  assert.equal(
+    result.chartPoints.reduce((sum, p) => sum + p.amountSen, 0),
+    4000
   );
 });

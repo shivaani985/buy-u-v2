@@ -21,9 +21,15 @@ import type { AuthSessionSummary } from "@/types/marketplace";
 
 interface SiteHeaderProps {
   session: AuthSessionSummary;
+  cartCount?: number;
+  unreadMessageCount?: number;
 }
 
-export function SiteHeader({ session }: SiteHeaderProps) {
+export function SiteHeader({
+  session,
+  cartCount = 0,
+  unreadMessageCount = 0,
+}: SiteHeaderProps) {
   const pathname = usePathname();
   const router = useRouter();
   const [searchQuery, setSearchQuery] = useState("");
@@ -221,28 +227,60 @@ export function SiteHeader({ session }: SiteHeaderProps) {
 
         {/* Desktop Utility Group: Cart | Messages | Notifications | Account Hamburger */}
         <div className="hidden items-center gap-1.5 lg:flex xl:gap-2">
-          {/* Shopping Cart (Task 4: Honest coming-soon / disabled state) */}
+          {/* Shopping Cart (Real cart_items count when > 0; honest disabled state until checkout phase) */}
           <button
             type="button"
             disabled
             aria-disabled="true"
-            title="Shopping Cart — coming in Phase 3"
-            aria-label="Shopping Cart (Coming in Phase 3)"
-            className="flex h-9 w-9 items-center justify-center rounded-full border border-[#E6E4EE] text-[#555062] opacity-80 cursor-not-allowed hover:border-[#4E2A84]"
+            title={
+              cartCount > 0
+                ? `Shopping Cart (${cartCount} items) — checkout coming soon`
+                : "Shopping Cart — checkout coming soon"
+            }
+            aria-label={
+              cartCount > 0
+                ? `Shopping Cart, ${cartCount} items`
+                : "Shopping Cart"
+            }
+            className="relative flex h-9 w-9 items-center justify-center rounded-full border border-[#E6E4EE] text-[#555062] opacity-80 cursor-not-allowed hover:border-[#4E2A84]"
           >
             <ShoppingCart className="h-[18px] w-[18px]" aria-hidden="true" />
+            {cartCount > 0 ? (
+              <span
+                aria-hidden="true"
+                className="absolute -top-0.5 -right-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-[#4E2A84] px-1 text-[10px] font-bold leading-none text-white"
+              >
+                {cartCount > 99 ? "99+" : cartCount}
+              </span>
+            ) : null}
           </button>
 
-          {/* Messages (Shown on xl screens to maintain breathing room on tablet) */}
+          {/* Messages (Real unread message count when > 0; hidden when 0) */}
           <button
             type="button"
             disabled
             aria-disabled="true"
-            title="Messages — coming in Phase 5"
-            aria-label="Messages (coming in Phase 5)"
-            className="hidden h-9 w-9 items-center justify-center rounded-full text-[#706C7E] opacity-70 cursor-not-allowed xl:flex"
+            title={
+              unreadMessageCount > 0
+                ? `Messages (${unreadMessageCount} unread) — inbox coming soon`
+                : "Messages — inbox coming soon"
+            }
+            aria-label={
+              unreadMessageCount > 0
+                ? `Messages, ${unreadMessageCount} unread`
+                : "Messages"
+            }
+            className="relative hidden h-9 w-9 items-center justify-center rounded-full text-[#706C7E] opacity-75 cursor-not-allowed xl:flex"
           >
             <MessageCircle className="h-[19px] w-[19px]" aria-hidden="true" />
+            {unreadMessageCount > 0 ? (
+              <span
+                aria-hidden="true"
+                className="absolute -top-0.5 -right-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-[#4E2A84] px-1 text-[10px] font-bold leading-none text-white"
+              >
+                {unreadMessageCount > 99 ? "99+" : unreadMessageCount}
+              </span>
+            ) : null}
           </button>
 
           {/* Notifications (Shown on xl screens to maintain breathing room on tablet) */}

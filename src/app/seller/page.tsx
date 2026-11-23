@@ -3,45 +3,101 @@ import Image from "next/image";
 import Link from "next/link";
 import {
   ArrowRight,
-  CheckCircle2,
-  Clock,
+  BarChart3,
+  Coins,
   ExternalLink,
+  FileText,
+  Hourglass,
+  Info,
   Landmark,
-  MapPin,
+  Layers,
+  ListOrdered,
+  MessageCircle,
   Package,
   PlusCircle,
+  Radio,
   ShieldCheck,
   Store,
+  Wallet,
+  Zap,
 } from "lucide-react";
 import { initializeStorefrontAction } from "@/app/seller/actions";
+import { SalesRangeSelect } from "@/components/seller/SalesRangeSelect";
 import { SellerGate } from "@/components/seller/SellerGate";
 import { SellerNav } from "@/components/seller/SellerNav";
+import { WeeklySalesChart } from "@/components/seller/WeeklySalesChart";
 import { ListingImage } from "@/components/shared/ListingImage";
-import { formatRelativeTime, formatSenToRm } from "@/lib/format";
+import { formatRelativeTime } from "@/lib/format";
+import { getHeaderCounters } from "@/lib/header-counts";
 import { getSellerHubData } from "@/lib/seller/data";
+import {
+  parseSalesRange,
+  type SellerTransactionItem,
+} from "@/lib/seller/financials";
 import { evaluateSellerEligibility } from "@/lib/seller/validation";
 import { getSessionSummary } from "@/lib/supabase/server";
 
 export const metadata: Metadata = {
   title: "Seller Hub",
   description:
-    "Manage your UMS campus storefront, listings, drafts, and payout setup status on Buy-U.",
+    "Your campus selling dashboard. Track verified sales, manage listings, and grow your storefront on Buy-U.",
 };
 
-function statusBadgeStyle(status: string, availableStock: number, kind: string) {
-  if (status === "published" && kind !== "service" && availableStock === 0) {
-    return { label: "Out of stock", cls: "bg-[#FDF2F2] text-[#BA1A1A] border-[#F8D4D4]" };
-  }
-  if (status === "published") {
-    return { label: "Published", cls: "bg-[#EDFAF9] text-[#008386] border-[#CBECEB]" };
-  }
-  if (status === "draft") {
-    return { label: "Draft", cls: "bg-[#F4F1FA] text-[#4E2A84] border-[#E4DCF4]" };
-  }
-  return { label: status, cls: "bg-[#F3F2F6] text-[#555062] border-[#E4E1EE]" };
+function formatRm(sen: number): string {
+  return `RM ${(Math.max(0, sen) / 100).toFixed(2)}`;
 }
 
-export default async function SellerHubPage() {
+function formatPriceNumber(sen: number): string {
+  return (Math.max(0, sen) / 100).toFixed(2);
+}
+
+/**
+ * Plain-text muted colors only — strictly NO pill backgrounds.
+ */
+function getListingStatusText(
+  status: string,
+  availableStock: number,
+  kind: string
+): { label: string; colorClass: string } {
+  if (status === "published" && kind !== "service" && availableStock === 0) {
+    return { label: "Out of Stock", colorClass: "text-[#B42318]" };
+  }
+  if (status === "published") {
+    return { label: "Live", colorClass: "text-[#0F766E]" };
+  }
+  if (status === "draft") {
+    return { label: "Draft", colorClass: "text-[#6E6A7C]" };
+  }
+  return { label: status, colorClass: "text-[#6E6A7C]" };
+}
+
+function getTransactionToneClass(
+  tone: SellerTransactionItem["statusTone"]
+): string {
+  switch (tone) {
+    case "live":
+      return "text-[#0F766E]";
+    case "pending":
+      return "text-[#B45309]";
+    case "paid_out":
+      return "text-[#4E2A84]";
+    case "danger":
+      return "text-[#B42318]";
+    default:
+      return "text-[#6E6A7C]";
+  }
+}
+
+interface SellerHubPageProps {
+  searchParams: Promise<{ range?: string }>;
+}
+
+export default async function SellerHubPage({
+  searchParams,
+}: SellerHubPageProps) {
+  const params = await searchParams;
+  const range = parseSalesRange(params.range);
+
   const session = await getSessionSummary();
   const eligibility = evaluateSellerEligibility(session);
 
@@ -49,7 +105,11 @@ export default async function SellerHubPage() {
     return <SellerGate eligibility={eligibility} nextPath="/seller" />;
   }
 
-  const hub = await getSellerHubData(session);
+  const [hub, counters] = await Promise.all([
+    getSellerHubData(session, range),
+    getHeaderCounters(session),
+  ]);
+
   const displayName =
     session.profile?.display_name ||
     session.profile?.full_name ||
@@ -62,256 +122,491 @@ export default async function SellerHubPage() {
     .slice(0, 2)
     .toUpperCase();
 
-  const stats = [
+  // ONE consistent neutral KPI card class shared by all 8 cards
+  const kpiCardClass =
+    "rounded-2xl border border-[#E6E3EE] border-l-[3px] border-l-[#4E2A84] bg-white px-4 py-3.5 shadow-[0_1px_4px_rgba(20,18,26,0.03)]";
+
+  const listingKpis = [
+    { label: "Total Listings", value: hub.counts.total, icon: Layers },
+    { label: "Published Live", value: hub.counts.published, icon: Radio },
+    { label: "Saved Drafts", value: hub.counts.draft, icon: FileText },
+    { label: "Out of Stock", value: hub.counts.soldOut, icon: Package },
+  ];
+
+  const fin = hub.financials;
+  const financialKpis = [
     {
-      label: "Total Listings",
-      value: hub.counts.total,
-      accent: "bg-[#F8F6FD] border-[#ECE7F6] text-[#4E2A84]",
+      label: "Total Sales",
+      value: fin.available ? formatRm(fin.totalSalesSen) : "Not available yet",
+      icon: BarChart3,
+      hint:
+        fin.available && fin.verifiedOrderCount > 0
+          ? `${fin.verifiedOrderCount} verified ${fin.verifiedOrderCount === 1 ? "order" : "orders"}`
+          : fin.unavailableReason,
     },
     {
-      label: "Published Live",
-      value: hub.counts.published,
-      accent: "bg-[#F2FAFA] border-[#DDF2F2] text-[#008386]",
+      label: "Pending Settlement",
+      value: fin.available
+        ? formatRm(fin.pendingSettlementSen)
+        : "Not available yet",
+      icon: Hourglass,
+      tooltip:
+        "Verified paid orders currently awaiting campus handover or completion.",
     },
     {
-      label: "Saved Drafts",
-      value: hub.counts.draft,
-      accent: "bg-[#F2F7FC] border-[#DEECF8] text-[#1D70B8]",
+      label: "Available for Payout",
+      value: fin.available
+        ? formatRm(fin.availableForPayoutSen)
+        : "Not available yet",
+      icon: Wallet,
+      hint:
+        fin.available && fin.commissionTotalSen > 0
+          ? "Net after platform commission"
+          : undefined,
     },
     {
-      label: "Out of Stock",
-      value: hub.counts.soldOut,
-      accent: "bg-[#FAF9FC] border-[#E6E3EE] text-[#14121A]",
+      label: "Total Paid Out",
+      value: fin.available
+        ? formatRm(fin.totalPaidOutSen)
+        : "Not available yet",
+      icon: Coins,
     },
   ];
 
   return (
-    <div className="bg-white">
+    <div className="bg-[#FAFAFC]">
       <div className="bori-container py-6 lg:py-8">
         {/* Top Editorial Header */}
-        <div className="flex flex-wrap items-end justify-between gap-4">
-          <div>
-            <div className="flex items-center gap-2.5">
-              <h1 className="text-3xl font-extrabold italic tracking-[-0.02em] text-[#111018] sm:text-[36px]">
-                Seller{" "}
-                <span className="inline-block bg-[#4E2A84] px-3 py-0.5 text-white hero-marketplace-slab">
-                  Hub
-                </span>
-              </h1>
-            </div>
-            <p className="mt-1.5 text-sm text-[#555062]">
-              Signed in as{" "}
-              <span className="font-bold text-[#14121A]">{displayName}</span> ·
-              Verified UMS Student Seller
-            </p>
-          </div>
-
-          <Link
-            href="/sell"
-            className="inline-flex items-center gap-2 rounded-xl bg-[#4E2A84] px-5 py-2.5 text-sm font-bold text-white shadow-[0_2px_8px_rgba(78,42,132,0.22)] hover:bg-[#3A1E66] press-feedback"
-          >
-            <PlusCircle className="h-4 w-4" aria-hidden="true" />
-            <span>Create Listing</span>
-          </Link>
+        <div>
+          <h1 className="text-3xl font-extrabold italic tracking-[-0.02em] text-[#111018] sm:text-[36px]">
+            Seller{" "}
+            <span className="inline-block bg-[#4E2A84] px-3 py-0.5 text-white hero-marketplace-slab">
+              Hub
+            </span>
+          </h1>
+          <p className="mt-1.5 text-sm text-[#555062]">
+            Your campus selling dashboard. Track sales, manage listings, and
+            grow your storefront on Buy-U.
+          </p>
         </div>
 
         {/* Shared Seller Navigation */}
-        <div className="mt-5">
+        <div className="mt-4">
           <SellerNav />
         </div>
 
         {hub.error ? (
           <div
             role="alert"
-            className="mt-5 rounded-xl border border-[#BA1A1A]/30 bg-[#FDF2F2] px-4 py-3 text-sm text-[#BA1A1A]"
+            className="mt-5 rounded-xl border border-[#B42318]/30 bg-white px-4 py-3 text-sm text-[#B42318]"
           >
             {hub.error}
           </div>
         ) : null}
 
-        {/* Real Listing Count Metrics */}
-        <section
-          aria-label="Listing statistics"
-          className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4 sm:gap-4"
-        >
-          {stats.map((stat) => (
-            <div
-              key={stat.label}
-              className={`rounded-2xl border p-4 ${stat.accent}`}
+        {/* Main 2-Column Dashboard Grid */}
+        <div className="mt-5 grid grid-cols-1 gap-6 lg:grid-cols-12">
+          {/* LEFT MAIN CONTENT */}
+          <div className="space-y-6 lg:col-span-8 xl:col-span-9">
+            {/* 1. Listing Summary — 4 Uniform Neutral KPI Cards */}
+            <section
+              aria-label="Listing summary"
+              className="grid grid-cols-2 gap-3 sm:grid-cols-4 sm:gap-4"
             >
-              <p className="text-xs font-bold uppercase tracking-wider opacity-80">
-                {stat.label}
-              </p>
-              <p className="mt-1.5 text-3xl font-extrabold tracking-tight">
-                {stat.value}
-              </p>
-            </div>
-          ))}
-        </section>
-
-        {/* Main 2-Column Workspace */}
-        <div className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-12">
-          {/* LEFT: Listings Overview */}
-          <section
-            aria-labelledby="seller-listings-heading"
-            className="lg:col-span-8"
-          >
-            <div className="flex items-center justify-between border-b border-[#E6E3EE] pb-2.5">
-              <h2
-                id="seller-listings-heading"
-                className="text-lg font-extrabold italic tracking-[-0.02em] text-[#111018] sm:text-xl"
-              >
-                Your Campus Listings
-              </h2>
-              <Link
-                href="/sell"
-                className="inline-flex items-center gap-1 text-xs font-bold text-[#4E2A84] hover:underline sm:text-sm"
-              >
-                <span>New Listing</span>
-                <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
-              </Link>
-            </div>
-
-            {hub.listings.length === 0 ? (
-              <div className="mt-4 flex flex-col items-center gap-4 rounded-2xl border border-[#E6E3EE] bg-[#FAF9FC] p-6 text-center sm:flex-row sm:text-left">
-                <div className="relative h-24 w-24 shrink-0">
-                  <Image
-                    src="/images/bori/bori-free-items.png"
-                    alt="Bori holding a campus box"
-                    fill
-                    sizes="96px"
-                    className="object-contain select-none"
-                  />
-                </div>
-                <div className="min-w-0 flex-1">
-                  <h3 className="text-base font-extrabold text-[#14121A]">
-                    No listings yet
-                  </h3>
-                  <p className="mt-1 text-sm text-[#555062]">
-                    List pre-loved textbooks, electronics, student business
-                    products, campus food, or student services for fellow UMS
-                    members.
-                  </p>
-                  <div className="mt-3.5 flex flex-wrap justify-center gap-2.5 sm:justify-start">
-                    <Link
-                      href="/sell"
-                      className="inline-flex items-center gap-1.5 rounded-lg bg-[#4E2A84] px-4 py-2 text-xs font-bold text-white hover:bg-[#3A1E66] press-feedback sm:text-sm"
-                    >
-                      <PlusCircle className="h-4 w-4" aria-hidden="true" />
-                      <span>Create Your First Listing</span>
-                    </Link>
-                  </div>
-                </div>
-              </div>
-            ) : (
-              <div className="mt-4 space-y-3">
-                {hub.listings.map((item) => {
-                  const badge = statusBadgeStyle(
-                    item.status,
-                    item.availableStock,
-                    item.kind
-                  );
-                  const fallback = (
-                    <div className="flex h-full w-full items-center justify-center bg-[#F4F1FA] text-[#4E2A84]">
-                      <Package className="h-5 w-5" aria-hidden="true" />
+              {listingKpis.map((kpi) => {
+                const Icon = kpi.icon;
+                return (
+                  <div
+                    key={kpi.label}
+                    className={`${kpiCardClass} flex flex-col gap-1.5 sm:flex-row sm:items-center sm:justify-between sm:gap-2`}
+                  >
+                    <div className="flex min-w-0 items-center gap-2">
+                      <Icon
+                        className="h-4 w-4 shrink-0 text-[#4E2A84]"
+                        aria-hidden="true"
+                      />
+                      <span className="text-[10.5px] font-bold uppercase leading-tight tracking-wider text-[#555062] sm:text-[11px]">
+                        {kpi.label}
+                      </span>
                     </div>
-                  );
+                    <span className="tabular-price shrink-0 text-2xl font-extrabold tracking-tight text-[#4E2A84]">
+                      {kpi.value}
+                    </span>
+                  </div>
+                );
+              })}
+            </section>
+
+            {/* 2. Earnings & Payouts Panel */}
+            <section
+              aria-labelledby="earnings-heading"
+              className="rounded-2xl border border-[#E6E3EE] bg-white p-5 shadow-[0_1px_4px_rgba(20,18,26,0.03)]"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <h2
+                  id="earnings-heading"
+                  className="flex items-center gap-2 text-lg font-extrabold italic tracking-[-0.02em] text-[#111018] sm:text-xl"
+                >
+                  <Coins
+                    className="h-5 w-5 text-[#4E2A84]"
+                    aria-hidden="true"
+                  />
+                  <span>Earnings &amp; Payouts</span>
+                </h2>
+                <SalesRangeSelect value={range} />
+              </div>
+
+              {/* 4 Financial KPI Cards — Exact Same Neutral Style */}
+              <div className="mt-4 grid grid-cols-2 gap-3 xl:grid-cols-4">
+                {financialKpis.map((kpi) => {
+                  const Icon = kpi.icon;
                   return (
-                    <article
-                      key={item.id}
-                      className="flex flex-col gap-3 rounded-2xl border border-[#E6E3EE] bg-white p-3.5 shadow-[0_1px_4px_rgba(20,18,26,0.04)] transition-colors hover:border-[#4E2A84]/40 sm:flex-row sm:items-center"
-                    >
-                      <div className="relative h-20 w-full shrink-0 overflow-hidden rounded-xl bg-[#F5F4F8] sm:w-24">
-                        <ListingImage
-                          src={item.imageUrl}
-                          alt={item.title}
-                          fallback={fallback}
-                        />
-                      </div>
-
-                      <div className="min-w-0 flex-1">
-                        <div className="flex flex-wrap items-center gap-2">
+                    <div key={kpi.label} className={kpiCardClass}>
+                      <div className="flex items-center justify-between gap-1.5">
+                        <div className="flex min-w-0 items-center gap-1.5">
+                          <Icon
+                            className="h-3.5 w-3.5 shrink-0 text-[#4E2A84]"
+                            aria-hidden="true"
+                          />
+                          <span className="truncate text-[10.5px] font-bold uppercase tracking-wider text-[#555062]">
+                            {kpi.label}
+                          </span>
+                        </div>
+                        {kpi.tooltip ? (
                           <span
-                            className={`inline-block rounded-md border px-2 py-0.5 text-[10.5px] font-extrabold uppercase tracking-wide ${badge.cls}`}
+                            title={kpi.tooltip}
+                            aria-label={kpi.tooltip}
+                            className="shrink-0 text-[#858094] hover:text-[#4E2A84]"
                           >
-                            {badge.label}
+                            <Info className="h-3.5 w-3.5" aria-hidden="true" />
                           </span>
-                          <span className="rounded-md bg-[#F4F1FA] px-2 py-0.5 text-[10.5px] font-bold text-[#4E2A84]">
-                            {item.categoryName}
-                          </span>
-                        </div>
-
-                        <h3 className="mt-1.5 truncate text-[15px] font-extrabold text-[#14121A]">
-                          {item.title}
-                        </h3>
-
-                        <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[#6E6A7C]">
-                          <span className="font-extrabold text-[#14121A]">
-                            {formatSenToRm(item.priceSen)}
-                          </span>
-                          {item.kind !== "service" ? (
-                            <span>
-                              Stock: {item.availableStock}/{item.quantity}
-                            </span>
-                          ) : null}
-                          <span className="inline-flex items-center gap-1">
-                            <MapPin className="h-3 w-3 text-[#8E899E]" aria-hidden="true" />
-                            {item.collectionAreaName}
-                          </span>
-                          <span className="inline-flex items-center gap-1">
-                            <Clock className="h-3 w-3 text-[#8E899E]" aria-hidden="true" />
-                            {formatRelativeTime(item.updatedAt)}
-                          </span>
-                        </div>
+                        ) : null}
                       </div>
 
-                      {item.status === "published" ? (
-                        <Link
-                          href={`/listings/${encodeURIComponent(item.id)}`}
-                          className="inline-flex shrink-0 items-center justify-center gap-1.5 rounded-lg border border-[#D5D1E3] bg-white px-3 py-1.5 text-xs font-bold text-[#14121A] hover:border-[#4E2A84] hover:text-[#4E2A84]"
-                        >
-                          <span>View Live</span>
-                          <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
-                        </Link>
+                      <p
+                        className={`tabular-price mt-2 font-extrabold tracking-tight text-[#4E2A84] ${
+                          fin.available ? "text-xl sm:text-[22px]" : "text-sm"
+                        }`}
+                      >
+                        {kpi.value}
+                      </p>
+
+                      {kpi.hint ? (
+                        <p className="mt-0.5 text-[11px] text-[#6E6A7C]">
+                          {kpi.hint}
+                        </p>
                       ) : null}
-                    </article>
+                    </div>
                   );
                 })}
               </div>
-            )}
-          </section>
 
-          {/* RIGHT: Storefront Summary & Payout Setup Status */}
-          <aside className="space-y-5 lg:col-span-4">
-            {/* Storefront Summary Card */}
-            <section
-              aria-labelledby="storefront-summary-heading"
-              className="rounded-2xl border border-[#E6E3EE] bg-white p-5 shadow-[0_2px_8px_rgba(20,18,26,0.04)]"
-            >
-              <div className="flex items-center justify-between">
+              {/* Weekly Sales Chart + Recent Orders / Transactions */}
+              <div className="mt-6 grid grid-cols-1 gap-6 xl:grid-cols-12">
+                {/* Weekly Sales Chart */}
+                <div className="xl:col-span-6">
+                  <h3 className="text-sm font-extrabold text-[#14121A]">
+                    Weekly Sales (RM)
+                  </h3>
+                  <div className="mt-3">
+                    <WeeklySalesChart
+                      points={fin.chartPoints}
+                      available={fin.available}
+                    />
+                  </div>
+                </div>
+
+                {/* Recent Orders / Transactions */}
+                <div className="xl:col-span-6">
+                  <div className="flex items-center justify-between">
+                    <h3 className="flex items-center gap-1.5 text-sm font-extrabold italic text-[#14121A]">
+                      <ListOrdered
+                        className="h-4 w-4 text-[#4E2A84]"
+                        aria-hidden="true"
+                      />
+                      <span>Recent Orders / Transactions</span>
+                    </h3>
+                  </div>
+
+                  {!fin.available ? (
+                    <p className="mt-3 rounded-xl border border-[#ECEAF2] bg-[#FAFAFC] p-4 text-xs text-[#6E6A7C]">
+                      Order history is not available yet.
+                    </p>
+                  ) : fin.transactions.length === 0 ? (
+                    <div className="mt-3 flex h-[180px] flex-col items-center justify-center rounded-xl border border-[#ECEAF2] bg-[#FAFAFC] p-4 text-center">
+                      <p className="text-xs font-bold text-[#14121A]">
+                        No orders yet
+                      </p>
+                      <p className="mt-1 text-[11.5px] text-[#6E6A7C]">
+                        Verified student and staff purchases will appear here.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="mt-3 divide-y divide-[#F0EDF5] border-t border-[#F0EDF5]">
+                      {fin.transactions.map((tx) => (
+                        <div
+                          key={tx.id}
+                          className="grid grid-cols-12 items-center gap-2 py-2.5 text-xs"
+                        >
+                          <span className="col-span-4 truncate font-mono font-bold text-[#14121A] sm:col-span-3">
+                            #{tx.orderCode}
+                          </span>
+                          <span className="col-span-4 truncate text-[#3E3B4B] sm:col-span-4">
+                            {tx.itemTitle}
+                          </span>
+                          <span className="tabular-price col-span-2 text-right font-bold text-[#14121A] sm:col-span-3">
+                            {formatRm(tx.amountSen)}
+                          </span>
+                          <span
+                            className={`col-span-2 text-right font-bold ${getTransactionToneClass(
+                              tx.statusTone
+                            )}`}
+                          >
+                            {tx.statusLabel}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </section>
+
+            {/* 3. Your Campus Listings — Clean Table (Zero Colored Pills) */}
+            <section aria-labelledby="campus-listings-heading">
+              <div className="flex items-center justify-between pb-3">
                 <h2
-                  id="storefront-summary-heading"
-                  className="flex items-center gap-2 text-base font-extrabold text-[#14121A]"
+                  id="campus-listings-heading"
+                  className="text-lg font-extrabold italic tracking-[-0.02em] text-[#111018] sm:text-xl"
                 >
-                  <Store className="h-4 w-4 text-[#4E2A84]" aria-hidden="true" />
-                  <span>Storefront</span>
+                  Your Campus Listings
                 </h2>
-                {hub.storefront ? (
-                  <span className="rounded-md bg-[#EDFAF9] px-2 py-0.5 text-[10.5px] font-bold text-[#008386]">
-                    Active
-                  </span>
-                ) : (
-                  <span className="rounded-md bg-[#F4F1FA] px-2 py-0.5 text-[10.5px] font-bold text-[#4E2A84]">
-                    Not Initialized
-                  </span>
-                )}
+                <Link
+                  href="/sell"
+                  className="inline-flex items-center gap-1 text-xs font-bold text-[#4E2A84] hover:underline sm:text-sm"
+                >
+                  <span>New Listing</span>
+                  <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
+                </Link>
+              </div>
+
+              {hub.listings.length === 0 ? (
+                <div className="flex flex-col items-center gap-4 rounded-2xl border border-[#E6E3EE] bg-white p-6 text-center sm:flex-row sm:text-left">
+                  <div className="relative h-20 w-20 shrink-0">
+                    <Image
+                      src="/images/bori/bori-free-items.png"
+                      alt="Bori holding a campus box"
+                      fill
+                      sizes="80px"
+                      className="object-contain select-none"
+                    />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <h3 className="text-base font-extrabold text-[#14121A]">
+                      No listings posted yet
+                    </h3>
+                    <p className="mt-1 text-sm text-[#555062]">
+                      Create your first campus listing to start selling
+                      pre-loved goods, student ventures, food, or services.
+                    </p>
+                    <Link
+                      href="/sell"
+                      className="mt-3 inline-flex items-center gap-1.5 rounded-lg bg-[#4E2A84] px-4 py-2 text-xs font-bold text-white hover:bg-[#3A1E66] press-feedback"
+                    >
+                      <PlusCircle className="h-4 w-4" aria-hidden="true" />
+                      <span>Create Listing</span>
+                    </Link>
+                  </div>
+                </div>
+              ) : (
+                <div className="overflow-hidden rounded-2xl border border-[#E6E3EE] bg-white shadow-[0_1px_4px_rgba(20,18,26,0.03)]">
+                  {/* Desktop & Tablet Table */}
+                  <div className="hidden overflow-x-auto sm:block">
+                    <table className="w-full border-collapse text-left text-sm">
+                      <thead>
+                        <tr className="border-b border-[#ECEAF2] bg-[#FAFAFC] text-[11px] font-bold uppercase tracking-wider text-[#6E6A7C]">
+                          <th className="px-4 py-3">Item</th>
+                          <th className="px-3 py-3">Category</th>
+                          <th className="px-3 py-3">Price (RM)</th>
+                          <th className="px-3 py-3">Stock</th>
+                          <th className="px-3 py-3">Status</th>
+                          <th className="px-3 py-3">Updated</th>
+                          <th className="px-4 py-3 text-right">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-[#F0EDF5]">
+                        {hub.listings.map((item) => {
+                          const st = getListingStatusText(
+                            item.status,
+                            item.availableStock,
+                            item.kind
+                          );
+                          const fallback = (
+                            <div className="flex h-full w-full items-center justify-center bg-[#F5F4F8] text-[#6E6A7C]">
+                              <Package className="h-4 w-4" aria-hidden="true" />
+                            </div>
+                          );
+                          return (
+                            <tr
+                              key={item.id}
+                              className="transition-colors hover:bg-[#FAFAFC]"
+                            >
+                              <td className="px-4 py-3">
+                                <div className="flex items-center gap-3">
+                                  <div className="relative h-10 w-12 shrink-0 overflow-hidden rounded-lg border border-[#ECEAF2] bg-[#F5F4F8]">
+                                    <ListingImage
+                                      src={item.imageUrl}
+                                      alt={item.title}
+                                      fallback={fallback}
+                                    />
+                                  </div>
+                                  <span className="max-w-[200px] truncate font-bold text-[#14121A]">
+                                    {item.title}
+                                  </span>
+                                </div>
+                              </td>
+                              <td className="px-3 py-3 text-xs font-medium text-[#555062]">
+                                {item.categoryName}
+                              </td>
+                              <td className="tabular-price px-3 py-3 text-xs font-bold text-[#14121A]">
+                                {formatPriceNumber(item.priceSen)}
+                              </td>
+                              <td className="px-3 py-3 text-xs font-semibold text-[#3E3B4B]">
+                                {item.kind === "service"
+                                  ? "—"
+                                  : item.availableStock}
+                              </td>
+                              <td
+                                className={`px-3 py-3 text-xs font-bold ${st.colorClass}`}
+                              >
+                                {st.label}
+                              </td>
+                              <td className="px-3 py-3 text-xs text-[#6E6A7C]">
+                                {formatRelativeTime(item.updatedAt)}
+                              </td>
+                              <td className="px-4 py-3 text-right text-xs">
+                                {item.status === "published" ? (
+                                  <Link
+                                    href={`/listings/${encodeURIComponent(item.id)}`}
+                                    className="inline-flex items-center gap-1 font-bold text-[#4E2A84] hover:underline"
+                                  >
+                                    <span>View</span>
+                                    <ExternalLink
+                                      className="h-3 w-3"
+                                      aria-hidden="true"
+                                    />
+                                  </Link>
+                                ) : (
+                                  <span className="text-[#858094]">
+                                    Edit soon
+                                  </span>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  {/* Mobile Compact Rows (Zero Horizontal Overflow) */}
+                  <div className="divide-y divide-[#F0EDF5] sm:hidden">
+                    {hub.listings.map((item) => {
+                      const st = getListingStatusText(
+                        item.status,
+                        item.availableStock,
+                        item.kind
+                      );
+                      const fallback = (
+                        <div className="flex h-full w-full items-center justify-center bg-[#F5F4F8] text-[#6E6A7C]">
+                          <Package className="h-4 w-4" aria-hidden="true" />
+                        </div>
+                      );
+                      return (
+                        <div key={item.id} className="flex gap-3 p-3.5">
+                          <div className="relative h-14 w-16 shrink-0 overflow-hidden rounded-lg border border-[#ECEAF2] bg-[#F5F4F8]">
+                            <ListingImage
+                              src={item.imageUrl}
+                              alt={item.title}
+                              fallback={fallback}
+                            />
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-start justify-between gap-2">
+                              <p className="truncate text-sm font-bold text-[#14121A]">
+                                {item.title}
+                              </p>
+                              <span
+                                className={`shrink-0 text-xs font-bold ${st.colorClass}`}
+                              >
+                                {st.label}
+                              </span>
+                            </div>
+                            <p className="mt-0.5 text-xs text-[#6E6A7C]">
+                              {item.categoryName}
+                            </p>
+                            <div className="mt-1.5 flex items-center justify-between text-xs">
+                              <span className="tabular-price font-bold text-[#14121A]">
+                                {formatRm(item.priceSen)} ·{" "}
+                                <span className="font-normal text-[#6E6A7C]">
+                                  {item.kind === "service"
+                                    ? "Service"
+                                    : `Stock: ${item.availableStock}`}
+                                </span>
+                              </span>
+                              {item.status === "published" ? (
+                                <Link
+                                  href={`/listings/${encodeURIComponent(item.id)}`}
+                                  className="font-bold text-[#4E2A84] hover:underline"
+                                >
+                                  View
+                                </Link>
+                              ) : (
+                                <span className="text-[#858094]">Draft</span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </section>
+          </div>
+
+          {/* RIGHT SIDEBAR: Storefront Status + Quick Actions (No Bori Tips Card) */}
+          <aside className="space-y-5 lg:col-span-4 xl:col-span-3">
+            {/* Storefront Status Card */}
+            <section
+              aria-labelledby="storefront-status-heading"
+              className="rounded-2xl border border-[#E6E3EE] bg-white p-5 shadow-[0_1px_4px_rgba(20,18,26,0.03)]"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <h2
+                  id="storefront-status-heading"
+                  className="flex items-center gap-2 text-base font-extrabold italic text-[#14121A]"
+                >
+                  <Store
+                    className="h-4 w-4 text-[#4E2A84]"
+                    aria-hidden="true"
+                  />
+                  <span>Storefront Status</span>
+                </h2>
+                <span
+                  className={`text-xs font-bold ${
+                    hub.storefront ? "text-[#0F766E]" : "text-[#6E6A7C]"
+                  }`}
+                >
+                  {hub.storefront ? "Active" : "Not Initialized"}
+                </span>
               </div>
 
               {hub.storefront ? (
                 <div className="mt-4">
                   <div className="flex items-center gap-3">
                     {hub.storefront.logoUrl ? (
-                      <div className="relative h-12 w-12 shrink-0 overflow-hidden rounded-xl border border-[#E6E3EE] bg-[#FAF9FC]">
+                      <div className="relative h-12 w-12 shrink-0 overflow-hidden rounded-xl border border-[#E6E3EE] bg-[#FAFAFC]">
                         <Image
                           src={hub.storefront.logoUrl}
                           alt={hub.storefront.shopName}
@@ -329,8 +624,17 @@ export default async function SellerHubPage() {
                       <p className="truncate text-sm font-extrabold text-[#14121A]">
                         {hub.storefront.shopName}
                       </p>
-                      <p className="text-xs text-[#6E6A7C]">
-                        {session.profile?.faculty || "UMSKAL Student Seller"}
+                      <p className="mt-0.5 flex items-center gap-1 text-xs text-[#6E6A7C]">
+                        <ShieldCheck
+                          className="h-3.5 w-3.5 shrink-0 text-[#4E2A84]"
+                          aria-hidden="true"
+                        />
+                        <span className="truncate">
+                          Verified Student
+                          {session.profile?.faculty
+                            ? ` · ${session.profile.faculty}`
+                            : ""}
+                        </span>
                       </p>
                     </div>
                   </div>
@@ -351,9 +655,8 @@ export default async function SellerHubPage() {
               ) : (
                 <div className="mt-3">
                   <p className="text-xs leading-relaxed text-[#555062]">
-                    Your student storefront will be initialized automatically
-                    when you click below or create your first listing. One
-                    storefront per verified student account.
+                    Initialize your single verified UMS student storefront to
+                    customize your shop bio and logo.
                   </p>
                   <form action={initializeStorefrontAction} className="mt-4">
                     <button
@@ -366,74 +669,105 @@ export default async function SellerHubPage() {
                   </form>
                 </div>
               )}
+
+              {/* Compact Masked Payout Account Line */}
+              <div className="mt-4 border-t border-[#F0EDF5] pt-3 text-xs">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="inline-flex items-center gap-1.5 font-semibold text-[#555062]">
+                    <Landmark
+                      className="h-3.5 w-3.5 text-[#4E2A84]"
+                      aria-hidden="true"
+                    />
+                    <span>Payout Account</span>
+                  </span>
+                  <span
+                    className={`font-bold ${
+                      hub.payout.configured
+                        ? "text-[#0F766E]"
+                        : "text-[#6E6A7C]"
+                    }`}
+                  >
+                    {hub.payout.configured ? "Configured" : "Not Set Up"}
+                  </span>
+                </div>
+                {hub.payout.configured ? (
+                  <p className="mt-1 font-mono text-[11px] text-[#6E6A7C]">
+                    {hub.payout.bankName} · {hub.payout.maskedAccountNumber}
+                    {hub.payout.hasDuitNow ? " · DuitNow" : ""}
+                  </p>
+                ) : null}
+              </div>
             </section>
 
-            {/* Payout Setup Status Card (Private / Masked Only) */}
+            {/* Quick Actions Card */}
             <section
-              aria-labelledby="payout-status-heading"
-              className="rounded-2xl border border-[#E6E3EE] bg-white p-5 shadow-[0_2px_8px_rgba(20,18,26,0.04)]"
+              aria-labelledby="quick-actions-heading"
+              className="rounded-2xl border border-[#E6E3EE] bg-white p-5 shadow-[0_1px_4px_rgba(20,18,26,0.03)]"
             >
-              <div className="flex items-center justify-between">
-                <h2
-                  id="payout-status-heading"
-                  className="flex items-center gap-2 text-base font-extrabold text-[#14121A]"
+              <h2
+                id="quick-actions-heading"
+                className="flex items-center gap-2 text-base font-extrabold italic text-[#14121A]"
+              >
+                <Zap className="h-4 w-4 text-[#4E2A84]" aria-hidden="true" />
+                <span>Quick Actions</span>
+              </h2>
+
+              <div className="mt-3.5 space-y-2.5">
+                <Link
+                  href="/sell"
+                  className="flex w-full items-center gap-2.5 rounded-xl bg-[#4E2A84] px-4 py-2.5 text-sm font-bold text-white shadow-[0_2px_6px_rgba(78,42,132,0.2)] hover:bg-[#3A1E66] press-feedback"
                 >
-                  <Landmark
-                    className="h-4 w-4 text-[#008386]"
+                  <PlusCircle className="h-4 w-4 shrink-0" aria-hidden="true" />
+                  <span>Create Listing</span>
+                </Link>
+
+                <Link
+                  href="/seller/storefront"
+                  className="flex w-full items-center gap-2.5 rounded-xl border border-[#E6E3EE] bg-white px-4 py-2.5 text-sm font-bold text-[#14121A] hover:border-[#4E2A84]/50 hover:text-[#4E2A84] press-feedback"
+                >
+                  <Store
+                    className="h-4 w-4 shrink-0 text-[#555062]"
                     aria-hidden="true"
                   />
-                  <span>Payout Setup</span>
-                </h2>
-                {hub.payout.configured ? (
-                  <span className="inline-flex items-center gap-1 rounded-md bg-[#EDFAF9] px-2 py-0.5 text-[10.5px] font-bold text-[#008386]">
-                    <CheckCircle2 className="h-3 w-3" aria-hidden="true" />
-                    <span>Configured</span>
-                  </span>
-                ) : (
-                  <span className="rounded-md bg-[#F3F2F6] px-2 py-0.5 text-[10.5px] font-bold text-[#555062]">
-                    Not Set Up
-                  </span>
-                )}
-              </div>
+                  <span>Edit Storefront</span>
+                </Link>
 
-              {hub.payout.configured ? (
-                <dl className="mt-3.5 space-y-2 text-xs">
-                  <div className="flex items-center justify-between gap-2">
-                    <dt className="text-[#6E6A7C]">Bank</dt>
-                    <dd className="font-bold text-[#14121A]">
-                      {hub.payout.bankName}
-                    </dd>
-                  </div>
-                  <div className="flex items-center justify-between gap-2">
-                    <dt className="text-[#6E6A7C]">Account</dt>
-                    <dd className="font-mono font-bold text-[#14121A]">
-                      {hub.payout.maskedAccountNumber}
-                    </dd>
-                  </div>
-                  <div className="flex items-center justify-between gap-2">
-                    <dt className="text-[#6E6A7C]">DuitNow</dt>
-                    <dd className="font-semibold text-[#008386]">
-                      {hub.payout.hasDuitNow ? "Linked (Private)" : "Not linked"}
-                    </dd>
-                  </div>
-                </dl>
-              ) : (
-                <p className="mt-3 text-xs leading-relaxed text-[#555062]">
-                  No payout bank account is linked yet. You can still draft and
-                  publish campus listings now; payout details remain private and
-                  will be managed in the upcoming payments workflow.
-                </p>
-              )}
+                <Link
+                  href="/marketplace"
+                  className="flex w-full items-center gap-2.5 rounded-xl border border-[#E6E3EE] bg-white px-4 py-2.5 text-sm font-bold text-[#14121A] hover:border-[#4E2A84]/50 hover:text-[#4E2A84] press-feedback"
+                >
+                  <ExternalLink
+                    className="h-4 w-4 shrink-0 text-[#555062]"
+                    aria-hidden="true"
+                  />
+                  <span>View Marketplace</span>
+                </Link>
 
-              <div className="mt-4 flex items-start gap-2 rounded-xl bg-[#FAF9FC] p-2.5 text-[11px] text-[#6E6A7C]">
-                <ShieldCheck
-                  className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[#4E2A84]"
-                  aria-hidden="true"
-                />
-                <span>
-                  Sensitive bank details are masked and protected by row-level
-                  security. Never shared publicly.
-                </span>
+                <button
+                  type="button"
+                  disabled
+                  aria-disabled="true"
+                  title="Campus messaging inbox is coming in a later phase"
+                  aria-label={
+                    counters.unreadMessageCount > 0
+                      ? `Messages, ${counters.unreadMessageCount} unread (inbox coming soon)`
+                      : "Messages (inbox coming soon)"
+                  }
+                  className="flex w-full items-center justify-between gap-2 rounded-xl border border-[#E6E3EE] bg-white px-4 py-2.5 text-sm font-bold text-[#555062] opacity-80 cursor-not-allowed"
+                >
+                  <span className="inline-flex items-center gap-2.5">
+                    <MessageCircle
+                      className="h-4 w-4 shrink-0 text-[#555062]"
+                      aria-hidden="true"
+                    />
+                    <span>Messages</span>
+                  </span>
+                  {counters.unreadMessageCount > 0 ? (
+                    <span className="flex h-5 min-w-5 items-center justify-center rounded-full bg-[#4E2A84] px-1.5 text-[11px] font-bold text-white">
+                      {counters.unreadMessageCount}
+                    </span>
+                  ) : null}
+                </button>
               </div>
             </section>
           </aside>

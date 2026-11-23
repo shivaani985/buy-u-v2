@@ -3,6 +3,16 @@ import { getPublicSupabaseEnv } from "@/lib/supabase/env";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import type { AuthSessionSummary, Category } from "@/types/marketplace";
 import {
+  computeSellerFinancials,
+  type RawOrderDispute,
+  type RawOrderItem,
+  type RawPayment,
+  type RawPayoutRequest,
+  type RawSellerOrder,
+  type SalesRange,
+  type SellerFinancialSummary,
+} from "./financials";
+import {
   evaluateSellerEligibility,
   maskPayoutAccount,
   type MaskedPayoutStatus,
@@ -53,17 +63,34 @@ export interface SellerHubData {
     other: number;
   };
   payout: MaskedPayoutStatus;
+  financials: SellerFinancialSummary;
   error?: string;
 }
 
 export async function getSellerHubData(
-  session: AuthSessionSummary
+  session: AuthSessionSummary,
+  range: SalesRange = "7d"
 ): Promise<SellerHubData> {
+  const unavailableFinancials: SellerFinancialSummary = {
+    available: false,
+    unavailableReason: "Financial summary unavailable.",
+    range,
+    totalSalesSen: 0,
+    pendingSettlementSen: 0,
+    availableForPayoutSen: 0,
+    totalPaidOutSen: 0,
+    commissionTotalSen: 0,
+    verifiedOrderCount: 0,
+    transactions: [],
+    chartPoints: [],
+  };
+
   const empty: SellerHubData = {
     storefront: null,
     listings: [],
     counts: { total: 0, published: 0, draft: 0, soldOut: 0, other: 0 },
     payout: maskPayoutAccount(null),
+    financials: unavailableFinancials,
   };
 
   const eligibility = evaluateSellerEligibility(session);
@@ -78,29 +105,50 @@ export async function getSellerHubData(
     return { ...empty, error: "Supabase client is not configured." };
   }
 
-  const [storefrontRes, listingsRes, payoutRes, categoriesRes, areasRes] =
-    await Promise.all([
-      supabase
-        .from("storefronts")
-        .select("seller_id, shop_name, description, logo_path, created_at, updated_at")
-        .eq("seller_id", userId)
-        .maybeSingle(),
-      supabase
-        .from("listings")
-        .select(
-          "id, title, kind, is_food, category_id, collection_area_id, price_sen, quantity, reserved_quantity, status, condition, image_paths, published_at, updated_at"
-        )
-        .eq("seller_id", userId)
-        .order("updated_at", { ascending: false })
-        .limit(50),
-      supabase
-        .from("seller_payout_accounts")
-        .select("bank_name, account_number, account_holder_name, duitnow_id, updated_at")
-        .eq("seller_id", userId)
-        .maybeSingle(),
-      supabase.from("categories").select("id, name").eq("active", true),
-      supabase.from("collection_areas").select("id, name").eq("active", true),
-    ]);
+  const [
+    storefrontRes,
+    listingsRes,
+    payoutRes,
+    categoriesRes,
+    areasRes,
+    ordersRes,
+    payoutReqRes,
+  ] = await Promise.all([
+    supabase
+      .from("storefronts")
+      .select("seller_id, shop_name, description, logo_path, created_at, updated_at")
+      .eq("seller_id", userId)
+      .maybeSingle(),
+    supabase
+      .from("listings")
+      .select(
+        "id, title, kind, is_food, category_id, collection_area_id, price_sen, quantity, reserved_quantity, status, condition, image_paths, published_at, updated_at"
+      )
+      .eq("seller_id", userId)
+      .order("updated_at", { ascending: false })
+      .limit(50),
+    supabase
+      .from("seller_payout_accounts")
+      .select("bank_name, account_number, account_holder_name, duitnow_id, updated_at")
+      .eq("seller_id", userId)
+      .maybeSingle(),
+    supabase.from("categories").select("id, name").eq("active", true),
+    supabase.from("collection_areas").select("id, name").eq("active", true),
+    supabase
+      .from("orders")
+      .select(
+        "id, order_code, subtotal_sen, commission_sen, seller_net_sen, total_paid_sen, status, paid_at, completed_at, created_at"
+      )
+      .eq("seller_id", userId)
+      .order("created_at", { ascending: false })
+      .limit(100),
+    supabase
+      .from("payout_requests")
+      .select("id, amount_sen, status, processed_at, created_at")
+      .eq("seller_id", userId)
+      .order("created_at", { ascending: false })
+      .limit(100),
+  ]);
 
   const categoryMap = new Map<string, string>();
   for (const c of (categoriesRes.data ?? []) as Array<{ id: string; name: string }>) {
@@ -205,6 +253,52 @@ export async function getSellerHubData(
         } | null)
   );
 
+  let financials: SellerFinancialSummary = unavailableFinancials;
+  if (!ordersRes.error && !payoutReqRes.error) {
+    const orders = (ordersRes.data ?? []) as RawSellerOrder[];
+    const payoutRequests = (payoutReqRes.data ?? []) as RawPayoutRequest[];
+    const orderIds = orders.map((o) => o.id);
+
+    let orderItems: RawOrderItem[] = [];
+    let payments: RawPayment[] = [];
+    let disputes: RawOrderDispute[] = [];
+
+    if (orderIds.length > 0) {
+      const [itemsRes, paymentsRes, disputesRes] = await Promise.all([
+        supabase
+          .from("order_items")
+          .select("order_id, title_snapshot, quantity")
+          .in("order_id", orderIds),
+        supabase
+          .from("payments")
+          .select("order_id, status, verified_at")
+          .in("order_id", orderIds),
+        supabase
+          .from("order_disputes")
+          .select("order_id, status, refund_amount_sen")
+          .in("order_id", orderIds),
+      ]);
+      if (!itemsRes.error) orderItems = (itemsRes.data ?? []) as RawOrderItem[];
+      if (!paymentsRes.error) payments = (paymentsRes.data ?? []) as RawPayment[];
+      if (!disputesRes.error) disputes = (disputesRes.data ?? []) as RawOrderDispute[];
+    }
+
+    financials = computeSellerFinancials({
+      orders,
+      orderItems,
+      payments,
+      payoutRequests,
+      disputes,
+      range,
+    });
+  } else {
+    financials = {
+      ...unavailableFinancials,
+      unavailableReason:
+        "Unable to load verified order or payout records right now.",
+    };
+  }
+
   const error = storefrontRes.error?.message || listingsRes.error?.message;
 
   return {
@@ -212,6 +306,7 @@ export async function getSellerHubData(
     listings,
     counts,
     payout,
+    financials,
     error,
   };
 }

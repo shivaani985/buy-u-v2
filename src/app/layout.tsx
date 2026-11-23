@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Fraunces, Plus_Jakarta_Sans } from "next/font/google";
 import { SiteFooter } from "@/components/layout/SiteFooter";
 import { SiteHeader } from "@/components/layout/SiteHeader";
+import { getHeaderCounters } from "@/lib/header-counts";
 import { getSessionSummary } from "@/lib/supabase/server";
 import "./globals.css";
 
@@ -36,6 +37,7 @@ export default async function RootLayout({
   children: React.ReactNode;
 }>) {
   const session = await getSessionSummary();
+  const counters = await getHeaderCounters(session);
 
   return (
     <html lang="en" className={`${plusJakarta.variable} ${fraunces.variable}`}>
@@ -47,7 +49,11 @@ export default async function RootLayout({
           Skip to main content
         </a>
 
-        <SiteHeader session={session} />
+        <SiteHeader
+          session={session}
+          cartCount={counters.cartCount}
+          unreadMessageCount={counters.unreadMessageCount}
+        />
 
         <main id="main-content" className="flex-1 bg-white">
           {children}
