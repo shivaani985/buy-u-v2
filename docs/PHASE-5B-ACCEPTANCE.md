@@ -57,3 +57,20 @@
 - `pg_cron` is available but NOT installed; moved `CREATE EXTENSION pg_cron` + `cron.schedule('*/2 * * * *', ...)` into an explicit owner-approval scheduler section (with external cron Option B documented). Page-visit opportunistic reconciliation is documented as best-effort fallback only, not the sole expiry mechanism.
 - Added `isOfferHoldPayable` (`src/lib/messages/offers.ts`) so 30-minute hold expiry and order status are enforced server-side regardless of sweep timing.
 - Documented Phase 6 late ToyyibPay payment reconciliation contract: if a payment webhook confirms after an order expired and stock was released, Phase 6 must NOT oversell or re-deduct stock — it logs the payment for refund/admin reconciliation and notifies buyer & admin.
+
+---
+
+## Phase 5B — Hosted Live Acceptance Results (`duwwlcpdidrxkixvflag`)
+
+- **Migration & `pg_cron`:** Verified deployed by owner (`pg_cron` Job ID 1 active and executed).
+- **Isolated Live QA Results (Temporary Pre-Loved listing `05d108bb-bd19-497c-90e1-98959ec01e4a`):**
+  1. `INSERT` guard & timestamp override: **PASS** — rejected forged `status='accepted'`, forged `reservation_expires_at`, `< RM 2.00` (`199`), `> listing.price_sen` (`2500`), and wrong seller; overrode forged `2099` timestamps to exact `created_at + 24.00h`.
+  2. Realtime `public.offers`: **PASS** — `examiner.seller` subscribed (`SUBSCRIBED`) and received live `INSERT` and `UPDATE` events.
+  3. `UPDATE` guard bypass block: **PASS** — direct seller `UPDATE status='accepted'` rejected (`Offers must be accepted via accept_offer_atomic to reserve stock atomically`).
+  4. Buyer cancel, seller decline & unlimited proposals: **PASS** — 6th sequential offer (`be1114e1-deff-4b16-9c85-32904f76a47c`) accepted (zero 5-proposal cap).
+  5. Bidirectional member blocks: **PASS** — `seller → buyer` block rejected buyer offer `INSERT`; `buyer → seller` block rejected `accept_offer_atomic` (`MEMBER_BLOCKED`).
+  6. 24-hour expiry enforcement: **PASS** — 25h-old pending offer rejected by `accept_offer_atomic` (`OFFER_NOT_PENDING` after opportunistic sweep).
+  7. Atomic `stock=1` competing accepts: **PASS** — concurrent `Promise.all` accept of 2 offers yielded exactly 1 winner, 1 `OUT_OF_STOCK` loser, `reserved_quantity = 1` (zero overselling), and double-accept rejected (`OFFER_NOT_PENDING`).
+  8. 30-minute hold release & idempotency: **PASS** — `release_expired_offer_reservations()` returned `1` (`status='expired'`, `reservation_released_at` set, `reserved_quantity=0`); repeat call returned `0`.
+  9. **Security Finding (Follow-up 1-function SQL patch):** `is_member_blocked_between` checked `current_user` inside `SECURITY DEFINER` (which is always `'postgres'`), allowing outsider `examiner.staff` to call it directly and receive `false`. Fixed in `docs/sql/phase-5b-atomic-bargaining.sql` to check `COALESCE(auth.role(), '') = 'authenticated'` so outsiders receive `42501`.
+- **Cleanup & Data Integrity:** **PASS (0-DIFF)** — BEFORE and AFTER snapshots match identically (`listingCount: 2`, `IOT Box` untouched, `offerCount: 0`, `orderCount: 1`, `blockCount: 0`, `conversations.last_message_at` restored).

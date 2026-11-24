@@ -68,7 +68,9 @@ BEGIN
     RETURN false;
   END IF;
 
-  IF current_user NOT IN ('postgres', 'service_role')
+  -- Inside SECURITY DEFINER, `current_user` is always 'postgres', so check
+  -- `auth.role()` instead to enforce caller scope on PostgREST authenticated calls.
+  IF COALESCE(auth.role(), '') = 'authenticated'
      AND (v_uid IS NULL OR (v_uid <> p_user_a AND v_uid <> p_user_b)) THEN
     RAISE EXCEPTION 'Forbidden block status lookup'
       USING ERRCODE = '42501';
