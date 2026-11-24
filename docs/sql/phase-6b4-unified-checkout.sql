@@ -1839,8 +1839,7 @@ DECLARE
   v_checkout_session_id uuid;
 BEGIN
   UPDATE public.offers
-  SET status = 'expired',
-      updated_at = v_now
+  SET status = 'expired'
   WHERE status = 'pending'
     AND expires_at <= v_now;
 
@@ -1923,8 +1922,7 @@ BEGIN
 
       UPDATE public.offers
       SET status = 'expired',
-          reservation_released_at = v_now,
-          updated_at = v_now
+          reservation_released_at = v_now
       WHERE id = v_rec.id;
 
       v_released := v_released + 1;
