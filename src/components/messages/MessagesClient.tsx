@@ -33,6 +33,7 @@ import {
   createOfferAction,
   declineOfferAction,
 } from "@/app/messages/offer-actions";
+import { startOfferToyyibPayCheckoutAction } from "@/app/checkout/actions";
 import { OfferCard } from "@/components/messages/OfferCard";
 import type {
   ChatMessageItem,
@@ -1213,6 +1214,38 @@ export function MessagesClient({
                           onCancel={(id) =>
                             void runOfferAction(id, cancelOfferAction)
                           }
+                          onPay={async (id) => {
+                            setBusyOfferIds((prev) => ({ ...prev, [id]: true }));
+                            setOfferRowErrors((prev) => {
+                              const next = { ...prev };
+                              delete next[id];
+                              return next;
+                            });
+                            try {
+                              const res = await startOfferToyyibPayCheckoutAction(id);
+                              if (!res.ok || !res.billUrl) {
+                                setOfferRowErrors((prev) => ({
+                                  ...prev,
+                                  [id]:
+                                    res.error ||
+                                    "Could not open ToyyibPay bill right now.",
+                                }));
+                                return;
+                              }
+                              window.location.assign(res.billUrl);
+                            } catch {
+                              setOfferRowErrors((prev) => ({
+                                ...prev,
+                                [id]: "Network error while starting payment.",
+                              }));
+                            } finally {
+                              setBusyOfferIds((prev) => {
+                                const next = { ...prev };
+                                delete next[id];
+                                return next;
+                              });
+                            }
+                          }}
                         />
                       );
                     }

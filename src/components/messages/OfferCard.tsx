@@ -1,6 +1,6 @@
 "use client";
 
-import { AlertCircle, Clock, Loader2, Tag } from "lucide-react";
+import { AlertCircle, Clock, ExternalLink, Loader2, Tag } from "lucide-react";
 import {
   formatRemainingDuration,
   resolveEffectiveOfferStatus,
@@ -19,6 +19,7 @@ interface OfferCardProps {
   onAccept: (offerId: string) => void;
   onDecline: (offerId: string) => void;
   onCancel: (offerId: string) => void;
+  onPay?: (offerId: string) => void;
 }
 
 function formatOfferTime(iso: string): string {
@@ -43,6 +44,7 @@ export function OfferCard({
   onAccept,
   onDecline,
   onCancel,
+  onPay,
 }: OfferCardProps) {
   const isBuyer = offer.buyerId.toLowerCase() === currentUserId.toLowerCase();
   const isSeller = offer.sellerId.toLowerCase() === currentUserId.toLowerCase();
@@ -109,20 +111,30 @@ export function OfferCard({
         {effectiveStatus === "accepted" ? (
           <div className="mt-3 border-t border-[#ECEAF3] pt-2.5 text-xs text-[#4A4656]">
             <p className="font-semibold text-[#14121A]">
-              Offer accepted — not yet paid
+              {isBuyer
+                ? "Offer accepted — complete FPX payment"
+                : "Offer accepted — awaiting buyer payment"}
             </p>
             <p className="mt-0.5 text-[11px] text-[#6B6779]">
-              1 unit held for 30 minutes. ToyyibPay FPX checkout opens in Phase
-              6.
+              1 unit held for 30 minutes at locked price (+ RM 1.00 FPX fee).
             </p>
-            <button
-              type="button"
-              disabled
-              aria-disabled="true"
-              className="mt-2 w-full cursor-not-allowed rounded-xl bg-[#C9C4D6] px-3 py-1.5 text-xs font-bold text-white"
-            >
-              Payment Opens in Phase 6
-            </button>
+            {isBuyer && onPay ? (
+              <button
+                type="button"
+                disabled={isBusy}
+                onClick={() => onPay(offer.id)}
+                className="mt-2 inline-flex w-full items-center justify-center gap-1.5 rounded-xl bg-[#4E2A84] px-3 py-2 text-xs font-bold text-white transition hover:bg-[#3F216B] disabled:opacity-50"
+              >
+                {isBusy ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                ) : (
+                  <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
+                )}
+                <span>
+                  {isBusy ? "Opening ToyyibPay..." : "Pay with ToyyibPay FPX"}
+                </span>
+              </button>
+            ) : null}
           </div>
         ) : null}
 

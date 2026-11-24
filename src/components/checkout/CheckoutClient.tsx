@@ -7,6 +7,7 @@ import {
   ArrowLeft,
   Check,
   Clock,
+  ExternalLink,
   Landmark,
   Loader2,
   MapPin,
@@ -16,7 +17,12 @@ import {
   User,
   Utensils,
 } from "lucide-react";
-import { revalidateCheckoutAction } from "@/app/checkout/actions";
+import {
+  revalidateCheckoutAction,
+  retryOrderSandboxBillAction,
+  startCartToyyibPayCheckoutAction,
+  type CreatedOrderBillView,
+} from "@/app/checkout/actions";
 import {
   extractPriceSnapshots,
   type CheckoutPreparationSummary,
@@ -73,6 +79,72 @@ export function CheckoutClient({
     text: string;
   } | null>(null);
   const [isRefreshing, startRefreshTransition] = useTransition();
+  const [idempotencyKey] = useState<string>(() =>
+    typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+      ? `cart-${crypto.randomUUID()}`
+      : `cart-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+  );
+  const [isPaying, setIsPaying] = useState(false);
+  const [paymentError, setPaymentError] = useState<string | null>(null);
+  const [createdBills, setCreatedBills] = useState<CreatedOrderBillView[] | null>(null);
+  const [retryingOrderId, setRetryingOrderId] = useState<string | null>(null);
+
+  async function handleStartToyyibPayCheckout() {
+    if (!preparation.canProceedToPayment || isPaying || isRefreshing) return;
+    setPaymentError(null);
+    setIsPaying(true);
+    try {
+      const res = await startCartToyyibPayCheckoutAction({
+        idempotencyKey,
+        priceSnapshots,
+      });
+
+      if (!res.ok && (!res.orders || res.orders.length === 0)) {
+        setPaymentError(
+          res.error || "Could not start ToyyibPay FPX checkout. Please try again."
+        );
+        return;
+      }
+
+      const orders = res.orders ?? [];
+      setCreatedBills(orders);
+
+      // Single-seller cart with ready bill: redirect straight to ToyyibPay Sandbox FPX
+      if (orders.length === 1 && orders[0]?.billUrl && !orders[0]?.error) {
+        window.location.assign(orders[0].billUrl);
+      }
+    } catch {
+      setPaymentError("Network error while creating payment bill. Please try again.");
+    } finally {
+      setIsPaying(false);
+    }
+  }
+
+  async function handleRetrySellerBill(orderId: string) {
+    setRetryingOrderId(orderId);
+    setPaymentError(null);
+    try {
+      const res = await retryOrderSandboxBillAction(orderId);
+      setCreatedBills((prev) =>
+        prev
+          ? prev.map((b) =>
+              b.orderId === orderId
+                ? {
+                    ...b,
+                    billCode: res.billCode ?? b.billCode,
+                    billUrl: res.billUrl ?? b.billUrl,
+                    error: res.ok ? undefined : res.error || "Retry failed.",
+                  }
+                : b
+            )
+          : prev
+      );
+    } catch {
+      setPaymentError("Network error while retrying seller bill.");
+    } finally {
+      setRetryingOrderId(null);
+    }
+  }
 
   function handleRevalidate() {
     setRefreshMessage(null);
@@ -180,10 +252,92 @@ export function CheckoutClient({
         <span className="text-[#C7C3D4]" aria-hidden="true">
           /
         </span>
-        <span className="text-[#6B6779]">
-          3. ToyyibPay FPX Payment (Coming Soon)
+        <span className="text-[#4E2A84] font-semibold">
+          3. ToyyibPay Sandbox FPX
         </span>
       </nav>
+
+      {/* Multi-Seller / Created Bills Payment Queue */}
+      {createdBills && createdBills.length > 0 ? (
+        <section
+          aria-label="Created ToyyibPay FPX bills"
+          className="rounded-2xl border border-[#4E2A84]/25 bg-white p-5 sm:p-6"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <p className="text-xs font-bold uppercase tracking-wider text-[#4E2A84]">
+                Orders Reserved · 15-Minute Hold Active
+              </p>
+              <h2 className="mt-0.5 text-lg font-extrabold text-[#14121A]">
+                {createdBills.length === 1
+                  ? "Redirecting to ToyyibPay Sandbox FPX..."
+                  : `Complete Payment for ${createdBills.length} Separate Seller Orders`}
+              </h2>
+            </div>
+            <Link
+              href="/orders"
+              className="text-xs font-bold text-[#4E2A84] hover:underline"
+            >
+              View in My Orders
+            </Link>
+          </div>
+          <p className="mt-1.5 text-xs text-[#6B6779]">
+            Each seller order has its own ToyyibPay FPX bill (RM 1.00 FPX fee per
+            bill). Pay each bill before its 15-minute reservation expires.
+          </p>
+
+          <ul className="mt-4 divide-y divide-[#ECEAF3] rounded-xl border border-[#E6E3EE]">
+            {createdBills.map((b) => (
+              <li
+                key={b.orderId}
+                className="flex flex-wrap items-center justify-between gap-3 px-4 py-3.5"
+              >
+                <div className="min-w-0">
+                  <p className="text-sm font-bold text-[#14121A]">
+                    #{b.orderCode} &middot; {b.sellerName}
+                  </p>
+                  <p className="mt-0.5 text-xs text-[#6B6779]">
+                    Subtotal {formatSenToRm(b.subtotalSen)} + FPX{" "}
+                    {formatSenToRm(b.fpxFeeSen)} ={" "}
+                    <strong className="font-extrabold text-[#4E2A84]">
+                      {formatSenToRm(b.totalPaidSen)}
+                    </strong>
+                  </p>
+                  {b.error ? (
+                    <p className="mt-1 text-xs font-semibold text-[#B42318]">
+                      {b.error}
+                    </p>
+                  ) : null}
+                </div>
+
+                {b.billUrl ? (
+                  <a
+                    href={b.billUrl}
+                    className="inline-flex items-center gap-1.5 rounded-xl bg-[#4E2A84] px-4 py-2 text-xs font-bold text-white transition hover:bg-[#3F216B]"
+                  >
+                    <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span>Pay Seller Bill</span>
+                  </a>
+                ) : (
+                  <button
+                    type="button"
+                    disabled={retryingOrderId === b.orderId}
+                    onClick={() => handleRetrySellerBill(b.orderId)}
+                    className="inline-flex items-center gap-1.5 rounded-xl border border-[#4E2A84] bg-white px-4 py-2 text-xs font-bold text-[#4E2A84] transition hover:bg-[#FAF8FD] disabled:opacity-50"
+                  >
+                    {retryingOrderId === b.orderId ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                    ) : (
+                      <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />
+                    )}
+                    <span>Retry Bill</span>
+                  </button>
+                )}
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
 
       {/* Blocking Issues Alert */}
       {preparation.blockingReasons.length > 0 ? (
@@ -567,7 +721,7 @@ export function CheckoutClient({
             ))}
           </div>
 
-          {/* ToyyibPay FPX Payment Section (Disabled Preview) */}
+          {/* ToyyibPay Sandbox FPX Payment Section */}
           <section className="rounded-2xl border border-[#E6E3EE] bg-white p-5 sm:p-6">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2">
@@ -576,34 +730,53 @@ export function CheckoutClient({
                   aria-hidden="true"
                 />
                 <h2 className="text-base font-bold text-[#14121A]">
-                  Payment Method — ToyyibPay FPX
+                  Payment Method — ToyyibPay FPX (Sandbox)
                 </h2>
               </div>
-              <span className="text-xs font-bold text-[#1D70B8]">
-                Payment integration coming soon
+              <span className="text-xs font-bold text-[#008285]">
+                Server-Verified FPX Online Banking
               </span>
             </div>
 
             <p className="mt-3 text-sm leading-relaxed text-[#4A4656]">
-              Online banking payments via ToyyibPay FPX (MYR) will be enabled in
-              the upcoming payment phase. Gateway fees will be displayed once
-              live ToyyibPay billing is connected.
+              Pay securely via Malaysian FPX online banking on ToyyibPay
+              Sandbox. Clicking Pay reserves your items for 15 minutes and
+              creates one bill per seller (RM 1.00 FPX fee per bill).
             </p>
 
             <p className="mt-2 text-xs text-[#6B6779]">
-              No order records, payment bills, pickup PINs, or stock
-              reservations are created on this page, and your cart items remain
-              untouched.
+              Payment confirmation is verified server-to-server with ToyyibPay
+              before your order is marked Paid and your private campus pickup
+              PIN is generated.
             </p>
+
+            {paymentError ? (
+              <p
+                role="alert"
+                className="mt-3 flex items-start gap-1.5 text-xs font-semibold text-[#B42318]"
+              >
+                <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+                <span>{paymentError}</span>
+              </p>
+            ) : null}
 
             <div className="mt-4">
               <button
                 type="button"
-                disabled
-                aria-disabled="true"
-                className="inline-flex w-full cursor-not-allowed items-center justify-center rounded-xl bg-[#C9C4D6] px-5 py-3 text-sm font-bold text-white sm:w-auto"
+                disabled={!preparation.canProceedToPayment || isPaying || isRefreshing}
+                onClick={handleStartToyyibPayCheckout}
+                className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-[#4E2A84] px-5 py-3 text-sm font-bold text-white transition hover:bg-[#3F216B] disabled:cursor-not-allowed disabled:bg-[#C9C4D6] sm:w-auto"
               >
-                Pay with ToyyibPay FPX — Coming Soon
+                {isPaying ? (
+                  <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                ) : (
+                  <ExternalLink className="h-4 w-4" aria-hidden="true" />
+                )}
+                <span>
+                  {isPaying
+                    ? "Creating ToyyibPay Bill..."
+                    : "Pay with ToyyibPay FPX"}
+                </span>
               </button>
             </div>
           </section>
@@ -706,19 +879,26 @@ export function CheckoutClient({
           <div className="mt-5 space-y-3">
             <button
               type="button"
-              disabled
-              aria-disabled="true"
-              className="flex w-full cursor-not-allowed items-center justify-center rounded-xl bg-[#C9C4D6] px-5 py-3 text-sm font-bold text-white"
+              disabled={!preparation.canProceedToPayment || isPaying || isRefreshing}
+              onClick={handleStartToyyibPayCheckout}
+              className="flex w-full items-center justify-center gap-2 rounded-xl bg-[#4E2A84] px-5 py-3 text-sm font-bold text-white transition hover:bg-[#3F216B] disabled:cursor-not-allowed disabled:bg-[#C9C4D6]"
             >
-              {preparation.canProceedToPayment
-                ? "Payment Integration Coming Soon"
-                : "Resolve Issues Before Payment"}
+              {isPaying ? (
+                <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+              ) : null}
+              <span>
+                {isPaying
+                  ? "Creating ToyyibPay Bill..."
+                  : preparation.canProceedToPayment
+                    ? "Pay with ToyyibPay FPX"
+                    : "Resolve Issues Before Payment"}
+              </span>
             </button>
 
             <p className="text-xs leading-relaxed text-[#6B6779]">
               RM 1.00 ToyyibPay FPX fee applies per seller order. Buy-U&apos;s
               2% platform commission is deducted from seller payout at no extra
-              cost to buyers. Payment execution opens in Phase 6B.
+              cost to buyers.
             </p>
 
             <Link

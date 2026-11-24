@@ -785,3 +785,44 @@ test("Phase 6B.2 reserved-stock guard SQL protects listings and listing_variants
     /42501:DELETE_RESERVED/
   );
 });
+
+test("Phase 6B.3 ToyyibPay Sandbox integration enforces server-only secrets, sandbox pinning, server-side verification, duplicate-bill guard, and pickup_pin seller isolation", () => {
+  const root = process.cwd();
+  const serverMod = fs.readFileSync(
+    path.resolve(root, "src/lib/payments/toyyibpay-server.ts"),
+    "utf8"
+  );
+  const callbackRoute = fs.readFileSync(
+    path.resolve(root, "src/app/api/payments/toyyibpay/callback/route.ts"),
+    "utf8"
+  );
+  const returnPage = fs.readFileSync(
+    path.resolve(root, "src/app/orders/return/page.tsx"),
+    "utf8"
+  );
+
+  // 1. Server-only & strictly ToyyibPay Sandbox pinned
+  assert.ok(serverMod.includes('typeof window !== "undefined"'));
+  assert.ok(serverMod.includes("TOYYIBPAY_SANDBOX_SECRET_KEY"));
+  assert.ok(serverMod.includes("TOYYIBPAY_SANDBOX_CATEGORY_CODE"));
+  assert.equal(serverMod.includes("NEXT_PUBLIC_TOYYIBPAY"), false);
+  assert.ok(serverMod.includes('https://dev.toyyibpay.com'));
+
+  // 2. Duplicate-bill prevention: single-flight lock + pending bill reuse
+  assert.ok(serverMod.includes("inFlightBillCreations"));
+  assert.ok(serverMod.includes('livePayment?.status === "pending"'));
+
+  // 3. Callback & Return routes NEVER confirm paid directly; both call verifyAndReconcileBillPayment -> getBillTransactions -> confirm_order_payment_atomic
+  assert.ok(callbackRoute.includes("verifyAndReconcileBillPayment"));
+  assert.equal(callbackRoute.includes(".rpc("), false);
+  assert.ok(returnPage.includes("verifyAndReconcileBillPayment"));
+  assert.equal(returnPage.includes(".rpc("), false);
+  assert.ok(serverMod.includes("/index.php/api/getBillTransactions"));
+  assert.ok(serverMod.includes('"confirm_order_payment_atomic"'));
+
+  // 4. Seller code NEVER queries or exposes pickup_pin
+  for (const rel of ["src/lib/seller/data.ts", "src/app/seller/actions.ts"]) {
+    const content = fs.readFileSync(path.resolve(root, rel), "utf8");
+    assert.equal(content.includes("pickup_pin"), false, `${rel} must never query pickup_pin`);
+  }
+});

@@ -1,8 +1,23 @@
-# Phase 6B — Isolated ToyyibPay Sandbox & Atomic Order Test Plan
+# Phase 6B.3 — Isolated ToyyibPay Sandbox Acceptance Plan (Gate 2)
 
-**Status:** Proposal / Ready for Owner Authorization (ZERO live calls or migrations executed yet).
+**Status:** Gate 1 Complete (code, routes, UI, and local tests verified). **STOPPED FOR OWNER APPROVAL** before any external ToyyibPay Sandbox API call or bill creation.
+**Prerequisites Verified (Phase 6B.2 Closed — 15/15 PASS, 9/9 Security Retests):**
+- `docs/sql/phase-6a-order-payment-foundation.sql` deployed; `pg_cron` Jobs 1 & 2 active.
+- `docs/sql/phase-6b2-reserved-stock-guard.sql` deployed (`a7bda62`).
+- Server env ready: `TOYYIBPAY_SANDBOX_SECRET_KEY` (set), `TOYYIBPAY_SANDBOX_CATEGORY_CODE` (set), hard-pinned to `https://dev.toyyibpay.com`.
+- Note on local webhook callback: ToyyibPay's server-to-server `callbackUrl` requires a publicly reachable HTTPS URL to hit `POST /api/payments/toyyibpay/callback`; on `localhost:3000`, `/orders/return` and `/api/payments/toyyibpay/verify` still perform authoritative server-to-server `getBillTransactions` verification cleanly.
 
-## 1. Pre-Flight SQL Deployment (Requires Owner Approval)
+## 0. Gate 2 Isolated Sandbox Acceptance Scenarios (Run Only After Owner Approval)
+1. **Fee-Contract Visual Check (First Bill):** Create 1 isolated synthetic QA cart order (`subtotal = RM 15.00`, `fpx_fee = RM 1.00`, `total_paid_sen = 1600`) → open `https://dev.toyyibpay.com/<billCode>` and visually confirm **exact `RM 16.00`** (NOT `RM 17.00`), proving `billChargeToCustomer: ""` prevents RM 1.00 double-charging.
+2. **Duplicate-Bill Prevention:** Retry/double-submit the same order → confirm existing pending `bill_code` is reused (zero duplicate Sandbox bills).
+3. **Single-Seller Cart Payment + Server Verification:** Complete FPX Sandbox approval → land on `/orders/return` → confirm server-to-server `getBillTransactions` triggers `confirm_order_payment_atomic`, order becomes `paid`, stock decrements, 6-digit `pickup_pin` appears ONLY to buyer (never seller), and duplicate callback returns `already_paid`.
+4. **Multi-Seller Cart Checkout + Partial Retry:** Checkout 2 synthetic sellers → confirm 2 separate orders & 2 separate Sandbox bills (`RM 1.00` FPX each, `2%` seller commission each), and confirm retrying a single seller bill works without affecting sibling bills.
+5. **Accepted-Offer Checkout:** Accept synthetic Pre-Loved offer → buyer clicks **Pay with ToyyibPay FPX** on `OfferCard` → confirm `create_offer_order_atomic` reuses existing 30m hold (`reserved_quantity` stays `1`, no double-reserve) and creates Sandbox bill at locked offer price + RM 1.00 FPX.
+6. **Failed / Cancelled Payment & Retry:** Cancel/fail on Sandbox bank screen → confirm `payments.status = 'failed'`, order stays `pending_payment` before deadline, and **Retry ToyyibPay FPX** on `/orders` creates a fresh bill.
+7. **Expired Order + Late Payment Reconciliation:** Confirm expired order releases stock via `pg_cron` Job 2 and any late verified payment routes to `late_payment_review` with zero stock deduction.
+8. **0-Diff Cleanup:** Release any remaining QA holds, delete ONLY QA-created rows, and confirm exact 0-diff across all 9 hosted tables.
+
+## 1. Pre-Flight SQL Deployment (Completed in Phase 6B.2)
 
 1. Run `docs/sql/phase-6a-order-payment-foundation.sql` (`BEGIN; ... COMMIT;`) on `duwwlcpdidrxkixvflag`:
    - Extends `payments_status_check` to `('pending','paid','failed','expired','late_payment_review')`.

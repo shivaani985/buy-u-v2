@@ -11,7 +11,7 @@ let cachedServiceClient: SupabaseClient | null = null;
  *
  * NEVER import this module from any client component.
  */
-function getServerServiceClient(): SupabaseClient | null {
+export function getServerServiceClient(): SupabaseClient | null {
   if (typeof window !== "undefined") {
     throw new Error("Server service client cannot be used in the browser.");
   }

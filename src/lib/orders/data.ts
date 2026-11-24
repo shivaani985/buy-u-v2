@@ -2,6 +2,7 @@ import { evaluateBuyerEligibility, type BuyerEligibilityResult } from "@/lib/buy
 import { resolvePublicStorageUrl } from "@/lib/format";
 import { getPublicSupabaseEnv } from "@/lib/supabase/env";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { getServerServiceClient } from "@/lib/supabase/service";
 import type { AuthSessionSummary } from "@/types/marketplace";
 
 export interface BuyerOrderItemView {
@@ -11,6 +12,12 @@ export interface BuyerOrderItemView {
   unitSen: number;
   quantity: number;
   imageUrl: string | null;
+}
+
+export interface BuyerOrderPaymentView {
+  billCode: string;
+  billUrl: string | null;
+  status: string;
 }
 
 export interface BuyerOrderView {
@@ -28,6 +35,9 @@ export interface BuyerOrderView {
   paidAt: string | null;
   completedAt: string | null;
   createdAt: string;
+  /** Strictly buyer-only pickup PIN (never queried or exposed on seller routes). */
+  pickupPin: string | null;
+  latestPayment: BuyerOrderPaymentView | null;
   items: BuyerOrderItemView[];
 }
 
@@ -58,7 +68,7 @@ export async function getBuyerOrdersData(
   const { data: rawOrders, error: ordersErr } = await supabase
     .from("orders")
     .select(
-      "id,order_code,source,seller_id,status,subtotal_sen,fpx_fee_sen,total_paid_sen,collection_area_name,payment_deadline,paid_at,completed_at,created_at"
+      "id,order_code,source,seller_id,status,subtotal_sen,fpx_fee_sen,total_paid_sen,collection_area_name,payment_deadline,paid_at,completed_at,created_at,pickup_pin"
     )
     .eq("buyer_id", eligibility.userId)
     .order("created_at", { ascending: false })
@@ -86,6 +96,7 @@ export async function getBuyerOrdersData(
     paid_at: string | null;
     completed_at: string | null;
     created_at: string;
+    pickup_pin: string | null;
   }>;
 
   if (orderRows.length === 0) {
@@ -94,8 +105,9 @@ export async function getBuyerOrdersData(
 
   const orderIds = orderRows.map((o) => o.id);
   const sellerIds = Array.from(new Set(orderRows.map((o) => o.seller_id)));
+  const service = getServerServiceClient();
 
-  const [itemsRes, profilesRes, storefrontsRes] = await Promise.all([
+  const [itemsRes, profilesRes, storefrontsRes, paymentsRes] = await Promise.all([
     supabase
       .from("order_items")
       .select("id,order_id,listing_id,title_snapshot,unit_sen,quantity,image_path")
@@ -108,7 +120,30 @@ export async function getBuyerOrdersData(
       .from("storefronts")
       .select("seller_id,shop_name")
       .in("seller_id", sellerIds),
+    service
+      ? service
+          .from("payments")
+          .select("order_id,bill_code,bill_url,status,created_at")
+          .in("order_id", orderIds)
+          .order("created_at", { ascending: false })
+      : Promise.resolve({ data: [] }),
   ]);
+
+  const latestPaymentByOrder = new Map<string, BuyerOrderPaymentView>();
+  for (const p of (paymentsRes.data ?? []) as Array<{
+    order_id: string;
+    bill_code: string;
+    bill_url: string | null;
+    status: string;
+  }>) {
+    if (!latestPaymentByOrder.has(p.order_id)) {
+      latestPaymentByOrder.set(p.order_id, {
+        billCode: p.bill_code,
+        billUrl: p.bill_url,
+        status: p.status,
+      });
+    }
+  }
 
   const itemsByOrder = new Map<string, BuyerOrderItemView[]>();
   for (const row of (itemsRes.data ?? []) as Array<{
@@ -161,6 +196,11 @@ export async function getBuyerOrdersData(
     paidAt: o.paid_at,
     completedAt: o.completed_at,
     createdAt: o.created_at,
+    pickupPin:
+      o.status === "paid" || o.status === "ready_for_pickup"
+        ? o.pickup_pin
+        : null,
+    latestPayment: latestPaymentByOrder.get(o.id) ?? null,
     items: itemsByOrder.get(o.id) ?? [],
   }));
 
