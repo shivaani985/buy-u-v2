@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ArrowLeft } from "lucide-react";
+import { ListingViewTracker } from "@/components/listings/ListingViewTracker";
 import { ProductDetailClient } from "@/components/listings/ProductDetailClient";
 import { DataSourceBanner } from "@/components/shared/DataSourceBanner";
 import { getProductDetailData } from "@/lib/buyer/data";
@@ -104,6 +105,10 @@ export default async function ListingDetailPage({
             liveHref={`/listings/${encodeURIComponent(slug)}`}
           />
         </div>
+      ) : null}
+
+      {!product.isDemo && session.isAuthenticated ? (
+        <ListingViewTracker listingId={product.id} />
       ) : null}
 
       <ProductDetailClient

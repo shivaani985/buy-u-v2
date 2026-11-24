@@ -14,7 +14,6 @@ import {
   createSupabaseServerClient,
   getSessionSummary,
 } from "@/lib/supabase/server";
-import { getServerServiceClient } from "@/lib/supabase/service";
 
 export interface MarketplaceActionResult {
   ok: boolean;
@@ -75,6 +74,12 @@ export async function createServiceRequestAction(input: {
     if (error.message.includes("SERVICE_PAUSED")) {
       return { ok: false, message: "This provider has paused new requests." };
     }
+    if (error.message.includes("INVALID_SERVICE_MODE")) {
+      return { ok: false, message: "Selected delivery mode is not supported by this service." };
+    }
+    if (error.message.includes("PROVIDER_INACTIVE")) {
+      return { ok: false, message: "This service provider is currently unavailable." };
+    }
     return { ok: false, message: "Could not submit service request right now." };
   }
 
@@ -122,7 +127,7 @@ export async function updateServiceRequestAction(input: {
 }
 
 // -----------------------------------------------------------------------------
-// Phase 8B: Free Items & Community Donations (free_notices + free_notice_claims)
+// Phase 8B: Free Items & Community Donations (free_notice_drafts + publish_free_notice_atomic)
 // -----------------------------------------------------------------------------
 export async function saveOrPublishFreeNoticeAction(input: {
   id?: string | null;
@@ -149,6 +154,7 @@ export async function saveOrPublishFreeNoticeAction(input: {
     return { ok: false, message: "Account not found." };
   }
 
+  const cleanImages = (input.imagePaths ?? []).map((p) => p.trim()).filter(Boolean).slice(0, 5);
   const check = validateFreeNoticeInput({
     title: input.title,
     description: input.description,
@@ -157,49 +163,73 @@ export async function saveOrPublishFreeNoticeAction(input: {
     spotId: input.spotId,
     categoryId: input.categoryId,
     collectionInstructions: input.collectionInstructions,
-    imagePaths: input.imagePaths ?? [],
+    imagePaths: cleanImages,
+    mode: input.mode,
   });
   if (!check.ok) return { ok: false, message: check.error };
 
-  const service = getServerServiceClient();
-  if (!service) return { ok: false, message: "Database unavailable." };
+  const supabase = await createSupabaseServerClient();
+  if (!supabase) return { ok: false, message: "Database unavailable." };
 
-  const nowIso = new Date().toISOString();
-  const payload = {
-    contributor_id: uid,
-    title: input.title.trim(),
-    description: input.description.trim(),
-    condition: input.condition.trim(),
-    quantity: Number(input.quantity),
-    quantity_note: `${Number(input.quantity)} available`,
-    spot_id: input.spotId,
-    category_id: input.categoryId || null,
-    collection_instructions: input.collectionInstructions?.trim() || null,
-    image_paths: input.imagePaths ?? [],
-    status: input.mode,
-    published_at: input.mode === "published" ? nowIso : null,
-    updated_at: nowIso,
-  };
+  if (input.mode === "draft") {
+    const draftPayload = {
+      contributor_id: uid,
+      title: input.title.trim(),
+      description: input.description.trim(),
+      condition: input.condition?.trim() || "Good / Usable",
+      quantity: Math.max(1, Math.min(99, Math.round(Number(input.quantity) || 1))),
+      spot_id: input.spotId?.trim() || null,
+      category_id: input.categoryId?.trim() || null,
+      collection_instructions: input.collectionInstructions?.trim() || null,
+      image_paths: cleanImages,
+      updated_at: new Date().toISOString(),
+    };
 
-  if (input.id && isValidUuid(input.id)) {
-    const { error } = await service
-      .from("free_notices")
-      .update(payload)
-      .eq("id", input.id)
-      .eq("contributor_id", uid);
-    if (error) return { ok: false, message: "Could not update free item." };
-  } else {
-    const { error } = await service.from("free_notices").insert(payload);
-    if (error) return { ok: false, message: "Could not save free item." };
+    if (input.id && isValidUuid(input.id)) {
+      const { error } = await supabase
+        .from("free_notice_drafts")
+        .update(draftPayload)
+        .eq("id", input.id)
+        .eq("contributor_id", uid);
+      if (error) return { ok: false, message: "Could not update free-item draft." };
+    } else {
+      const { error } = await supabase.from("free_notice_drafts").insert(draftPayload);
+      if (error) return { ok: false, message: "Could not save free-item draft." };
+    }
+
+    revalidatePath("/free-items");
+    return {
+      ok: true,
+      message: "Free item draft saved persistently. You can resume it anytime.",
+    };
+  }
+
+  const { error } = await supabase.rpc("publish_free_notice_atomic", {
+    p_title: input.title.trim(),
+    p_description: input.description.trim(),
+    p_condition: input.condition.trim(),
+    p_quantity: Math.max(1, Math.min(99, Math.round(Number(input.quantity) || 1))),
+    p_spot_id: input.spotId.trim(),
+    p_category_id: input.categoryId?.trim() || null,
+    p_collection_instructions: input.collectionInstructions?.trim() || null,
+    p_image_paths: cleanImages,
+    p_draft_id: input.id && isValidUuid(input.id) ? input.id : null,
+  });
+
+  if (error) {
+    if (error.message.includes("IMAGES_REQUIRED")) {
+      return { ok: false, message: "Upload 1 to 5 photos before publishing a free item." };
+    }
+    if (error.message.includes("INVALID_DONATION_SPOT")) {
+      return { ok: false, message: "Select an active campus donation spot." };
+    }
+    return { ok: false, message: "Could not publish free item right now." };
   }
 
   revalidatePath("/free-items");
   return {
     ok: true,
-    message:
-      input.mode === "draft"
-        ? "Free item draft saved persistently. You can resume it anytime."
-        : "Free item published to the community board.",
+    message: "Free item published to the community board.",
   };
 }
 
@@ -325,6 +355,44 @@ export async function submitVerifiedReviewAction(input: {
   revalidatePath("/requests");
   revalidatePath("/seller/analytics");
   return { ok: true, message: "Verified review published. Thank you for helping the UMS community." };
+}
+
+export async function editVerifiedReviewAction(input: {
+  reviewId: string;
+  rating: number;
+  comment: string;
+}): Promise<MarketplaceActionResult> {
+  if (!isValidUuid(input.reviewId)) {
+    return { ok: false, message: "Invalid review reference." };
+  }
+  const session = await getSessionSummary();
+  const elig = evaluateBuyerEligibility(session);
+  if (!elig.eligible) {
+    return { ok: false, message: elig.reason || "Active member access required." };
+  }
+  const check = validateReviewInput({ rating: input.rating, comment: input.comment });
+  if (!check.ok) return { ok: false, message: check.error };
+
+  const supabase = await createSupabaseServerClient();
+  if (!supabase) return { ok: false, message: "Database unavailable." };
+
+  const { error } = await supabase.rpc("edit_verified_review_atomic", {
+    p_review_id: input.reviewId,
+    p_rating: check.rating,
+    p_comment: check.comment,
+  });
+
+  if (error) {
+    if (error.message.includes("REVIEW_HIDDEN_LOCKED")) {
+      return { ok: false, message: "Moderated reviews cannot be edited." };
+    }
+    return { ok: false, message: "Could not update review right now." };
+  }
+
+  revalidatePath("/orders");
+  revalidatePath("/requests");
+  revalidatePath("/seller/analytics");
+  return { ok: true, message: "Verified review updated." };
 }
 
 export async function respondToReviewAction(input: {
@@ -552,6 +620,33 @@ export async function adminModerateListingAction(input: {
   return { ok: true, message: input.hide ? "Listing hidden and audited." : "Listing restored and audited." };
 }
 
+export async function adminModerateFreeNoticeAction(input: {
+  noticeId: string;
+  hide: boolean;
+  reason: string;
+}): Promise<MarketplaceActionResult> {
+  if (!isValidUuid(input.noticeId)) return { ok: false, message: "Invalid free item reference." };
+  const session = await getSessionSummary();
+  if (!session.isAuthenticated || !session.isActiveAdmin) {
+    return { ok: false, message: "Active administrator access required." };
+  }
+  const supabase = await createSupabaseServerClient();
+  if (!supabase) return { ok: false, message: "Database unavailable." };
+
+  const { error } = await supabase.rpc("admin_moderate_free_notice_atomic", {
+    p_notice_id: input.noticeId,
+    p_hide: input.hide,
+    p_reason: input.reason.trim(),
+  });
+  if (error) return { ok: false, message: "Could not moderate free item." };
+  revalidatePath("/admin");
+  revalidatePath("/free-items");
+  return {
+    ok: true,
+    message: input.hide ? "Free item hidden and audited." : "Free item restored and audited.",
+  };
+}
+
 export async function adminModerateReviewAction(input: {
   reviewId: string;
   hide: boolean;
@@ -585,23 +680,16 @@ export async function adminToggleSpotOrCategoryAction(input: {
   if (!session.isAuthenticated || !session.isActiveAdmin || !adminId) {
     return { ok: false, message: "Active administrator access required." };
   }
-  const service = getServerServiceClient();
-  if (!service) return { ok: false, message: "Database unavailable." };
+  const supabase = await createSupabaseServerClient();
+  if (!supabase) return { ok: false, message: "Database unavailable." };
 
-  const { error } = await service
-    .from(input.table)
-    .update({ active: input.active })
-    .eq("id", input.id);
-  if (error) return { ok: false, message: "Could not update catalog visibility." };
-
-  await service.from("admin_audit_logs").insert({
-    admin_id: adminId,
-    action: `${input.table}_${input.active ? "activated" : "deactivated"}`,
-    target_kind: input.table,
-    target_id: input.id,
-    reason: "Admin catalog visibility toggle",
-    details: { active: input.active },
+  const { error } = await supabase.rpc("admin_toggle_catalog_item_atomic", {
+    p_table: input.table,
+    p_item_id: input.id,
+    p_active: input.active,
+    p_reason: `Admin ${input.active ? "activated" : "deactivated"} ${input.table} item ${input.id}`,
   });
+  if (error) return { ok: false, message: "Could not update catalog visibility." };
 
   revalidatePath("/admin");
   revalidatePath("/free-items");

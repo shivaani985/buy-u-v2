@@ -154,26 +154,92 @@ export async function saveStorefrontAction(
     nextLogoPath = storagePath;
   }
 
+  const removeBanner = formData.get("removeBanner") === "on";
+  const bannerFile = formData.get("banner");
+  let nextBannerPath: string | null | undefined = undefined;
+
+  if (removeBanner) {
+    nextBannerPath = null;
+  } else if (bannerFile instanceof File && bannerFile.size > 0) {
+    const fileCheck = validateImageFileMeta({
+      name: bannerFile.name,
+      type: bannerFile.type,
+      size: bannerFile.size,
+    });
+    if (!fileCheck.ok) {
+      return { status: "error", message: fileCheck.error };
+    }
+
+    const storagePath = `storefronts/${auth.userId}/banner-${Date.now()}.${fileCheck.ext}`;
+    const bytes = new Uint8Array(await bannerFile.arrayBuffer());
+    const { error: uploadErr } = await auth.supabase.storage
+      .from("listings")
+      .upload(storagePath, bytes, {
+        contentType: bannerFile.type,
+        upsert: true,
+      });
+
+    if (uploadErr) {
+      return {
+        status: "error",
+        message: `Banner upload failed: ${uploadErr.message}`,
+      };
+    }
+    nextBannerPath = storagePath;
+  }
+
+  const businessInfo = String(formData.get("businessInfo") ?? "").trim().slice(0, 400);
+  const isOpen = formData.get("isOpen") === "on";
+
   const payload: {
     seller_id: string;
     shop_name: string;
     description: string;
+    business_info: string | null;
+    is_open: boolean;
     updated_at: string;
     logo_path?: string | null;
+    banner_path?: string | null;
   } = {
     seller_id: auth.userId,
     shop_name: validated.shopName,
     description: validated.description,
+    business_info: businessInfo || null,
+    is_open: isOpen,
     updated_at: new Date().toISOString(),
   };
 
   if (nextLogoPath !== undefined) {
     payload.logo_path = nextLogoPath;
   }
+  if (nextBannerPath !== undefined) {
+    payload.banner_path = nextBannerPath;
+  }
 
-  const { error } = await auth.supabase
+  let { error } = await auth.supabase
     .from("storefronts")
     .upsert(payload, { onConflict: "seller_id" });
+
+  // Graceful fallback if optional Phase 8C columns have not yet been migrated
+  if (error && /banner_path|business_info|is_open/i.test(error.message)) {
+    const legacyPayload: {
+      seller_id: string;
+      shop_name: string;
+      description: string;
+      updated_at: string;
+      logo_path?: string | null;
+    } = {
+      seller_id: auth.userId,
+      shop_name: validated.shopName,
+      description: validated.description,
+      updated_at: payload.updated_at,
+    };
+    if (nextLogoPath !== undefined) legacyPayload.logo_path = nextLogoPath;
+    const retry = await auth.supabase
+      .from("storefronts")
+      .upsert(legacyPayload, { onConflict: "seller_id" });
+    error = retry.error;
+  }
 
   if (error) {
     return {
@@ -184,6 +250,7 @@ export async function saveStorefrontAction(
 
   revalidatePath("/seller");
   revalidatePath("/seller/storefront");
+  revalidatePath(`/store/${auth.userId}`);
   return {
     status: "success",
     message: "Storefront details saved.",

@@ -11,6 +11,8 @@ import { formatCurrencySen, formatShortDate } from "@/lib/format";
 
 export interface SellerAnalyticsViewProps {
   range: AnalyticsRangeKey;
+  customStart?: string | null;
+  customEnd?: string | null;
   analytics: {
     kpis: {
       grossSalesSen: number;
@@ -75,13 +77,21 @@ const RANGES: Array<{ key: AnalyticsRangeKey; label: string }> = [
 
 export function SellerAnalyticsClient({
   range,
+  customStart = null,
+  customEnd = null,
   analytics,
   recentReviews,
 }: SellerAnalyticsViewProps) {
   const router = useRouter();
+  const [startDate, setStartDate] = useState(customStart ?? "");
+  const [endDate, setEndDate] = useState(customEnd ?? "");
   const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({});
   const [replyStatus, setReplyStatus] = useState<string | null>(null);
   const { kpis } = analytics;
+  const exportQuery =
+    range === "custom" && customStart && customEnd
+      ? `range=custom&start=${encodeURIComponent(customStart)}&end=${encodeURIComponent(customEnd)}`
+      : `range=${range}`;
 
   async function sendReply(reviewId: string) {
     const text = (replyDrafts[reviewId] ?? "").trim();
@@ -109,9 +119,43 @@ export function SellerAnalyticsClient({
               {r.label}
             </Link>
           ))}
+          <form
+            className="flex flex-wrap items-center gap-1.5"
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (startDate && endDate && endDate >= startDate) {
+                router.push(
+                  `/seller/analytics?range=custom&start=${encodeURIComponent(startDate)}&end=${encodeURIComponent(endDate)}`
+                );
+              }
+            }}
+          >
+            <input
+              type="date"
+              aria-label="Custom start date"
+              value={startDate}
+              onChange={(e) => setStartDate(e.target.value)}
+              className="rounded-lg border border-[#E6E3EE] bg-white px-2 py-1 text-xs"
+            />
+            <span className="text-xs text-[#6B6779]">to</span>
+            <input
+              type="date"
+              aria-label="Custom end date"
+              value={endDate}
+              onChange={(e) => setEndDate(e.target.value)}
+              className="rounded-lg border border-[#E6E3EE] bg-white px-2 py-1 text-xs"
+            />
+            <button
+              type="submit"
+              disabled={!startDate || !endDate || endDate < startDate}
+              className="rounded-lg bg-[#008285] px-2.5 py-1 text-xs font-bold text-white disabled:opacity-40"
+            >
+              Apply
+            </button>
+          </form>
         </div>
         <a
-          href={`/api/seller/analytics/export?range=${range}`}
+          href={`/api/seller/analytics/export?${exportQuery}`}
           className="inline-flex items-center gap-1.5 rounded-xl border border-[#4E2A84] px-3.5 py-1.5 text-xs font-bold text-[#4E2A84] hover:bg-[#F3EEFA]"
         >
           <Download className="h-3.5 w-3.5" />

@@ -22,7 +22,7 @@ export const dynamic = "force-dynamic";
 export default async function SellerAnalyticsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ range?: string }>;
+  searchParams: Promise<{ range?: string; start?: string; end?: string }>;
 }) {
   const [session, sp] = await Promise.all([getSessionSummary(), searchParams]);
   const elig = evaluateSellerEligibility(session);
@@ -36,8 +36,15 @@ export default async function SellerAnalyticsPage({
   }
 
   const rawRange = sp.range;
+  const customStart = sp.start?.trim() || null;
+  const customEnd = sp.end?.trim() || null;
   const range: AnalyticsRangeKey =
-    rawRange === "7d" || rawRange === "30d" || rawRange === "90d" || rawRange === "this_month" || rawRange === "all"
+    rawRange === "7d" ||
+    rawRange === "30d" ||
+    rawRange === "90d" ||
+    rawRange === "this_month" ||
+    rawRange === "all" ||
+    (rawRange === "custom" && customStart && customEnd)
       ? rawRange
       : "30d";
 
@@ -46,7 +53,7 @@ export default async function SellerAnalyticsPage({
     Promise.resolve(getServerServiceClient()),
   ]);
 
-  const win = resolveAnalyticsWindow(range);
+  const win = resolveAnalyticsWindow(range, undefined, customStart, customEnd);
   const analytics = computeSellerAnalytics(
     sellerId,
     dataset ?? {
@@ -78,15 +85,25 @@ export default async function SellerAnalyticsPage({
   }> = [];
 
   if (service) {
-    const { data } = await service
+    const revRes = await service
       .from("reviews")
-      .select("id,rating,comment,created_at")
+      .select("id,rating,comment,seller_response,created_at")
       .eq("seller_id", sellerId)
       .eq("hidden", false)
       .order("created_at", { ascending: false })
-      .limit(20);
+      .limit(20)
+      .then(async (res) => {
+        if (!res.error) return res;
+        return service
+          .from("reviews")
+          .select("id,rating,comment,created_at")
+          .eq("seller_id", sellerId)
+          .eq("hidden", false)
+          .order("created_at", { ascending: false })
+          .limit(20);
+      });
 
-    recentReviews = ((data ?? []) as Array<{ id: string; rating: number; comment: string; seller_response?: string | null; created_at: string }>).map((r) => ({
+    recentReviews = ((revRes.data ?? []) as Array<{ id: string; rating: number; comment: string; seller_response?: string | null; created_at: string }>).map((r) => ({
       id: r.id,
       rating: r.rating,
       comment: r.comment,
@@ -106,7 +123,13 @@ export default async function SellerAnalyticsPage({
           Verified sales trends, listing conversion, service requests, and customer ratings (MYT).
         </p>
       </div>
-      <SellerAnalyticsClient range={range} analytics={analytics} recentReviews={recentReviews} />
+      <SellerAnalyticsClient
+        range={range}
+        customStart={customStart}
+        customEnd={customEnd}
+        analytics={analytics}
+        recentReviews={recentReviews}
+      />
     </div>
   );
 }

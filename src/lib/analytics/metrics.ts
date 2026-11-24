@@ -33,8 +33,15 @@ export function resolveAnalyticsWindow(
     return { key: "all", startMs: null, endMs: nowMs, prevStartMs: null, prevEndMs: null };
   }
   if (range === "custom" && customStartIso && customEndIso) {
-    const s = Date.parse(customStartIso);
-    const e = Date.parse(customEndIso);
+    // Date-only inputs (YYYY-MM-DD) span full MYT calendar days [00:00:00+08:00, 23:59:59.999+08:00]
+    const normStart = /^\d{4}-\d{2}-\d{2}$/.test(customStartIso.trim())
+      ? `${customStartIso.trim()}T00:00:00+08:00`
+      : customStartIso;
+    const normEnd = /^\d{4}-\d{2}-\d{2}$/.test(customEndIso.trim())
+      ? `${customEndIso.trim()}T23:59:59.999+08:00`
+      : customEndIso;
+    const s = Date.parse(normStart);
+    const e = Date.parse(normEnd);
     if (!Number.isNaN(s) && !Number.isNaN(e) && e >= s) {
       const span = Math.max(DAY_MS, e - s);
       return { key: "custom", startMs: s, endMs: e, prevStartMs: s - span, prevEndMs: s };
@@ -253,27 +260,54 @@ export function computeSellerAnalytics(
   }
 
   const netSalesSen = Math.max(0, grossSalesSen - executedRefundsSen);
-  const periodOrderIds = new Set(periodOrders.map((o) => o.id));
+  const periodOrderById = new Map(periodOrders.map((o) => [o.id, o]));
+  const itemsByOrder = new Map<string, typeof data.orderItems>();
+  for (const oi of data.orderItems) {
+    if (!periodOrderById.has(oi.order_id)) continue;
+    const arr = itemsByOrder.get(oi.order_id) ?? [];
+    arr.push(oi);
+    itemsByOrder.set(oi.order_id, arr);
+  }
+
   const productPerf = new Map<
     string,
-    { listingId: string; title: string; unitsSold: number; revenueSen: number; orders: number }
+    {
+      listingId: string;
+      title: string;
+      unitsSold: number;
+      revenueSen: number;
+      orders: number;
+      purchasers: Set<string>;
+    }
   >();
   let unitsSold = 0;
-  for (const oi of data.orderItems) {
-    if (!periodOrderIds.has(oi.order_id)) continue;
-    unitsSold += oi.quantity;
-    const lid = oi.listing_id ?? oi.title_snapshot;
-    const cur = productPerf.get(lid) ?? {
-      listingId: lid,
-      title: oi.title_snapshot,
-      unitsSold: 0,
-      revenueSen: 0,
-      orders: 0,
-    };
-    cur.unitsSold += oi.quantity;
-    cur.revenueSen += oi.unit_sen * oi.quantity;
-    cur.orders += 1;
-    productPerf.set(lid, cur);
+  for (const [orderId, items] of itemsByOrder.entries()) {
+    const ord = periodOrderById.get(orderId);
+    if (!ord) continue;
+    const refProd = refundByOrder.get(orderId)?.product ?? 0;
+    const netOrdSen = Math.max(0, ord.subtotal_sen - refProd);
+    const grossItemsSum = items.reduce((s, it) => s + it.unit_sen * it.quantity, 0);
+
+    for (const oi of items) {
+      unitsSold += oi.quantity;
+      const lid = oi.listing_id ?? oi.title_snapshot;
+      const cur = productPerf.get(lid) ?? {
+        listingId: lid,
+        title: oi.title_snapshot,
+        unitsSold: 0,
+        revenueSen: 0,
+        orders: 0,
+        purchasers: new Set<string>(),
+      };
+      const lineGross = oi.unit_sen * oi.quantity;
+      const lineNet =
+        grossItemsSum > 0 ? Math.round((netOrdSen * lineGross) / grossItemsSum) : 0;
+      cur.unitsSold += oi.quantity;
+      cur.revenueSen += lineNet;
+      cur.orders += 1;
+      cur.purchasers.add(ord.buyer_id);
+      productPerf.set(lid, cur);
+    }
   }
 
   const periodViews = data.views.filter(
@@ -296,6 +330,14 @@ export function computeSellerAnalytics(
     const uniqueViewers = viewsByListing.get(l.id)?.size ?? 0;
     const perf = productPerf.get(l.id);
     const ordCount = perf?.orders ?? 0;
+    const uniquePurchasers = perf?.purchasers.size ?? 0;
+    // Viewer-to-purchaser conversion is bounded [0, 100]% and N/A when uniqueViewers === 0
+    const conversionPct =
+      uniqueViewers > 0
+        ? Math.min(100, Number(((uniquePurchasers / uniqueViewers) * 100).toFixed(1)))
+        : null;
+    const ordersPerViewer =
+      uniqueViewers > 0 ? Number((ordCount / uniqueViewers).toFixed(2)) : null;
     return {
       id: l.id,
       title: l.title,
@@ -304,11 +346,12 @@ export function computeSellerAnalytics(
       availableStock: Math.max(0, l.quantity - l.reserved_quantity),
       views: periodViews.filter((v) => v.listing_id === l.id).length,
       uniqueViewers,
+      uniquePurchasers,
       favourites: favCountByListing.get(l.id) ?? 0,
       unitsSold: perf?.unitsSold ?? 0,
       revenueSen: perf?.revenueSen ?? 0,
-      conversionPct:
-        uniqueViewers > 0 ? Number(((ordCount / uniqueViewers) * 100).toFixed(1)) : null,
+      conversionPct,
+      ordersPerViewer,
     };
   });
 
@@ -398,22 +441,53 @@ export function computeAdminPlatformAnalytics(
   const periodOrders = verifiedOrdersAll.filter((o) => inRange(o.paid_at, window.startMs, window.endMs));
   const listingById = new Map(data.listings.map((l) => [l.id, l]));
 
-  // Genuine active users in period (measured by orders, views, service requests, claims, or last_active_at — NEVER merely status='active')
+  // Genuine active users in period (dated platform events + last_active_at — NEVER merely status='active')
   const activeUserIds = new Set<string>();
+  const activeUsersByDay = new Map<string, Set<string>>();
+  function recordDatedActivity(iso: string | null | undefined, userId: string) {
+    if (!inRange(iso, window.startMs, window.endMs)) return;
+    activeUserIds.add(userId);
+    const dk = toMytDayKey(iso!);
+    if (!dk) return;
+    const s = activeUsersByDay.get(dk) ?? new Set<string>();
+    s.add(userId);
+    activeUsersByDay.set(dk, s);
+  }
+
   for (const p of data.profiles) {
     if (inRange(p.last_active_at, window.startMs, window.endMs)) activeUserIds.add(p.id);
   }
   for (const o of periodOrders) {
-    activeUserIds.add(o.buyer_id);
-    activeUserIds.add(o.seller_id);
+    recordDatedActivity(o.paid_at ?? o.created_at, o.buyer_id);
+    recordDatedActivity(o.paid_at ?? o.created_at, o.seller_id);
   }
   for (const v of data.views) {
-    if (inRange(v.viewed_at, window.startMs, window.endMs)) activeUserIds.add(v.viewer_id);
+    recordDatedActivity(v.viewed_at, v.viewer_id);
   }
   for (const sr of data.serviceRequests) {
-    if (inRange(sr.created_at, window.startMs, window.endMs)) {
-      activeUserIds.add(sr.buyer_id);
-      activeUserIds.add(sr.seller_id);
+    recordDatedActivity(sr.created_at, sr.buyer_id);
+    recordDatedActivity(sr.created_at, sr.seller_id);
+  }
+  for (const fc of data.freeClaims) {
+    recordDatedActivity(fc.created_at, fc.donor_id);
+    recordDatedActivity(fc.created_at, fc.recipient_id);
+  }
+
+  // First-time successful sellers: sellers whose earliest-ever verified completed order falls in window
+  const earliestCompletedBySeller = new Map<string, number>();
+  for (const o of verifiedOrdersAll) {
+    if (o.status !== "completed") continue;
+    const ts = Date.parse(o.completed_at ?? o.paid_at ?? o.created_at);
+    if (Number.isNaN(ts)) continue;
+    const prev = earliestCompletedBySeller.get(o.seller_id);
+    if (prev === undefined || ts < prev) {
+      earliestCompletedBySeller.set(o.seller_id, ts);
+    }
+  }
+  let firstTimeSuccessfulSellers = 0;
+  for (const firstTs of earliestCompletedBySeller.values()) {
+    if ((window.startMs === null || firstTs >= window.startMs) && firstTs <= window.endMs) {
+      firstTimeSuccessfulSellers += 1;
     }
   }
 
@@ -426,17 +500,17 @@ export function computeAdminPlatformAnalytics(
   const sellerSales = new Map<string, number>();
   const buyerOrderCounts = new Map<string, number>();
 
-  // Student Entrepreneurship distinct cohorts (Section 11)
+  // Student Entrepreneurship distinct cohorts (P0.9: strictly kind === 'business', never mixing via is_food)
   const studentBusinessListingIds = new Set(
-    data.listings.filter((l) => l.kind === "business" || l.is_food).map((l) => l.id)
+    data.listings.filter((l) => l.kind === "business").map((l) => l.id)
   );
   const studentBusinessSellersPublished = new Set(
     data.listings
-      .filter((l) => (l.kind === "business" || l.is_food) && l.status === "published")
+      .filter((l) => l.kind === "business" && l.status === "published")
       .map((l) => l.seller_id)
   );
   const preLovedSellers = new Set(
-    data.listings.filter((l) => l.kind === "pre_loved" && !l.is_food).map((l) => l.seller_id)
+    data.listings.filter((l) => l.kind === "pre_loved").map((l) => l.seller_id)
   );
   const serviceProviders = new Set(
     data.listings.filter((l) => l.kind === "service" && l.status === "published").map((l) => l.seller_id)
@@ -470,25 +544,39 @@ export function computeAdminPlatformAnalytics(
     buyerOrderCounts.set(o.buyer_id, (buyerOrderCounts.get(o.buyer_id) ?? 0) + 1);
 
     const items = orderItemsByOrder.get(o.id) ?? [];
-    let isBusinessOrder = false;
-    let isPreLovedOrder = false;
+    const grossItemsSum = items.reduce((s, it) => s + it.unit_sen * it.quantity, 0);
+    let hasBusinessItem = false;
+    let hasPreLovedItem = false;
+    let businessGrossSum = 0;
+
     for (const oi of items) {
       const listing = oi.listing_id ? listingById.get(oi.listing_id) : null;
       const cat = listing?.category_id ?? "other-goods";
-      salesByCat.set(cat, (salesByCat.get(cat) ?? 0) + oi.unit_sen * oi.quantity);
+      const lineGross = oi.unit_sen * oi.quantity;
+      // Proportional net revenue attribution across multi-item orders & refunds
+      const lineNet =
+        grossItemsSum > 0 ? Math.round((netOrd * lineGross) / grossItemsSum) : 0;
+      salesByCat.set(cat, (salesByCat.get(cat) ?? 0) + lineNet);
+
       if (oi.listing_id && studentBusinessListingIds.has(oi.listing_id)) {
-        isBusinessOrder = true;
-      } else if (listing && listing.kind === "pre_loved" && !listing.is_food) {
-        isPreLovedOrder = true;
+        hasBusinessItem = true;
+        businessGrossSum += lineGross;
+      } else if (listing && listing.kind === "pre_loved") {
+        hasPreLovedItem = true;
       }
     }
-    if (isBusinessOrder) {
+
+    if (hasBusinessItem) {
       activeBusinessSellersInPeriod.add(o.seller_id);
-      studentBusinessSalesSen += netOrd;
-      studentBusinessEarningsSen += netEarns;
+      const bizSales =
+        grossItemsSum > 0 ? Math.round((netOrd * businessGrossSum) / grossItemsSum) : netOrd;
+      const bizEarns =
+        grossItemsSum > 0 ? Math.round((netEarns * businessGrossSum) / grossItemsSum) : netEarns;
+      studentBusinessSalesSen += bizSales;
+      studentBusinessEarningsSen += bizEarns;
       studentBusinessOrders += 1;
     }
-    if (isPreLovedOrder && o.status === "completed") {
+    if (hasPreLovedItem && o.status === "completed") {
       preLovedCompletedTransactions += 1;
     }
   }
@@ -530,13 +618,16 @@ export function computeAdminPlatformAnalytics(
       completedDonations: community.completedDonations,
     },
     listingsByType: {
-      preLoved: data.listings.filter((l) => l.kind === "pre_loved" && !l.is_food).length,
-      studentBusiness: data.listings.filter((l) => l.kind === "business" || l.is_food).length,
+      preLoved: data.listings.filter((l) => l.kind === "pre_loved").length,
+      studentBusiness: data.listings.filter((l) => l.kind === "business").length,
       services: data.listings.filter((l) => l.kind === "service").length,
-      freeItems: data.freeNotices.length,
+      freeItems: data.freeNotices.filter((n) => n.status === "active" || n.status === "closed").length,
     },
     salesTrend: Array.from(salesByDay.entries())
       .map(([day, amountSen]) => ({ day, amountSen }))
+      .sort((a, b) => a.day.localeCompare(b.day)),
+    activeUsersTrend: Array.from(activeUsersByDay.entries())
+      .map(([day, set]) => ({ day, users: set.size }))
       .sort((a, b) => a.day.localeCompare(b.day)),
     categorySales: Array.from(salesByCat.entries())
       .map(([categoryId, amountSen]) => ({ categoryId, amountSen }))
@@ -556,8 +647,12 @@ export function computeAdminPlatformAnalytics(
     },
     trustAndSafety: {
       totalReports: periodReports.length,
-      openReports: data.reports.filter((r) => r.status === "open" || r.status === "under_review").length,
-      resolvedReports: data.reports.filter((r) => r.status === "resolved" || r.status === "dismissed").length,
+      openReports: data.reports.filter(
+        (r) => r.status === "submitted" || r.status === "under_review"
+      ).length,
+      resolvedReports: data.reports.filter(
+        (r) => r.status === "resolved" || r.status === "dismissed"
+      ).length,
       activeDisputes: data.disputes.filter((d) => d.status === "open" || d.status === "under_review").length,
       resolvedDisputes: data.disputes.filter((d) => d.status === "resolved").length,
       disputeRatePct:
@@ -567,6 +662,7 @@ export function computeAdminPlatformAnalytics(
     entrepreneurship: {
       publishedStudentBusinessSellers: studentBusinessSellersPublished.size,
       activeStudentBusinessSellers: activeBusinessSellersInPeriod.size,
+      firstTimeSuccessfulSellers,
       preLovedSellersCount: preLovedSellers.size,
       activeServiceProviders: serviceProviders.size,
       completedStudentBusinessOrders: studentBusinessOrders,
@@ -582,6 +678,35 @@ export function computeAdminPlatformAnalytics(
       donatedUnits: community.totalUnitsDonated,
     },
   };
+}
+
+export interface PaginatedResult<T> {
+  data: T[] | null;
+  error: { message?: string } | null;
+}
+
+/**
+ * Fetches all rows from a PostgREST query in chunks of `pageSize` using `.range()`,
+ * avoiding Supabase's default 1,000-row truncation on analytics aggregates.
+ */
+export async function fetchAllPaginated<T>(
+  fetchPage: (from: number, to: number) => PromiseLike<PaginatedResult<T>>,
+  pageSize: number = 1000,
+  maxPages: number = 50
+): Promise<T[]> {
+  const rows: T[] = [];
+  for (let page = 0; page < maxPages; page += 1) {
+    const from = page * pageSize;
+    const to = from + pageSize - 1;
+    const res = await fetchPage(from, to);
+    if (res.error || !Array.isArray(res.data)) {
+      if (page === 0) return [];
+      break;
+    }
+    rows.push(...res.data);
+    if (res.data.length < pageSize) break;
+  }
+  return rows;
 }
 
 /**

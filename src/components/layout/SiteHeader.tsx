@@ -25,17 +25,22 @@ interface SiteHeaderProps {
   session: AuthSessionSummary;
   cartCount?: number;
   unreadMessageCount?: number;
+  unreadNotificationCount?: number;
 }
 
 export function SiteHeader({
   session,
   cartCount = 0,
   unreadMessageCount = 0,
+  unreadNotificationCount = 0,
 }: SiteHeaderProps) {
   const pathname = usePathname();
   const router = useRouter();
   const [searchQuery, setSearchQuery] = useState("");
   const [liveUnreadOverride, setLiveUnreadOverride] = useState<number | null>(
+    null
+  );
+  const [liveNotifOverride, setLiveNotifOverride] = useState<number | null>(
     null
   );
   const [mobileOpenPath, setMobileOpenPath] = useState<string | null>(null);
@@ -44,6 +49,8 @@ export function SiteHeader({
 
   const effectiveUnreadCount =
     liveUnreadOverride !== null ? liveUnreadOverride : unreadMessageCount;
+  const effectiveNotifCount =
+    liveNotifOverride !== null ? liveNotifOverride : unreadNotificationCount;
   const authUserId = session.isAuthenticated ? session.profile?.id ?? null : null;
 
   // Live navbar Messages badge sync via local events + authenticated Realtime notifications
@@ -86,14 +93,24 @@ export function SiteHeader({
 
       async function refreshUnreadCount() {
         if (!supabase || !authUserId || disposed) return;
-        const { count } = await supabase
-          .from("notifications")
-          .select("id", { count: "exact", head: true })
-          .eq("user_id", authUserId)
-          .is("read_at", null)
-          .in("kind", ["new_message", "message"]);
-        if (!disposed && typeof count === "number") {
-          setLiveUnreadOverride(Math.max(0, count));
+        const [msgRes, allRes] = await Promise.all([
+          supabase
+            .from("notifications")
+            .select("id", { count: "exact", head: true })
+            .eq("user_id", authUserId)
+            .is("read_at", null)
+            .in("kind", ["new_message", "message"]),
+          supabase
+            .from("notifications")
+            .select("id", { count: "exact", head: true })
+            .eq("user_id", authUserId)
+            .is("read_at", null),
+        ]);
+        if (!disposed && typeof msgRes.count === "number") {
+          setLiveUnreadOverride(Math.max(0, msgRes.count));
+        }
+        if (!disposed && typeof allRes.count === "number") {
+          setLiveNotifOverride(Math.max(0, allRes.count));
         }
       }
 
@@ -372,18 +389,34 @@ export function SiteHeader({
             ) : null}
           </Link>
 
-          {/* Phase 9D: Active Notifications Bell */}
+          {/* Phase 9D: Active Notifications Bell with live unread badge */}
           <Link
             href="/notifications"
-            title="Notifications"
-            aria-label="Notifications"
-            className={`hidden h-9 w-9 items-center justify-center rounded-full transition-colors xl:flex ${
+            title={
+              effectiveNotifCount > 0
+                ? `Notifications (${effectiveNotifCount} unread)`
+                : "Notifications"
+            }
+            aria-label={
+              effectiveNotifCount > 0
+                ? `Notifications, ${effectiveNotifCount} unread`
+                : "Notifications"
+            }
+            className={`relative hidden h-9 w-9 items-center justify-center rounded-full transition-colors xl:flex ${
               pathname === "/notifications"
                 ? "bg-[#F3EEFA] text-[#4E2A84]"
                 : "text-[#4A4656] hover:bg-[#F3EEFA] hover:text-[#4E2A84]"
             }`}
           >
             <Bell className="h-[19px] w-[19px]" aria-hidden="true" />
+            {effectiveNotifCount > 0 ? (
+              <span
+                aria-hidden="true"
+                className="absolute -top-0.5 -right-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-[#008285] px-1 text-[10px] font-bold leading-none text-white"
+              >
+                {effectiveNotifCount > 99 ? "99+" : effectiveNotifCount}
+              </span>
+            ) : null}
           </Link>
 
           <span className="hidden h-5 w-px bg-[#DCD9E6] xl:block" aria-hidden="true" />
@@ -623,6 +656,19 @@ export function SiteHeader({
               {effectiveUnreadCount > 0 ? (
                 <span className="text-xs font-bold text-[#4E2A84]">
                   {effectiveUnreadCount} unread
+                </span>
+              ) : null}
+            </Link>
+
+            <Link
+              href="/notifications"
+              onClick={() => setMobileOpen(false)}
+              className="flex items-center justify-between rounded-lg px-3 py-2.5 text-sm font-semibold text-[#14121A] hover:bg-[#F4F2FA] hover:text-[#4E2A84]"
+            >
+              <span>Notifications</span>
+              {effectiveNotifCount > 0 ? (
+                <span className="text-xs font-bold text-[#008285]">
+                  {effectiveNotifCount} unread
                 </span>
               ) : null}
             </Link>

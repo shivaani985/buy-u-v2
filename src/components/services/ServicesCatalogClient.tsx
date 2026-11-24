@@ -40,7 +40,7 @@ export function ServicesCatalogClient({
   const [category, setCategory] = useState("all");
   const [modeFilter, setModeFilter] = useState("all");
   const [selected, setSelected] = useState<ServiceCatalogCard | null>(null);
-  const [reqMode, setReqMode] = useState<"in_person" | "remote" | "both">("in_person");
+  const [reqMode, setReqMode] = useState<"in_person" | "remote">("in_person");
   const [requirements, setRequirements] = useState("");
   const [preferredDate, setPreferredDate] = useState("");
   const [busy, setBusy] = useState(false);
@@ -189,7 +189,7 @@ export function ServicesCatalogClient({
                     disabled={!canRequest || !s.acceptingRequests}
                     onClick={() => {
                       setSelected(s);
-                      setReqMode((s.serviceMode as "in_person" | "remote" | "both") || "in_person");
+                      setReqMode(s.serviceMode === "remote" ? "remote" : "in_person");
                     }}
                     className="rounded-xl bg-[#4E2A84] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#3F216C] disabled:opacity-50"
                   >
@@ -219,21 +219,25 @@ export function ServicesCatalogClient({
               <label className="text-xs font-bold text-[#4A4656]">Delivery Mode</label>
               <select
                 value={reqMode}
-                onChange={(e) => setReqMode(e.target.value as "in_person" | "remote" | "both")}
+                onChange={(e) => setReqMode(e.target.value as "in_person" | "remote")}
                 className="w-full rounded-xl border border-[#DFDCE8] px-3 py-2 text-xs"
               >
-                <option value="in_person">In-Person (Campus)</option>
-                <option value="remote">Remote / Online</option>
-                <option value="both">Flexible (Both)</option>
+                {selected.serviceMode !== "remote" ? (
+                  <option value="in_person">In-Person (Campus)</option>
+                ) : null}
+                {selected.serviceMode !== "in_person" ? (
+                  <option value="remote">Remote / Online</option>
+                ) : null}
               </select>
             </div>
             <div className="space-y-1">
-              <label className="text-xs font-bold text-[#4A4656]">Preferred Date / Time Arrangement</label>
+              <label className="text-xs font-bold text-[#4A4656]">
+                Preferred Date &amp; Time (optional, MYT)
+              </label>
               <input
-                type="text"
+                type="datetime-local"
                 value={preferredDate}
                 onChange={(e) => setPreferredDate(e.target.value)}
-                placeholder="e.g. Tomorrow 3 PM at UMSKAL Library or Google Meet"
                 className="w-full rounded-xl border border-[#DFDCE8] px-3 py-2 text-xs"
               />
             </div>

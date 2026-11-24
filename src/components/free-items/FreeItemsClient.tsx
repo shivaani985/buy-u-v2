@@ -2,17 +2,19 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { Gift, MapPin, CheckCircle2, AlertCircle, Search } from "lucide-react";
+import { Gift, MapPin, CheckCircle2, AlertCircle, Search, ImagePlus, X } from "lucide-react";
 import {
   createFreeClaimAction,
   saveOrPublishFreeNoticeAction,
   updateFreeClaimAction,
 } from "@/app/marketplace-actions";
+import { resolvePublicStorageUrl } from "@/lib/format";
 import {
   computeFreeAvailableQuantity,
   getAllowedFreeClaimActions,
   type CommunityImpactSummary,
 } from "@/lib/marketplace/phase8";
+import { getSupabaseBrowserClient } from "@/lib/supabase/client";
 
 export interface FreeNoticeCard {
   id: string;
@@ -25,6 +27,8 @@ export interface FreeNoticeCard {
   spotName: string;
   categoryId: string | null;
   collectionInstructions: string | null;
+  imagePaths: string[];
+  imageUrl: string | null;
   status: string;
   contributorId: string;
   donorName: string;
@@ -52,6 +56,7 @@ export function FreeItemsClient({
   canPublish,
   canClaim,
   currentUserId,
+  supabaseUrl,
 }: {
   notices: FreeNoticeCard[];
   drafts: FreeNoticeCard[];
@@ -62,12 +67,14 @@ export function FreeItemsClient({
   canPublish: boolean;
   canClaim: boolean;
   currentUserId: string | null;
+  supabaseUrl: string;
 }) {
   const router = useRouter();
   const [tab, setTab] = useState<"browse" | "publish" | "claims" | "spots">("browse");
   const [query, setQuery] = useState("");
   const [spotFilter, setSpotFilter] = useState("all");
   const [busy, setBusy] = useState<string | null>(null);
+  const [uploadingPhotos, setUploadingPhotos] = useState(false);
   const [feedback, setFeedback] = useState<{ ok: boolean; text: string } | null>(null);
 
   // Publish / Draft form state
@@ -79,6 +86,7 @@ export function FreeItemsClient({
   const [spotId, setSpotId] = useState(spots[0]?.id ?? "blok-alpha");
   const [categoryId, setCategoryId] = useState(categories[0]?.id ?? "");
   const [instructions, setInstructions] = useState("");
+  const [imagePaths, setImagePaths] = useState<string[]>([]);
 
   const filtered = notices.filter((n) => {
     if (spotFilter !== "all" && n.spotId !== spotFilter) return false;
@@ -91,14 +99,65 @@ export function FreeItemsClient({
 
   function loadDraft(d: FreeNoticeCard) {
     setEditingId(d.id);
-    setTitle(d.title);
+    setTitle(d.title === "Untitled Draft" ? "" : d.title);
     setDescription(d.description);
     setCondition(d.condition || "Good / Usable");
     setQuantity(Math.max(1, d.quantity));
     setSpotId(d.spotId || spots[0]?.id || "blok-alpha");
     setCategoryId(d.categoryId || "");
     setInstructions(d.collectionInstructions || "");
+    setImagePaths(d.imagePaths ?? []);
     setTab("publish");
+  }
+
+  async function handlePhotoUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(e.target.files ?? []);
+    if (files.length === 0 || !currentUserId) return;
+    const supabase = getSupabaseBrowserClient();
+    if (!supabase) {
+      setFeedback({ ok: false, text: "Storage upload unavailable." });
+      return;
+    }
+
+    const remainingSlots = Math.max(0, 5 - imagePaths.length);
+    if (remainingSlots === 0) {
+      setFeedback({ ok: false, text: "Maximum 5 photos allowed per free item." });
+      return;
+    }
+
+    setUploadingPhotos(true);
+    setFeedback(null);
+    const uploaded: string[] = [];
+    const allowedTypes = new Set(["image/jpeg", "image/png", "image/webp"]);
+
+    try {
+      for (const file of files.slice(0, remainingSlots)) {
+        if (!allowedTypes.has(file.type)) {
+          setFeedback({ ok: false, text: "Only JPG, PNG, or WebP photos are supported." });
+          continue;
+        }
+        if (file.size > 5 * 1024 * 1024) {
+          setFeedback({ ok: false, text: "Each photo must be 5 MB or smaller." });
+          continue;
+        }
+        const ext = file.type === "image/png" ? "png" : file.type === "image/webp" ? "webp" : "jpg";
+        const path = `${currentUserId}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+        const { error } = await supabase.storage
+          .from("free-items")
+          .upload(path, file, { contentType: file.type, upsert: false });
+        if (error) {
+          setFeedback({ ok: false, text: `Photo upload failed: ${error.message}` });
+          continue;
+        }
+        uploaded.push(path);
+      }
+      if (uploaded.length > 0) {
+        setImagePaths((prev) => [...prev, ...uploaded].slice(0, 5));
+      }
+    } finally {
+      setUploadingPhotos(false);
+      e.target.value = "";
+    }
   }
 
   async function submitNotice(mode: "draft" | "published") {
@@ -113,6 +172,7 @@ export function FreeItemsClient({
       spotId,
       categoryId: categoryId || null,
       collectionInstructions: instructions,
+      imagePaths,
       mode,
     });
     setBusy(null);
@@ -122,6 +182,7 @@ export function FreeItemsClient({
       setTitle("");
       setDescription("");
       setInstructions("");
+      setImagePaths([]);
       setQuantity(1);
       if (mode === "published") setTab("browse");
       router.refresh();
@@ -242,6 +303,16 @@ export function FreeItemsClient({
                 return (
                   <div key={n.id} className="flex flex-col justify-between rounded-2xl border border-[#E6E3EE] bg-white p-4">
                     <div className="space-y-2">
+                      {n.imageUrl ? (
+                        <div className="aspect-[16/10] w-full overflow-hidden rounded-xl border border-[#ECEAF3] bg-[#FAF9FC]">
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img
+                            src={n.imageUrl}
+                            alt={n.title}
+                            className="h-full w-full object-cover"
+                          />
+                        </div>
+                      ) : null}
                       <div className="flex items-center justify-between gap-2">
                         <span className="rounded-full bg-[#E6F6F6] px-2.5 py-0.5 text-[10.5px] font-extrabold text-[#006A6D]">
                           FREE · RM 0
@@ -365,6 +436,60 @@ export function FreeItemsClient({
                   placeholder="e.g. Meet at Blok Alpha lobby 5–6 PM"
                   className="w-full rounded-xl border border-[#DFDCE8] px-3 py-2 text-xs"
                 />
+              </div>
+              <div className="space-y-1.5 sm:col-span-2">
+                <label htmlFor="free-item-photos" className="text-xs font-bold text-[#4A4656]">
+                  Photos (1–5 required to publish, JPG/PNG/WebP up to 5 MB)
+                </label>
+                <div className="flex flex-wrap items-center gap-2 rounded-xl border border-dashed border-[#CFCBD9] bg-[#FAF9FC] p-3">
+                  <ImagePlus className="h-4 w-4 text-[#4E2A84]" aria-hidden="true" />
+                  <input
+                    id="free-item-photos"
+                    type="file"
+                    accept="image/jpeg,image/png,image/webp"
+                    multiple
+                    disabled={uploadingPhotos || imagePaths.length >= 5}
+                    onChange={handlePhotoUpload}
+                    className="min-w-0 flex-1 text-xs text-[#4A4656] file:mr-2 file:rounded-lg file:border-0 file:bg-[#4E2A84] file:px-3 py-1 file:text-xs file:font-bold file:text-white"
+                  />
+                  {uploadingPhotos ? (
+                    <span className="text-[11px] font-semibold text-[#4E2A84]">Uploading...</span>
+                  ) : null}
+                </div>
+                {imagePaths.length > 0 ? (
+                  <div className="flex flex-wrap gap-2 pt-1">
+                    {imagePaths.map((path, idx) => {
+                      const url = supabaseUrl
+                        ? resolvePublicStorageUrl("free-items", path, supabaseUrl)
+                        : null;
+                      return (
+                        <div
+                          key={path}
+                          className="relative h-16 w-16 overflow-hidden rounded-xl border border-[#E6E3EE] bg-[#FAF9FC]"
+                        >
+                          {url ? (
+                            // eslint-disable-next-line @next/next/no-img-element
+                            <img src={url} alt={`Photo ${idx + 1}`} className="h-full w-full object-cover" />
+                          ) : (
+                            <span className="flex h-full items-center justify-center text-[10px] text-[#6B6779]">
+                              Photo {idx + 1}
+                            </span>
+                          )}
+                          <button
+                            type="button"
+                            aria-label={`Remove photo ${idx + 1}`}
+                            onClick={() =>
+                              setImagePaths((prev) => prev.filter((_, i) => i !== idx))
+                            }
+                            className="absolute right-0.5 top-0.5 rounded-full bg-black/65 p-0.5 text-white"
+                          >
+                            <X className="h-3 w-3" />
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : null}
               </div>
             </div>
             <div className="flex flex-wrap gap-2 pt-2">

@@ -12,6 +12,9 @@ interface StorefrontFormProps {
   initialShopName: string;
   initialDescription: string;
   initialLogoUrl: string | null;
+  initialBannerUrl?: string | null;
+  initialBusinessInfo?: string;
+  initialIsOpen?: boolean;
   faculty: string | null;
   publishedCount: number;
   isNewStorefront: boolean;
@@ -23,6 +26,9 @@ export function StorefrontForm({
   initialShopName,
   initialDescription,
   initialLogoUrl,
+  initialBannerUrl = null,
+  initialBusinessInfo = "",
+  initialIsOpen = true,
   faculty,
   publishedCount,
   isNewStorefront,
@@ -33,8 +39,12 @@ export function StorefrontForm({
   );
   const [shopName, setShopName] = useState(initialShopName);
   const [description, setDescription] = useState(initialDescription);
+  const [businessInfo, setBusinessInfo] = useState(initialBusinessInfo);
+  const [isOpen, setIsOpen] = useState(initialIsOpen);
   const [previewUrl, setPreviewUrl] = useState<string | null>(initialLogoUrl);
   const [removeLogo, setRemoveLogo] = useState(false);
+  const [bannerPreviewUrl, setBannerPreviewUrl] = useState<string | null>(initialBannerUrl);
+  const [removeBanner, setRemoveBanner] = useState(false);
 
   const initials = (shopName.trim() || "BU")
     .split(" ")
@@ -51,6 +61,19 @@ export function StorefrontForm({
     reader.onload = () => {
       if (typeof reader.result === "string") {
         setPreviewUrl(reader.result);
+      }
+    };
+    reader.readAsDataURL(file);
+  }
+
+  function handleBannerChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setRemoveBanner(false);
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === "string") {
+        setBannerPreviewUrl(reader.result);
       }
     };
     reader.readAsDataURL(file);
@@ -179,6 +202,77 @@ export function StorefrontForm({
             ) : null}
           </div>
 
+          {/* Storefront Banner Upload */}
+          <div>
+            <label
+              htmlFor="banner"
+              className="block text-sm font-bold text-[#14121A]"
+            >
+              Storefront Banner Image (optional)
+            </label>
+            <div className="mt-1.5 flex flex-wrap items-center gap-3 rounded-xl border border-dashed border-[#CFCBD9] bg-[#FAF9FC] p-3.5">
+              <ImagePlus
+                className="h-5 w-5 shrink-0 text-[#008285]"
+                aria-hidden="true"
+              />
+              <input
+                id="banner"
+                name="banner"
+                type="file"
+                accept="image/jpeg,image/png,image/webp"
+                onChange={handleBannerChange}
+                className="min-w-0 flex-1 text-xs text-[#4A4656] file:mr-3 file:rounded-lg file:border-0 file:bg-[#008285] file:px-3 file:py-1.5 file:text-xs file:font-bold file:text-white hover:file:bg-[#006A6D]"
+              />
+            </div>
+            <p className="mt-1 text-xs text-[#6E6A7C]">
+              Wide landscape image (e.g. 1200&times;320), JPG/PNG/WebP up to 5 MB.
+            </p>
+            {bannerPreviewUrl ? (
+              <label className="mt-2.5 inline-flex items-center gap-2 text-xs font-semibold text-[#555062]">
+                <input
+                  type="checkbox"
+                  name="removeBanner"
+                  checked={removeBanner}
+                  onChange={(e) => setRemoveBanner(e.target.checked)}
+                  className="h-4 w-4 rounded border-[#CFCBD9] accent-[#4E2A84]"
+                />
+                <span>Remove storefront banner image</span>
+              </label>
+            ) : null}
+          </div>
+
+          {/* Business Info / Operating Hours */}
+          <div>
+            <label
+              htmlFor="businessInfo"
+              className="block text-sm font-bold text-[#14121A]"
+            >
+              Campus Pickup Hours &amp; Business Info (optional)
+            </label>
+            <textarea
+              id="businessInfo"
+              name="businessInfo"
+              rows={2}
+              maxLength={400}
+              value={businessInfo}
+              onChange={(e) => setBusinessInfo(e.target.value)}
+              placeholder="e.g. Open Mon–Fri 12 PM – 7 PM MYT · Pickup at Kolej Kediaman Alpha lobby"
+              className="mt-1.5 w-full rounded-xl border border-[#CFCBD9] bg-white px-3.5 py-2.5 text-sm text-[#14121A] placeholder:text-[#858094] focus:border-[#4E2A84] focus:outline-none"
+            />
+          </div>
+
+          {/* Storefront Availability Toggle */}
+          <label className="flex items-center gap-2.5 rounded-xl border border-[#ECEAF3] bg-[#FAF9FC] px-3.5 py-2.5 text-xs font-semibold text-[#14121A]">
+            <input
+              type="checkbox"
+              name="isOpen"
+              checked={isOpen}
+              onChange={(e) => setIsOpen(e.target.checked)}
+              className="h-4 w-4 rounded border-[#CFCBD9] accent-[#008285]"
+            />
+            <span>Storefront Open for Campus Orders &amp; Inquiries</span>
+          </label>
+
           <div className="pt-1">
             <button
               type="submit"
@@ -205,7 +299,18 @@ export function StorefrontForm({
           </div>
 
           <div className="mt-3.5 overflow-hidden rounded-2xl border border-[#E6E3EE] bg-white shadow-[0_2px_8px_rgba(20,18,26,0.05)]">
-            <div className="h-2 w-full bg-[#4E2A84]" aria-hidden="true" />
+            {bannerPreviewUrl && !removeBanner ? (
+              <div className="relative h-24 w-full bg-[#F3EEFA]">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={bannerPreviewUrl}
+                  alt="Storefront banner preview"
+                  className="h-full w-full object-cover"
+                />
+              </div>
+            ) : (
+              <div className="h-2 w-full bg-[#4E2A84]" aria-hidden="true" />
+            )}
             <div className="p-5">
               <div className="flex items-center gap-3.5">
                 {previewUrl && !removeLogo ? (

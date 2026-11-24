@@ -4,8 +4,9 @@ import { notFound } from "next/navigation";
 import { BadgeCheck, Star, Store } from "lucide-react";
 import { PublicStorefrontActions } from "@/components/storefront/PublicStorefrontActions";
 import { isValidUuid } from "@/lib/disputes/validation";
-import { formatSenToRm, formatShortDate } from "@/lib/format";
+import { formatSenToRm, formatShortDate, resolvePublicStorageUrl } from "@/lib/format";
 import { computeRatingSummary } from "@/lib/marketplace/phase8";
+import { getPublicSupabaseEnv } from "@/lib/supabase/env";
 import { getSessionSummary } from "@/lib/supabase/server";
 import { getServerServiceClient } from "@/lib/supabase/service";
 
@@ -30,6 +31,9 @@ export default async function PublicStorefrontPage({
   ]);
   if (!service) notFound();
 
+  const env = getPublicSupabaseEnv();
+  const storageBase = env?.url ?? "";
+
   const [profRes, sfRes, listRes, freeRes, revRes, ordCountRes] = await Promise.all([
     service
       .from("profiles")
@@ -38,9 +42,17 @@ export default async function PublicStorefrontPage({
       .maybeSingle(),
     service
       .from("storefronts")
-      .select("seller_id,shop_name,description,logo_path")
+      .select("seller_id,shop_name,description,logo_path,banner_path,business_info,is_open")
       .eq("seller_id", sellerId)
-      .maybeSingle(),
+      .maybeSingle()
+      .then(async (res) => {
+        if (!res.error) return res;
+        return service
+          .from("storefronts")
+          .select("seller_id,shop_name,description,logo_path")
+          .eq("seller_id", sellerId)
+          .maybeSingle();
+      }),
     service
       .from("listings")
       .select("id,title,kind,price_sen,quantity,reserved_quantity,status")
@@ -52,15 +64,25 @@ export default async function PublicStorefrontPage({
       .from("free_notices")
       .select("id,title,condition,spot_id,status")
       .eq("contributor_id", sellerId)
-      .eq("status", "published")
+      .eq("status", "active")
       .limit(20),
     service
       .from("reviews")
-      .select("id,buyer_id,rating,comment,hidden,created_at")
+      .select("id,buyer_id,rating,comment,seller_response,order_id,service_request_id,hidden,created_at")
       .eq("seller_id", sellerId)
       .eq("hidden", false)
       .order("created_at", { ascending: false })
-      .limit(30),
+      .limit(30)
+      .then(async (res) => {
+        if (!res.error) return res;
+        return service
+          .from("reviews")
+          .select("id,buyer_id,rating,comment,order_id,hidden,created_at")
+          .eq("seller_id", sellerId)
+          .eq("hidden", false)
+          .order("created_at", { ascending: false })
+          .limit(30);
+      }),
     service
       .from("orders")
       .select("id", { count: "exact", head: true })
@@ -79,8 +101,23 @@ export default async function PublicStorefrontPage({
     bio: string | null;
     status: string;
   };
-  const sf = sfRes.data as { shop_name: string | null; description: string | null } | null;
+  const sf = sfRes.data as {
+    shop_name: string | null;
+    description: string | null;
+    logo_path?: string | null;
+    banner_path?: string | null;
+    business_info?: string | null;
+    is_open?: boolean | null;
+  } | null;
   const storeName = sf?.shop_name?.trim() || prof.display_name || prof.full_name || "UMS Student Store";
+  const bannerUrl =
+    sf?.banner_path && storageBase
+      ? resolvePublicStorageUrl("listings", sf.banner_path, storageBase)
+      : null;
+  const logoUrl =
+    sf?.logo_path && storageBase
+      ? resolvePublicStorageUrl("listings", sf.logo_path, storageBase)
+      : null;
   const listings = (listRes.data ?? []) as Array<{
     id: string;
     title: string;
@@ -96,6 +133,9 @@ export default async function PublicStorefrontPage({
     id: string;
     rating: number;
     comment: string;
+    seller_response?: string | null;
+    order_id?: string | null;
+    service_request_id?: string | null;
     hidden: boolean;
     created_at: string;
   }>;
@@ -115,8 +155,24 @@ export default async function PublicStorefrontPage({
   return (
     <div className="mx-auto w-full max-w-[1160px] space-y-6 px-4 py-6 sm:px-6 lg:px-10">
       {/* Header Banner */}
-      <div className="rounded-3xl border border-[#E6E3EE] bg-white p-6">
+      <div className="overflow-hidden rounded-3xl border border-[#E6E3EE] bg-white">
+        {bannerUrl ? (
+          <div className="h-36 w-full bg-[#F3EEFA] sm:h-44">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={bannerUrl} alt={`${storeName} banner`} className="h-full w-full object-cover" />
+          </div>
+        ) : (
+          <div className="h-2.5 w-full bg-[#4E2A84]" aria-hidden="true" />
+        )}
+        <div className="p-6">
         <div className="flex flex-wrap items-start justify-between gap-4">
+          <div className="flex items-start gap-4">
+            {logoUrl ? (
+              <div className="h-14 w-14 shrink-0 overflow-hidden rounded-2xl border border-[#E6E3EE] bg-[#FAF9FC]">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={logoUrl} alt={`${storeName} logo`} className="h-full w-full object-cover" />
+              </div>
+            ) : null}
           <div className="space-y-2">
             <div className="flex flex-wrap items-center gap-2">
               <Store className="h-5 w-5 text-[#4E2A84]" />
@@ -127,10 +183,20 @@ export default async function PublicStorefrontPage({
                   Verified UMS Student
                 </span>
               ) : null}
+              {sf?.is_open === false ? (
+                <span className="rounded-full bg-[#FEF2F2] px-2.5 py-0.5 text-[11px] font-bold text-[#B42318]">
+                  Temporarily Closed
+                </span>
+              ) : null}
             </div>
             <p className="max-w-2xl text-xs text-[#4A4656]">
               {sf?.description || prof.bio || "Campus student seller at Universiti Malaysia Sabah (UMSKAL)."}
             </p>
+            {sf?.business_info ? (
+              <p className="max-w-2xl text-xs font-semibold text-[#4E2A84]">
+                {sf.business_info}
+              </p>
+            ) : null}
             <div className="flex flex-wrap gap-4 pt-1 text-xs font-semibold text-[#6B6779]">
               <span className="inline-flex items-center gap-1 text-[#14121A]">
                 <Star className="h-3.5 w-3.5 text-amber-500" />
@@ -142,6 +208,7 @@ export default async function PublicStorefrontPage({
               {prof.faculty ? <span>Faculty: {prof.faculty}</span> : null}
             </div>
           </div>
+          </div>
 
           <PublicStorefrontActions
             sellerId={sellerId}
@@ -149,6 +216,7 @@ export default async function PublicStorefrontPage({
             initialBlocked={isBlocked}
             canInteract={Boolean(session.isAuthenticated && session.profile?.id && session.profile.id !== sellerId)}
           />
+        </div>
         </div>
       </div>
 
@@ -220,11 +288,21 @@ export default async function PublicStorefrontPage({
           <div className="space-y-3">
             {reviews.map((r) => (
               <div key={r.id} className="rounded-2xl border border-[#E6E3EE] bg-white p-4 text-xs">
-                <div className="flex items-center justify-between">
-                  <span className="font-extrabold text-amber-600">{"★".repeat(r.rating)} ({r.rating}/5)</span>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <span className="rounded-full bg-[#F3EEFA] px-2 py-0.5 text-[10px] font-extrabold text-[#4E2A84]">
+                      {r.service_request_id ? "Verified Service" : "Verified Purchase"}
+                    </span>
+                    <span className="font-extrabold text-amber-600">{"★".repeat(r.rating)} ({r.rating}/5)</span>
+                  </div>
                   <span className="text-[11px] text-[#8B869B]">{formatShortDate(r.created_at)}</span>
                 </div>
                 <p className="mt-2 text-[#14121A]">{r.comment}</p>
+                {r.seller_response ? (
+                  <p className="mt-2 rounded-lg bg-[#FAF9FC] p-2 text-[11px] text-[#4E2A84]">
+                    <strong>Seller Reply:</strong> {r.seller_response}
+                  </p>
+                ) : null}
               </div>
             ))}
           </div>

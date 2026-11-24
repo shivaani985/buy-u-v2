@@ -12,6 +12,7 @@ import {
   Shield,
 } from "lucide-react";
 import {
+  adminModerateFreeNoticeAction,
   adminModerateListingAction,
   adminModerateReportAction,
   adminModerateReviewAction,
@@ -33,6 +34,8 @@ type AdminStats = ReturnType<typeof computeAdminPlatformAnalytics>;
 
 export interface AdminPortalProps {
   range: AnalyticsRangeKey;
+  customStart?: string | null;
+  customEnd?: string | null;
   stats: AdminStats;
   users: Array<{
     id: string;
@@ -50,6 +53,14 @@ export interface AdminPortalProps {
     status: string;
     sellerName: string;
     priceSen: number;
+  }>;
+  freeNotices: Array<{
+    id: string;
+    title: string;
+    donorName: string;
+    spotId: string;
+    status: string;
+    createdAt: string;
   }>;
   reports: Array<{
     id: string;
@@ -78,7 +89,8 @@ export interface AdminPortalProps {
     id: string;
     action: string;
     targetKind: string;
-    targetId: string;
+    targetId: string | null;
+    targetRef: string;
     reason: string;
     createdAt: string;
   }>;
@@ -96,9 +108,12 @@ type PortalTab =
 
 export function AdminPlatformPortalClient({
   range,
+  customStart = null,
+  customEnd = null,
   stats,
   users,
   listings,
+  freeNotices,
   reports,
   reviews,
   catalog,
@@ -107,8 +122,15 @@ export function AdminPlatformPortalClient({
   const router = useRouter();
   const [tab, setTab] = useState<PortalTab>("analytics");
   const [userSearch, setUserSearch] = useState("");
+  const [startDate, setStartDate] = useState(customStart ?? "");
+  const [endDate, setEndDate] = useState(customEnd ?? "");
   const [busy, setBusy] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<{ ok: boolean; text: string } | null>(null);
+
+  const exportQuery =
+    range === "custom" && customStart && customEnd
+      ? `range=custom&start=${encodeURIComponent(customStart)}&end=${encodeURIComponent(customEnd)}`
+      : `range=${range}`;
 
   async function run(key: string, fn: () => Promise<{ ok: boolean; message: string }>) {
     setBusy(key);
@@ -161,7 +183,7 @@ export function AdminPlatformPortalClient({
         </div>
 
         <a
-          href={`/api/admin/analytics/export?range=${range}`}
+          href={`/api/admin/analytics/export?${exportQuery}`}
           className="inline-flex items-center gap-1.5 rounded-xl border border-[#4E2A84] px-3 py-1.5 text-xs font-bold text-[#4E2A84] hover:bg-[#F3EEFA]"
         >
           <Download className="h-3.5 w-3.5" />
@@ -169,7 +191,7 @@ export function AdminPlatformPortalClient({
         </a>
       </div>
 
-      {/* Date Range Filter Strip */}
+      {/* Date Range Filter Strip (including Custom MYT dates) */}
       {tab === "analytics" || tab === "entrepreneurship" ? (
         <div className="flex flex-wrap items-center gap-2 text-xs">
           <span className="font-bold text-[#6B6779]">Date Scope (MYT):</span>
@@ -186,6 +208,38 @@ export function AdminPlatformPortalClient({
               {rk === "this_month" ? "This Month" : rk === "all" ? "All Time" : `Last ${rk}`}
             </Link>
           ))}
+          <form
+            className="flex flex-wrap items-center gap-1.5"
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (startDate && endDate && endDate >= startDate) {
+                router.push(`/admin?range=custom&start=${encodeURIComponent(startDate)}&end=${encodeURIComponent(endDate)}`);
+              }
+            }}
+          >
+            <input
+              type="date"
+              aria-label="Custom start date"
+              value={startDate}
+              onChange={(e) => setStartDate(e.target.value)}
+              className="rounded-lg border border-[#E6E3EE] bg-white px-2 py-1 text-xs"
+            />
+            <span className="text-[#6B6779]">to</span>
+            <input
+              type="date"
+              aria-label="Custom end date"
+              value={endDate}
+              onChange={(e) => setEndDate(e.target.value)}
+              className="rounded-lg border border-[#E6E3EE] bg-white px-2 py-1 text-xs"
+            />
+            <button
+              type="submit"
+              disabled={!startDate || !endDate || endDate < startDate}
+              className="rounded-lg bg-[#4E2A84] px-2.5 py-1 font-bold text-white disabled:opacity-40"
+            >
+              Apply
+            </button>
+          </form>
         </div>
       ) : null}
 
@@ -294,6 +348,7 @@ export function AdminPlatformPortalClient({
             {[
               { l: "Published Student Business Sellers", v: String(ent.publishedStudentBusinessSellers) },
               { l: "Active Business Sellers (Period)", v: String(ent.activeStudentBusinessSellers) },
+              { l: "First-Time Successful Sellers", v: String(ent.firstTimeSuccessfulSellers) },
               { l: "Student Business Net Sales", v: formatCurrencySen(ent.studentBusinessSalesSen) },
               { l: "Business Seller Earnings (Pre-Exp)", v: formatCurrencySen(ent.studentBusinessEarningsSen) },
               { l: "Avg Earnings / Active Business Seller", v: formatCurrencySen(ent.avgEarningsPerBusinessSellerSen) },
@@ -390,48 +445,104 @@ export function AdminPlatformPortalClient({
         </div>
       ) : null}
 
-      {/* TAB: LISTINGS MODERATION */}
+      {/* TAB: LISTINGS & FREE ITEMS MODERATION */}
       {tab === "listings" ? (
-        <div className="overflow-x-auto rounded-2xl border border-[#E6E3EE] bg-white">
-          <table className="w-full text-left text-xs">
-            <thead className="border-b border-[#ECEAF3] bg-[#FAF9FC] text-[11px] font-bold text-[#6B6779]">
-              <tr>
-                <th className="px-4 py-2.5">Listing</th>
-                <th className="px-4 py-2.5">Type</th>
-                <th className="px-4 py-2.5">Seller</th>
-                <th className="px-4 py-2.5">Status</th>
-                <th className="px-4 py-2.5">Action</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-[#F1EFF6]">
-              {listings.map((l) => (
-                <tr key={l.id}>
-                  <td className="px-4 py-2.5 font-bold text-[#14121A]">{l.title}</td>
-                  <td className="px-4 py-2.5 capitalize">{l.kind.replace("_", " ")}</td>
-                  <td className="px-4 py-2.5">{l.sellerName}</td>
-                  <td className="px-4 py-2.5 font-bold capitalize">{l.status}</td>
-                  <td className="px-4 py-2.5">
-                    <button
-                      type="button"
-                      disabled={busy !== null}
-                      onClick={() =>
-                        run(`lst:${l.id}`, () =>
-                          adminModerateListingAction({
-                            listingId: l.id,
-                            hide: l.status === "published",
-                            reason: l.status === "published" ? "Admin policy moderation hide" : "Admin restored listing",
-                          })
-                        )
-                      }
-                      className="rounded-lg border border-[#4E2A84] px-2.5 py-1 text-[11px] font-bold text-[#4E2A84]"
-                    >
-                      {l.status === "published" ? "Hide Listing" : "Restore"}
-                    </button>
-                  </td>
+        <div className="space-y-5">
+          <div className="overflow-x-auto rounded-2xl border border-[#E6E3EE] bg-white">
+            <table className="w-full text-left text-xs">
+              <thead className="border-b border-[#ECEAF3] bg-[#FAF9FC] text-[11px] font-bold text-[#6B6779]">
+                <tr>
+                  <th className="px-4 py-2.5">Listing</th>
+                  <th className="px-4 py-2.5">Type</th>
+                  <th className="px-4 py-2.5">Seller</th>
+                  <th className="px-4 py-2.5">Status</th>
+                  <th className="px-4 py-2.5">Action</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody className="divide-y divide-[#F1EFF6]">
+                {listings.map((l) => (
+                  <tr key={l.id}>
+                    <td className="px-4 py-2.5 font-bold text-[#14121A]">{l.title}</td>
+                    <td className="px-4 py-2.5 capitalize">{l.kind.replace("_", " ")}</td>
+                    <td className="px-4 py-2.5">{l.sellerName}</td>
+                    <td className="px-4 py-2.5 font-bold capitalize">{l.status}</td>
+                    <td className="px-4 py-2.5">
+                      <button
+                        type="button"
+                        disabled={busy !== null}
+                        onClick={() =>
+                          run(`lst:${l.id}`, () =>
+                            adminModerateListingAction({
+                              listingId: l.id,
+                              hide: l.status !== "hidden",
+                              reason: l.status !== "hidden" ? "Admin policy moderation hide" : "Admin restored listing",
+                            })
+                          )
+                        }
+                        className="rounded-lg border border-[#4E2A84] px-2.5 py-1 text-[11px] font-bold text-[#4E2A84]"
+                      >
+                        {l.status !== "hidden" ? "Hide Listing" : "Restore"}
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="overflow-x-auto rounded-2xl border border-[#E6E3EE] bg-white">
+            <div className="border-b border-[#ECEAF3] bg-[#FAF9FC] px-4 py-2.5 text-xs font-extrabold text-[#14121A]">
+              Community Free Items Moderation ({freeNotices.length})
+            </div>
+            <table className="w-full text-left text-xs">
+              <thead className="border-b border-[#ECEAF3] bg-[#FAF9FC] text-[11px] font-bold text-[#6B6779]">
+                <tr>
+                  <th className="px-4 py-2.5">Free Item</th>
+                  <th className="px-4 py-2.5">Donor</th>
+                  <th className="px-4 py-2.5">Spot</th>
+                  <th className="px-4 py-2.5">Status</th>
+                  <th className="px-4 py-2.5">Action</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-[#F1EFF6]">
+                {freeNotices.length === 0 ? (
+                  <tr>
+                    <td colSpan={5} className="px-4 py-6 text-center text-[#6B6779]">No free item notices posted yet.</td>
+                  </tr>
+                ) : (
+                  freeNotices.map((fn) => (
+                    <tr key={fn.id}>
+                      <td className="px-4 py-2.5 font-bold text-[#14121A]">{fn.title}</td>
+                      <td className="px-4 py-2.5">{fn.donorName}</td>
+                      <td className="px-4 py-2.5">{fn.spotId}</td>
+                      <td className="px-4 py-2.5 font-bold capitalize">{fn.status}</td>
+                      <td className="px-4 py-2.5">
+                        <button
+                          type="button"
+                          disabled={busy !== null}
+                          onClick={() =>
+                            run(`fn:${fn.id}`, () =>
+                              adminModerateFreeNoticeAction({
+                                noticeId: fn.id,
+                                hide: fn.status !== "hidden",
+                                reason:
+                                  fn.status !== "hidden"
+                                    ? "Admin policy moderation hide"
+                                    : "Admin restored free item",
+                              })
+                            )
+                          }
+                          className="rounded-lg border border-[#008285] px-2.5 py-1 text-[11px] font-bold text-[#008285]"
+                        >
+                          {fn.status !== "hidden" ? "Hide Free Item" : "Restore"}
+                        </button>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
         </div>
       ) : null}
 
@@ -452,8 +563,22 @@ export function AdminPlatformPortalClient({
                   </span>
                 </div>
                 <p className="text-[#4A4656]">{r.explanation}</p>
-                {r.status === "open" || r.status === "under_review" ? (
-                  <div className="flex gap-2">
+                {r.status === "submitted" || r.status === "under_review" ? (
+                  <div className="flex flex-wrap gap-2">
+                    {r.status === "submitted" ? (
+                      <button
+                        type="button"
+                        disabled={busy !== null}
+                        onClick={() =>
+                          run(`rpt-rev:${r.id}`, () =>
+                            adminModerateReportAction({ reportId: r.id, status: "under_review", outcome: "Under review", reason: "Moderator started investigation." })
+                          )
+                        }
+                        className="rounded-lg border border-[#4E2A84] px-3 py-1 text-xs font-bold text-[#4E2A84]"
+                      >
+                        Mark Under Review
+                      </button>
+                    ) : null}
                     <button
                       type="button"
                       disabled={busy !== null}
@@ -579,7 +704,7 @@ export function AdminPlatformPortalClient({
                 auditLogs.map((a) => (
                   <tr key={a.id}>
                     <td className="px-4 py-2.5 font-mono font-bold text-[#4E2A84]">{a.action}</td>
-                    <td className="px-4 py-2.5">{a.targetKind} ({a.targetId.slice(0, 8)})</td>
+                    <td className="px-4 py-2.5">{a.targetKind} ({a.targetRef})</td>
                     <td className="px-4 py-2.5">{a.reason}</td>
                     <td className="px-4 py-2.5 text-[#6B6779]">{formatShortDate(a.createdAt)}</td>
                   </tr>

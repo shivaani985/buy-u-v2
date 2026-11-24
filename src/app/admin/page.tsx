@@ -26,7 +26,7 @@ export const metadata: Metadata = {
 export default async function AdminPage({
   searchParams,
 }: {
-  searchParams: Promise<{ range?: string }>;
+  searchParams: Promise<{ range?: string; start?: string; end?: string }>;
 }) {
   const [session, sp] = await Promise.all([getSessionSummary(), searchParams]);
 
@@ -71,8 +71,15 @@ export default async function AdminPage({
   }
 
   const rawRange = sp.range;
+  const customStart = sp.start?.trim() || null;
+  const customEnd = sp.end?.trim() || null;
   const range: AnalyticsRangeKey =
-    rawRange === "7d" || rawRange === "30d" || rawRange === "90d" || rawRange === "this_month" || rawRange === "all"
+    rawRange === "7d" ||
+    rawRange === "30d" ||
+    rawRange === "90d" ||
+    rawRange === "this_month" ||
+    rawRange === "all" ||
+    (rawRange === "custom" && customStart && customEnd)
       ? rawRange
       : "30d";
 
@@ -83,6 +90,7 @@ export default async function AdminPage({
     analyticsDataset,
     usersRes,
     listingsRes,
+    freeNoticesRes,
     reportsRes,
     reviewsRes,
     catsRes,
@@ -100,7 +108,13 @@ export default async function AdminPage({
       ? service.from("listings").select("id,title,kind,status,seller_id,price_sen").order("created_at", { ascending: false }).limit(100)
       : Promise.resolve({ data: [] }),
     service
-      ? service.from("reports").select("id,target_kind,target_id,reason,explanation,status,created_at").order("created_at", { ascending: false }).limit(100)
+      ? service.from("free_notices").select("id,title,contributor_id,spot_id,status,created_at").order("created_at", { ascending: false }).limit(60)
+      : Promise.resolve({ data: [] }),
+    service
+      ? service.from("reports").select("id,report_code,target_kind,target_id,reason,explanation,status,priority,created_at").order("created_at", { ascending: false }).limit(100).then(async (res) => {
+          if (!res.error) return res;
+          return service.from("reports").select("id,target_kind,target_id,reason,explanation,status,created_at").order("created_at", { ascending: false }).limit(100);
+        })
       : Promise.resolve({ data: [] }),
     service
       ? service.from("reviews").select("id,rating,comment,hidden,created_at").order("created_at", { ascending: false }).limit(100)
@@ -109,7 +123,7 @@ export default async function AdminPage({
     service ? service.from("collection_areas").select("id,name,active").order("name") : Promise.resolve({ data: [] }),
     service ? service.from("donation_spots").select("id,name,active").order("name") : Promise.resolve({ data: [] }),
     service
-      ? service.from("admin_audit_logs").select("id,action,target_kind,target_id,reason,created_at").order("created_at", { ascending: false }).limit(80)
+      ? service.from("admin_audit_logs").select("id,action,target_kind,target_id,reason,details,created_at").order("created_at", { ascending: false }).limit(80)
       : Promise.resolve({ data: [] }),
   ]);
 
@@ -131,7 +145,7 @@ export default async function AdminPage({
       reports: [],
       disputes: [],
     },
-    resolveAnalyticsWindow(range)
+    resolveAnalyticsWindow(range, undefined, customStart, customEnd)
   );
 
   const userRows = ((usersRes.data ?? []) as Array<{
@@ -206,18 +220,41 @@ export default async function AdminPage({
     createdAt: r.created_at,
   }));
 
-  const auditRows = ((auditRes.data ?? []) as Array<{
+  const freeNoticeRows = ((freeNoticesRes.data ?? []) as Array<{
     id: string;
+    title: string;
+    contributor_id: string;
+    spot_id: string;
+    status: string;
+    created_at: string;
+  }>).map((fn) => ({
+    id: fn.id,
+    title: fn.title,
+    donorName: userNameMap.get(fn.contributor_id) ?? "UMS Student",
+    spotId: fn.spot_id,
+    status: fn.status,
+    createdAt: fn.created_at,
+  }));
+
+  const auditRows = ((auditRes.data ?? []) as Array<{
+    id: string | number;
     action: string;
     target_kind: string;
-    target_id: string;
+    target_id: string | null;
     reason: string;
+    details?: Record<string, unknown> | null;
     created_at: string;
   }>).map((a) => ({
-    id: a.id,
+    id: String(a.id),
     action: a.action,
     targetKind: a.target_kind,
     targetId: a.target_id,
+    targetRef:
+      typeof a.details?.target_ref === "string"
+        ? a.details.target_ref
+        : a.target_id
+          ? a.target_id.slice(0, 8)
+          : "—",
     reason: a.reason,
     createdAt: a.created_at,
   }));
@@ -272,9 +309,12 @@ export default async function AdminPage({
         </div>
         <AdminPlatformPortalClient
           range={range}
+          customStart={customStart}
+          customEnd={customEnd}
           stats={adminStats}
           users={userRows}
           listings={listingRows}
+          freeNotices={freeNoticeRows}
           reports={reportRows}
           reviews={reviewRows}
           catalog={{

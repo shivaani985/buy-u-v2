@@ -37,6 +37,17 @@ export interface BuyerOrderRefundView {
   completedAt: string | null;
 }
 
+export interface BuyerOrderReviewView {
+  id: string;
+  orderId: string;
+  listingId: string | null;
+  rating: number;
+  comment: string;
+  sellerResponse: string | null;
+  hidden: boolean;
+  createdAt: string;
+}
+
 export interface BuyerOrderView {
   id: string;
   orderCode: string;
@@ -59,6 +70,7 @@ export interface BuyerOrderView {
   latestPayment: BuyerOrderPaymentView | null;
   dispute: OrderDisputeSummaryView | null;
   refund: BuyerOrderRefundView | null;
+  reviews: BuyerOrderReviewView[];
   items: BuyerOrderItemView[];
 }
 
@@ -158,7 +170,7 @@ export async function getBuyerOrdersData(
   const sellerIds = Array.from(new Set(orderRows.map((o) => o.seller_id)));
   const service = getServerServiceClient();
 
-  const [itemsRes, profilesRes, storefrontsRes, paymentsRes, pinsRes, sessionsRes, disputesByOrder, refundsRes] =
+  const [itemsRes, profilesRes, storefrontsRes, paymentsRes, pinsRes, sessionsRes, disputesByOrder, refundsRes, reviewsRes] =
     await Promise.all([
       supabase
         .from("order_items")
@@ -202,7 +214,50 @@ export async function getBuyerOrdersData(
         )
         .in("order_id", orderIds)
         .order("created_at", { ascending: false }),
+      supabase
+        .from("reviews")
+        .select("id,order_id,listing_id,rating,comment,seller_response,hidden,created_at")
+        .eq("buyer_id", eligibility.userId)
+        .in("order_id", orderIds)
+        .order("created_at", { ascending: false })
+        .then(async (res) => {
+          if (!res.error) return res;
+          return supabase
+            .from("reviews")
+            .select("id,order_id,listing_id,rating,comment,hidden,created_at")
+            .eq("buyer_id", eligibility.userId)
+            .in("order_id", orderIds)
+            .order("created_at", { ascending: false });
+        }),
     ]);
+
+  const reviewsByOrder = new Map<string, BuyerOrderReviewView[]>();
+  if (!reviewsRes.error && reviewsRes.data) {
+    for (const rv of reviewsRes.data as Array<{
+      id: string;
+      order_id: string | null;
+      listing_id: string | null;
+      rating: number;
+      comment: string;
+      seller_response?: string | null;
+      hidden?: boolean | null;
+      created_at: string;
+    }>) {
+      if (!rv.order_id) continue;
+      const arr = reviewsByOrder.get(rv.order_id) ?? [];
+      arr.push({
+        id: rv.id,
+        orderId: rv.order_id,
+        listingId: rv.listing_id,
+        rating: Number(rv.rating ?? 5),
+        comment: rv.comment,
+        sellerResponse: rv.seller_response ?? null,
+        hidden: Boolean(rv.hidden),
+        createdAt: rv.created_at,
+      });
+      reviewsByOrder.set(rv.order_id, arr);
+    }
+  }
 
   const refundByOrder = new Map<string, BuyerOrderRefundView>();
   if (!refundsRes.error && refundsRes.data) {
@@ -321,6 +376,7 @@ export async function getBuyerOrdersData(
     latestPayment: latestPaymentByOrder.get(o.id) ?? null,
     dispute: disputesByOrder.get(o.id) ?? null,
     refund: refundByOrder.get(o.id) ?? null,
+    reviews: reviewsByOrder.get(o.id) ?? [],
     items: itemsByOrder.get(o.id) ?? [],
   }));
 

@@ -16,40 +16,52 @@ export async function GET(request: NextRequest) {
   }
 
   const rawRange = request.nextUrl.searchParams.get("range");
+  const customStart = request.nextUrl.searchParams.get("start")?.trim() || null;
+  const customEnd = request.nextUrl.searchParams.get("end")?.trim() || null;
   const range: AnalyticsRangeKey =
-    rawRange === "7d" || rawRange === "30d" || rawRange === "90d" || rawRange === "this_month" || rawRange === "all"
+    rawRange === "7d" ||
+    rawRange === "30d" ||
+    rawRange === "90d" ||
+    rawRange === "this_month" ||
+    rawRange === "all" ||
+    (rawRange === "custom" && customStart && customEnd)
       ? rawRange
       : "30d";
 
   const dataset = await loadAnalyticsDataset();
   if (!dataset) return NextResponse.json({ error: "Analytics unavailable." }, { status: 503 });
 
-  const stats = computeAdminPlatformAnalytics(dataset, resolveAnalyticsWindow(range));
+  const stats = computeAdminPlatformAnalytics(
+    dataset,
+    resolveAnalyticsWindow(range, Date.now(), customStart, customEnd)
+  );
+  const periodLabel = range === "custom" && customStart && customEnd ? `${customStart}_to_${customEnd}` : range;
   const csv = buildAnalyticsCsv([
-    { period: range, section: "Overview", metric: "Total Registered Members", value: String(stats.overview.totalMembers) },
-    { period: range, section: "Overview", metric: "Students / Staff", value: `${stats.overview.studentsCount} / ${stats.overview.staffCount}` },
-    { period: range, section: "Overview", metric: "Measured Active Users", value: String(stats.overview.measuredActiveUsers) },
-    { period: range, section: "Sales", metric: "Gross Verified Product Sales", value: formatCurrencySen(stats.overview.grossProductSalesSen) },
-    { period: range, section: "Sales", metric: "Executed Refunds", value: formatCurrencySen(stats.overview.executedRefundsSen) },
-    { period: range, section: "Sales", metric: "Net Product Sales", value: formatCurrencySen(stats.overview.netProductSalesSen) },
-    { period: range, section: "Sales", metric: "Net Platform Commission (2%)", value: formatCurrencySen(stats.overview.netPlatformCommissionSen) },
-    { period: range, section: "Entrepreneurship", metric: "Published Student Business Sellers", value: String(stats.entrepreneurship.publishedStudentBusinessSellers) },
-    { period: range, section: "Entrepreneurship", metric: "Active Student Business Sellers", value: String(stats.entrepreneurship.activeStudentBusinessSellers) },
-    { period: range, section: "Entrepreneurship", metric: "Student Business Net Sales", value: formatCurrencySen(stats.entrepreneurship.studentBusinessSalesSen) },
-    { period: range, section: "Entrepreneurship", metric: "Student Business Earnings (Pre-Expense)", value: formatCurrencySen(stats.entrepreneurship.studentBusinessEarningsSen) },
-    { period: range, section: "Entrepreneurship", metric: "Active Student Service Providers", value: String(stats.entrepreneurship.activeServiceProviders) },
-    { period: range, section: "Community", metric: "Pre-Loved Completed Resales", value: String(stats.entrepreneurship.preLovedCompletedTransactions) },
-    { period: range, section: "Community", metric: "Completed Donations", value: String(stats.community.completedDonations) },
-    { period: range, section: "Community", metric: "Units Donated", value: String(stats.community.totalUnitsDonated) },
-    { period: range, section: "Trust & Safety", metric: "Open Reports", value: String(stats.trustAndSafety.openReports) },
-    { period: range, section: "Trust & Safety", metric: "Active Disputes", value: String(stats.trustAndSafety.activeDisputes) },
+    { period: periodLabel, section: "Overview", metric: "Total Registered Members", value: String(stats.overview.totalMembers) },
+    { period: periodLabel, section: "Overview", metric: "Students / Staff", value: `${stats.overview.studentsCount} / ${stats.overview.staffCount}` },
+    { period: periodLabel, section: "Overview", metric: "Measured Active Users", value: String(stats.overview.measuredActiveUsers) },
+    { period: periodLabel, section: "Sales", metric: "Gross Verified Product Sales", value: formatCurrencySen(stats.overview.grossProductSalesSen) },
+    { period: periodLabel, section: "Sales", metric: "Executed Refunds", value: formatCurrencySen(stats.overview.executedRefundsSen) },
+    { period: periodLabel, section: "Sales", metric: "Net Product Sales", value: formatCurrencySen(stats.overview.netProductSalesSen) },
+    { period: periodLabel, section: "Sales", metric: "Net Platform Commission (2%)", value: formatCurrencySen(stats.overview.netPlatformCommissionSen) },
+    { period: periodLabel, section: "Entrepreneurship", metric: "Published Student Business Sellers", value: String(stats.entrepreneurship.publishedStudentBusinessSellers) },
+    { period: periodLabel, section: "Entrepreneurship", metric: "Active Student Business Sellers", value: String(stats.entrepreneurship.activeStudentBusinessSellers) },
+    { period: periodLabel, section: "Entrepreneurship", metric: "First-Time Successful Sellers", value: String(stats.entrepreneurship.firstTimeSuccessfulSellers) },
+    { period: periodLabel, section: "Entrepreneurship", metric: "Student Business Net Sales", value: formatCurrencySen(stats.entrepreneurship.studentBusinessSalesSen) },
+    { period: periodLabel, section: "Entrepreneurship", metric: "Student Business Earnings (Pre-Expense)", value: formatCurrencySen(stats.entrepreneurship.studentBusinessEarningsSen) },
+    { period: periodLabel, section: "Entrepreneurship", metric: "Active Student Service Providers", value: String(stats.entrepreneurship.activeServiceProviders) },
+    { period: periodLabel, section: "Community", metric: "Pre-Loved Completed Resales", value: String(stats.entrepreneurship.preLovedCompletedTransactions) },
+    { period: periodLabel, section: "Community", metric: "Completed Donations", value: String(stats.community.completedDonations) },
+    { period: periodLabel, section: "Community", metric: "Units Donated", value: String(stats.community.totalUnitsDonated) },
+    { period: periodLabel, section: "Trust & Safety", metric: "Open Reports (Submitted/Under Review)", value: String(stats.trustAndSafety.openReports) },
+    { period: periodLabel, section: "Trust & Safety", metric: "Active Disputes", value: String(stats.trustAndSafety.activeDisputes) },
   ]);
 
   return new NextResponse(csv, {
     status: 200,
     headers: {
       "Content-Type": "text/csv; charset=utf-8",
-      "Content-Disposition": `attachment; filename="buyu-admin-platform-analytics-${range}.csv"`,
+      "Content-Disposition": `attachment; filename="buyu-admin-platform-analytics-${periodLabel}.csv"`,
       "Cache-Control": "private, no-store",
     },
   });

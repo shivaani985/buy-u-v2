@@ -53,6 +53,7 @@ export default async function RootLayout({
           session={session}
           cartCount={counters.cartCount}
           unreadMessageCount={counters.unreadMessageCount}
+          unreadNotificationCount={counters.unreadNotificationCount}
         />
 
         <main id="main-content" className="flex-1 bg-white">

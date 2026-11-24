@@ -8,6 +8,7 @@ import {
   updateServiceRequestAction,
 } from "@/app/marketplace-actions";
 import { getAllowedServiceActions } from "@/lib/marketplace/phase8";
+import { formatMytDateTime } from "@/lib/financials/policy";
 import { formatShortDate } from "@/lib/format";
 
 export interface ServiceRequestRow {
@@ -119,7 +120,14 @@ export function ServiceRequestsClient({
               <p className="rounded-xl bg-[#FAF9FC] p-3 text-[#4A4656]">{r.requirements}</p>
               <div className="flex flex-wrap gap-4 text-[11px] text-[#6B6779]">
                 <span>Mode: <strong className="capitalize text-[#14121A]">{r.mode.replace("_", " ")}</strong></span>
-                {r.preferredDate ? <span>Preferred: <strong className="text-[#14121A]">{r.preferredDate}</strong></span> : null}
+                {r.preferredDate ? (
+                  <span>
+                    Preferred:{" "}
+                    <strong className="text-[#14121A]">
+                      {formatMytDateTime(r.preferredDate) ?? r.preferredDate}
+                    </strong>
+                  </span>
+                ) : null}
                 <span>Submitted: {formatShortDate(r.createdAt)}</span>
               </div>
 
@@ -148,7 +156,7 @@ export function ServiceRequestsClient({
                     className="inline-flex items-center gap-1 rounded-xl border border-[#4E2A84] px-3.5 py-1.5 text-xs font-bold text-[#4E2A84]"
                   >
                     <Star className="h-3.5 w-3.5" />
-                    <span>Write Verified Review</span>
+                    <span>Write Verified Service Review</span>
                   </button>
                 ) : null}
               </div>
@@ -160,9 +168,14 @@ export function ServiceRequestsClient({
       {reviewTarget ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
           <form onSubmit={handleReview} className="w-full max-w-md space-y-4 rounded-2xl bg-white p-5 shadow-xl">
-            <h3 className="text-sm font-extrabold text-[#14121A]">
-              Review Service: {reviewTarget.serviceTitle}
-            </h3>
+            <div>
+              <span className="inline-block rounded-full bg-[#E6F6F6] px-2.5 py-0.5 text-[10px] font-extrabold text-[#006A6D]">
+                Verified Service
+              </span>
+              <h3 className="mt-1 text-sm font-extrabold text-[#14121A]">
+                Review Service: {reviewTarget.serviceTitle}
+              </h3>
+            </div>
             <div className="space-y-1">
               <label className="text-xs font-bold text-[#4A4656]">Rating (1–5 stars)</label>
               <select

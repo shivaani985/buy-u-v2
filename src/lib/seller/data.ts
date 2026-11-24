@@ -32,6 +32,10 @@ export interface SellerStorefront {
   description: string;
   logoPath: string | null;
   logoUrl: string | null;
+  bannerPath: string | null;
+  bannerUrl: string | null;
+  businessInfo: string | null;
+  isOpen: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -133,9 +137,17 @@ export async function getSellerHubData(
   ] = await Promise.all([
     supabase
       .from("storefronts")
-      .select("seller_id, shop_name, description, logo_path, created_at, updated_at")
+      .select("seller_id, shop_name, description, logo_path, banner_path, business_info, is_open, created_at, updated_at")
       .eq("seller_id", userId)
-      .maybeSingle(),
+      .maybeSingle()
+      .then(async (res) => {
+        if (!res.error) return res;
+        return supabase
+          .from("storefronts")
+          .select("seller_id, shop_name, description, logo_path, created_at, updated_at")
+          .eq("seller_id", userId)
+          .maybeSingle();
+      }),
     supabase
       .from("listings")
       .select(
@@ -184,6 +196,9 @@ export async function getSellerHubData(
     shop_name: string | null;
     description: string;
     logo_path: string | null;
+    banner_path?: string | null;
+    business_info?: string | null;
+    is_open?: boolean | null;
     created_at: string;
     updated_at: string;
   } | null;
@@ -198,6 +213,10 @@ export async function getSellerHubData(
         description: sfRow.description ?? "",
         logoPath: sfRow.logo_path,
         logoUrl: resolvePublicStorageUrl("listings", sfRow.logo_path, env.url),
+        bannerPath: sfRow.banner_path ?? null,
+        bannerUrl: resolvePublicStorageUrl("listings", sfRow.banner_path ?? null, env.url),
+        businessInfo: sfRow.business_info ?? null,
+        isOpen: sfRow.is_open !== false,
         createdAt: sfRow.created_at,
         updatedAt: sfRow.updated_at,
       }
@@ -400,9 +419,17 @@ export async function getSellFormOptions(session: AuthSessionSummary): Promise<{
       .order("name", { ascending: true }),
     supabase
       .from("storefronts")
-      .select("seller_id, shop_name, description, logo_path, created_at, updated_at")
+      .select("seller_id, shop_name, description, logo_path, banner_path, business_info, is_open, created_at, updated_at")
       .eq("seller_id", userId)
-      .maybeSingle(),
+      .maybeSingle()
+      .then(async (res) => {
+        if (!res.error) return res;
+        return supabase
+          .from("storefronts")
+          .select("seller_id, shop_name, description, logo_path, created_at, updated_at")
+          .eq("seller_id", userId)
+          .maybeSingle();
+      }),
   ]);
 
   const accents: Category["accent"][] = ["purple", "blue", "teal"];
@@ -432,6 +459,9 @@ export async function getSellFormOptions(session: AuthSessionSummary): Promise<{
     shop_name: string | null;
     description: string;
     logo_path: string | null;
+    banner_path?: string | null;
+    business_info?: string | null;
+    is_open?: boolean | null;
     created_at: string;
     updated_at: string;
   } | null;
@@ -446,6 +476,10 @@ export async function getSellFormOptions(session: AuthSessionSummary): Promise<{
         description: sfRow.description ?? "",
         logoPath: sfRow.logo_path,
         logoUrl: resolvePublicStorageUrl("listings", sfRow.logo_path, env.url),
+        bannerPath: sfRow.banner_path ?? null,
+        bannerUrl: resolvePublicStorageUrl("listings", sfRow.banner_path ?? null, env.url),
+        businessInfo: sfRow.business_info ?? null,
+        isOpen: sfRow.is_open !== false,
         createdAt: sfRow.created_at,
         updatedAt: sfRow.updated_at,
       }

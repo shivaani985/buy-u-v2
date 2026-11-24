@@ -11,8 +11,10 @@ import {
   Loader2,
   MapPin,
   MessageCircle,
+  Pencil,
   RefreshCw,
   ShieldAlert,
+  Star,
   Store,
   X,
 } from "lucide-react";
@@ -22,6 +24,10 @@ import {
 } from "@/app/checkout/actions";
 import { openOrderDisputeAction } from "@/app/disputes/actions";
 import { buyerReportReturnAction } from "@/app/financials/actions";
+import {
+  editVerifiedReviewAction,
+  submitVerifiedReviewAction,
+} from "@/app/marketplace-actions";
 import { startConversationAction } from "@/app/messages/actions";
 import { confirmOrderReceiptAction } from "@/app/orders/actions";
 import { DisputeDetailCard } from "@/components/disputes/DisputeDetailCard";
@@ -43,6 +49,7 @@ import {
 } from "@/lib/financials/policy";
 import { formatSenToRm, formatShortDate } from "@/lib/format";
 import type {
+  BuyerOrderReviewView,
   BuyerOrderView,
   BuyerPendingCheckoutView,
 } from "@/lib/orders/data";
@@ -110,9 +117,81 @@ export function OrdersClient({ pendingCheckouts, orders }: OrdersClientProps) {
   >([]);
   const [disputeConfirmed, setDisputeConfirmed] = useState(false);
   const [disputeFormError, setDisputeFormError] = useState<string | null>(null);
+  const [reviewingOrder, setReviewingOrder] = useState<BuyerOrderView | null>(
+    null
+  );
+  const [editingReview, setEditingReview] =
+    useState<BuyerOrderReviewView | null>(null);
+  const [reviewListingId, setReviewListingId] = useState<string>("");
+  const [reviewRating, setReviewRating] = useState<number>(5);
+  const [reviewComment, setReviewComment] = useState<string>("");
+  const [reviewFormError, setReviewFormError] = useState<string | null>(null);
   const [feedbackByKey, setFeedbackByKey] = useState<
     Record<string, { type: "info" | "error"; text: string }>
   >({});
+
+  function openNewReviewDialog(order: BuyerOrderView) {
+    const reviewedIds = new Set(order.reviews.map((r) => r.listingId).filter(Boolean));
+    const nextItem =
+      order.items.find((it) => it.listingId && !reviewedIds.has(it.listingId)) ??
+      order.items[0];
+    setReviewingOrder(order);
+    setEditingReview(null);
+    setReviewListingId(nextItem?.listingId ?? "");
+    setReviewRating(5);
+    setReviewComment("");
+    setReviewFormError(null);
+  }
+
+  function openEditReviewDialog(order: BuyerOrderView, review: BuyerOrderReviewView) {
+    setReviewingOrder(order);
+    setEditingReview(review);
+    setReviewListingId(review.listingId ?? "");
+    setReviewRating(review.rating);
+    setReviewComment(review.comment);
+    setReviewFormError(null);
+  }
+
+  async function handleSubmitProductReview() {
+    if (!reviewingOrder) return;
+    const trimmed = reviewComment.trim();
+    if (trimmed.length < 5 || trimmed.length > 1000) {
+      setReviewFormError("Review comment must be 5 to 1,000 characters.");
+      return;
+    }
+    const order = reviewingOrder;
+    setBusyKey(`rev:${order.id}`);
+    setReviewFormError(null);
+    try {
+      const res = editingReview
+        ? await editVerifiedReviewAction({
+            reviewId: editingReview.id,
+            rating: reviewRating,
+            comment: trimmed,
+          })
+        : await submitVerifiedReviewAction({
+            orderId: order.id,
+            listingId: reviewListingId || order.items[0]?.listingId || null,
+            rating: reviewRating,
+            comment: trimmed,
+          });
+      if (!res.ok) {
+        setReviewFormError(res.message);
+        return;
+      }
+      setReviewingOrder(null);
+      setEditingReview(null);
+      setFeedbackByKey((prev) => ({
+        ...prev,
+        [`ord:${order.id}`]: { type: "info", text: res.message },
+      }));
+      router.refresh();
+    } catch {
+      setReviewFormError("Network error while saving review. Please try again.");
+    } finally {
+      setBusyKey(null);
+    }
+  }
 
   function openReportDialog(order: BuyerOrderView) {
     setReportingOrder(order);
@@ -847,6 +926,101 @@ export function OrdersClient({ pendingCheckouts, orders }: OrdersClientProps) {
               <DisputeDetailCard dispute={order.dispute} />
             ) : null}
 
+            {/* P0.8: Verified Purchase Reviews (Buyer Product Review UI on /orders) */}
+            {statusLower === "completed" ? (() => {
+              const isFullyRefunded = Boolean(
+                order.refund &&
+                  order.refund.refundType === "full_refund" &&
+                  order.refund.status === "succeeded"
+              );
+              const reviewedListingIds = new Set(
+                order.reviews.map((r) => r.listingId).filter(Boolean)
+              );
+              const unreviewedItems = order.items.filter(
+                (it) => it.listingId && !reviewedListingIds.has(it.listingId)
+              );
+              const canWriteProductReview =
+                !hasActiveDispute &&
+                !isFullyRefunded &&
+                (unreviewedItems.length > 0 || order.reviews.length === 0);
+
+              return (
+                <div className="space-y-2.5 border-t border-[#ECEAF3] bg-[#FAF9FC] px-5 py-3.5 text-xs">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="inline-flex items-center gap-1.5 font-bold text-[#14121A]">
+                      <Star className="h-3.5 w-3.5 text-amber-500" aria-hidden="true" />
+                      <span>Verified Purchase Reviews</span>
+                    </span>
+                    {canWriteProductReview ? (
+                      <button
+                        type="button"
+                        onClick={() => openNewReviewDialog(order)}
+                        className="inline-flex items-center gap-1 rounded-xl border border-[#4E2A84] bg-white px-3 py-1.5 text-xs font-bold text-[#4E2A84] transition hover:bg-[#F3EEFA]"
+                      >
+                        <Star className="h-3.5 w-3.5" aria-hidden="true" />
+                        <span>Write Verified Purchase Review</span>
+                      </button>
+                    ) : null}
+                  </div>
+                  {order.reviews.length > 0 ? (
+                    <div className="space-y-2">
+                      {order.reviews.map((rv) => {
+                        const itemMatch = order.items.find(
+                          (it) => it.listingId && it.listingId === rv.listingId
+                        );
+                        return (
+                          <div
+                            key={rv.id}
+                            className="rounded-xl border border-[#E6E3EE] bg-white p-3"
+                          >
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <span className="rounded-full bg-[#F3EEFA] px-2 py-0.5 text-[10px] font-extrabold text-[#4E2A84]">
+                                  Verified Purchase
+                                </span>
+                                <span className="font-extrabold text-amber-600">
+                                  {"★".repeat(rv.rating)} ({rv.rating}/5)
+                                </span>
+                                {itemMatch ? (
+                                  <span className="text-[11px] font-semibold text-[#6B6779]">
+                                    · {itemMatch.title}
+                                  </span>
+                                ) : null}
+                              </div>
+                              {!rv.hidden ? (
+                                <button
+                                  type="button"
+                                  onClick={() => openEditReviewDialog(order, rv)}
+                                  className="inline-flex items-center gap-1 text-[11px] font-bold text-[#4E2A84] hover:underline"
+                                >
+                                  <Pencil className="h-3 w-3" aria-hidden="true" />
+                                  <span>Edit Review</span>
+                                </button>
+                              ) : (
+                                <span className="text-[11px] font-semibold text-[#6B6779]">
+                                  Hidden by moderation
+                                </span>
+                              )}
+                            </div>
+                            <p className="mt-1.5 text-[#14121A]">{rv.comment}</p>
+                            {rv.sellerResponse ? (
+                              <p className="mt-2 rounded-lg bg-[#FAF9FC] p-2 text-[11px] text-[#4E2A84]">
+                                <strong>Seller Public Reply:</strong> {rv.sellerResponse}
+                              </p>
+                            ) : null}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : isFullyRefunded ? (
+                    <p className="text-[11px] text-[#6B6779]">
+                      Fully refunded orders are not eligible for verified purchase reviews.
+                    </p>
+                  ) : null}
+                </div>
+              );
+            })() : null}
+
             {canContactOrReport ? (
               <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[#ECEAF3] bg-white px-5 py-3 text-xs">
                 <button
@@ -1203,6 +1377,151 @@ export function OrdersClient({ pendingCheckouts, orders }: OrdersClientProps) {
                   <Flag className="h-3.5 w-3.5" />
                 )}
                 <span>Submit Dispute</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {/* P0.8: Buyer Verified Purchase Review Dialog (Create / Edit) */}
+      {reviewingOrder ? (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="product-review-title"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+        >
+          <div className="w-full max-w-md rounded-2xl border border-[#E6E3EE] bg-white p-6 shadow-xl">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <span className="inline-block rounded-full bg-[#F3EEFA] px-2.5 py-0.5 text-[10px] font-extrabold text-[#4E2A84]">
+                  Verified Purchase
+                </span>
+                <h2
+                  id="product-review-title"
+                  className="mt-1 text-base font-extrabold text-[#14121A]"
+                >
+                  {editingReview
+                    ? `Edit Review · #${reviewingOrder.orderCode}`
+                    : `Review Order #${reviewingOrder.orderCode}`}
+                </h2>
+                <p className="mt-0.5 text-xs text-[#6B6779]">
+                  Seller: {reviewingOrder.sellerName}
+                </p>
+              </div>
+              <button
+                type="button"
+                aria-label="Close review dialog"
+                onClick={() => {
+                  setReviewingOrder(null);
+                  setEditingReview(null);
+                }}
+                className="rounded-lg p-1 text-[#6B6779] hover:bg-[#FAF9FC] hover:text-[#14121A]"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="mt-4 space-y-3.5">
+              {!editingReview && reviewingOrder.items.length > 1 ? (
+                <div>
+                  <label
+                    htmlFor="review-item-select"
+                    className="block text-xs font-bold text-[#14121A]"
+                  >
+                    Item to Review
+                  </label>
+                  <select
+                    id="review-item-select"
+                    value={reviewListingId}
+                    onChange={(e) => setReviewListingId(e.target.value)}
+                    className="mt-1 w-full rounded-xl border border-[#E6E3EE] bg-white px-3 py-2 text-xs font-semibold text-[#14121A] focus:border-[#4E2A84] focus:outline-none"
+                  >
+                    {reviewingOrder.items
+                      .filter(
+                        (it) =>
+                          it.listingId &&
+                          !reviewingOrder.reviews.some(
+                            (r) => r.listingId === it.listingId
+                          )
+                      )
+                      .map((it) => (
+                        <option key={it.id} value={it.listingId ?? ""}>
+                          {it.title}
+                        </option>
+                      ))}
+                  </select>
+                </div>
+              ) : null}
+
+              <div>
+                <label
+                  htmlFor="review-rating-select"
+                  className="block text-xs font-bold text-[#14121A]"
+                >
+                  Star Rating (1–5)
+                </label>
+                <select
+                  id="review-rating-select"
+                  value={reviewRating}
+                  onChange={(e) => setReviewRating(Number(e.target.value))}
+                  className="mt-1 w-full rounded-xl border border-[#E6E3EE] bg-white px-3 py-2 text-xs font-semibold text-[#14121A] focus:border-[#4E2A84] focus:outline-none"
+                >
+                  {[5, 4, 3, 2, 1].map((n) => (
+                    <option key={n} value={n}>
+                      {"★".repeat(n)} ({n} {n === 1 ? "Star" : "Stars"})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label
+                  htmlFor="review-comment-input"
+                  className="block text-xs font-bold text-[#14121A]"
+                >
+                  Your Honest Review (5&ndash;1,000 characters)
+                </label>
+                <textarea
+                  id="review-comment-input"
+                  rows={4}
+                  maxLength={1000}
+                  value={reviewComment}
+                  onChange={(e) => setReviewComment(e.target.value)}
+                  placeholder="Share item quality, campus handover experience, and accuracy..."
+                  className="mt-1 w-full rounded-xl border border-[#E6E3EE] bg-white px-3 py-2 text-xs text-[#14121A] focus:border-[#4E2A84] focus:outline-none"
+                />
+              </div>
+
+              {reviewFormError ? (
+                <p role="alert" className="text-xs font-semibold text-[#B42318]">
+                  {reviewFormError}
+                </p>
+              ) : null}
+            </div>
+
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setReviewingOrder(null);
+                  setEditingReview(null);
+                }}
+                className="rounded-xl border border-[#E6E3EE] bg-white px-4 py-2 text-xs font-bold text-[#14121A] hover:bg-[#FAF9FC]"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={busyKey === `rev:${reviewingOrder.id}`}
+                onClick={handleSubmitProductReview}
+                className="inline-flex items-center gap-1.5 rounded-xl bg-[#4E2A84] px-4 py-2 text-xs font-bold text-white hover:bg-[#3F216B] disabled:opacity-50"
+              >
+                {busyKey === `rev:${reviewingOrder.id}` ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Star className="h-3.5 w-3.5" />
+                )}
+                <span>{editingReview ? "Save Changes" : "Publish Review"}</span>
               </button>
             </div>
           </div>

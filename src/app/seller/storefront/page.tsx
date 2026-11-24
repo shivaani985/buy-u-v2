@@ -74,6 +74,9 @@ export default async function SellerStorefrontPage({
             initialShopName={hub.storefront?.shopName || fallbackName}
             initialDescription={hub.storefront?.description || ""}
             initialLogoUrl={hub.storefront?.logoUrl ?? null}
+            initialBannerUrl={hub.storefront?.bannerUrl ?? null}
+            initialBusinessInfo={hub.storefront?.businessInfo ?? ""}
+            initialIsOpen={hub.storefront?.isOpen ?? true}
             faculty={session.profile?.faculty ?? null}
             publishedCount={hub.counts.published}
             isNewStorefront={!hub.storefront}

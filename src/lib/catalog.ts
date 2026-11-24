@@ -283,10 +283,10 @@ export async function getListings(
         supabase
           .from("free_notices")
           .select(
-            "id, contributor_id, title, description, condition, spot_id, image_paths, status, published_at, created_at"
+            "id, contributor_id, title, description, condition, spot_id, image_paths, status, created_at"
           )
-          .eq("status", "published")
-          .order("published_at", { ascending: false, nullsFirst: false })
+          .eq("status", "active")
+          .order("created_at", { ascending: false })
           .limit(20),
         supabase.from("donation_spots").select("id, name").eq("active", true),
       ]);
