@@ -852,4 +852,148 @@ test("Phase 6B.3 ToyyibPay Sandbox integration enforces server-only secrets, san
   assert.ok(hardeningSql.includes("ignored_terminal"));
   // Must NOT add a redundant unique index on payments(order_id)
   assert.equal(/CREATE UNIQUE INDEX[^\n]*payments\s*\(\s*order_id/i.test(hardeningSql), false);
+
+  // 6. Phase 6B.3 incremental bill-lifecycle hardening SQL & server client invariants
+  const lifecycleSql = fs.readFileSync(
+    path.resolve(root, "docs/sql/phase-6b3-bill-lifecycle-hardening.sql"),
+    "utf8"
+  );
+  assert.ok(lifecycleSql.includes("ADD COLUMN IF NOT EXISTS bill_creation_attempt_token uuid"));
+  assert.ok(lifecycleSql.includes("v_has_valid_bill AND v_payment.status IN ('pending', 'failed')"));
+  assert.ok(lifecycleSql.includes("RETURN 'stale_attempt'"));
+  assert.ok(lifecycleSql.includes("RETURN 'recovered_ready'"));
+  assert.ok(lifecycleSql.includes("v_payment.bill_creation_state NOT IN ('creating', 'ambiguous')"));
+  // mark_order_payment_failed_atomic must NOT overwrite bill_creation_state
+  const markFailFn = lifecycleSql.slice(
+    lifecycleSql.indexOf("CREATE OR REPLACE FUNCTION public.mark_order_payment_failed_atomic")
+  );
+  assert.equal(markFailFn.includes("bill_creation_state = 'failed'"), false);
+  assert.ok(serverMod.includes("p_attempt_token: attemptToken"));
+  assert.ok(serverMod.includes('"recovered_ready"'));
+});
+
+test("Phase 6B.3 bill-lifecycle state machine: preserves valid bills on failed payment, rejects stale tokens, recovers ambiguous responses, and protects terminal states", () => {
+  // Faithful in-memory model of claim_order_bill_slot / finalize_order_bill_slot / mark_order_payment_failed_atomic
+  const order = { id: "ord-1", status: "pending_payment", paid_at: null, total_paid_sen: 1600 };
+  let payment = null;
+  let seq = 0;
+
+  function claim() {
+    if (order.paid_at || order.status === "paid") return { action: "already_paid" };
+    if (payment) {
+      if (payment.status === "paid" || payment.status === "late_payment_review") {
+        return { action: "already_terminal" };
+      }
+      const hasValidBill =
+        payment.bill_creation_state === "ready" &&
+        payment.bill_code &&
+        payment.bill_url &&
+        !payment.bill_code.startsWith("creating:");
+      if (hasValidBill && (payment.status === "pending" || payment.status === "failed")) {
+        payment.status = "pending";
+        return { action: "reuse_bill", bill_code: payment.bill_code, bill_url: payment.bill_url };
+      }
+      if (payment.bill_creation_state === "creating") return { action: "in_progress" };
+      if (payment.bill_creation_state === "ambiguous") return { action: "ambiguous_hold" };
+      if (payment.bill_creation_state === "failed" && payment.bill_code.startsWith("creating:")) {
+        const token = `tok-${++seq}`;
+        payment = {
+          ...payment,
+          bill_code: `creating:${order.id}:${token}`,
+          bill_url: null,
+          status: "pending",
+          bill_creation_state: "creating",
+          attempt_token: token,
+        };
+        return { action: "create_new", attempt_token: token };
+      }
+      return { action: "ambiguous_hold" };
+    }
+    const token = `tok-${++seq}`;
+    payment = {
+      order_id: order.id,
+      bill_code: `creating:${order.id}:${token}`,
+      bill_url: null,
+      status: "pending",
+      bill_creation_state: "creating",
+      attempt_token: token,
+    };
+    return { action: "create_new", attempt_token: token };
+  }
+
+  function finalize(token, outcome, billCode = null, billUrl = null) {
+    if (!payment) return "missing_slot";
+    if (payment.status === "paid" || payment.status === "late_payment_review") return "ignored_terminal";
+    if (payment.attempt_token !== token) return "stale_attempt";
+    if (outcome === "ready" && billCode && billUrl) {
+      if (payment.bill_creation_state !== "creating" && payment.bill_creation_state !== "ambiguous") {
+        return "ignored_state";
+      }
+      const wasAmbiguous = payment.bill_creation_state === "ambiguous";
+      payment.bill_code = billCode;
+      payment.bill_url = billUrl;
+      payment.status = "pending";
+      payment.bill_creation_state = "ready";
+      payment.attempt_token = null;
+      return wasAmbiguous ? "recovered_ready" : "ready";
+    }
+    if (payment.bill_creation_state !== "creating") return "ignored_state";
+    if (outcome === "failed") {
+      payment.status = "failed";
+      payment.bill_creation_state = "failed";
+      payment.attempt_token = null;
+      return "failed";
+    }
+    payment.bill_creation_state = "ambiguous";
+    return "ambiguous";
+  }
+
+  function markFailed(billCode) {
+    if (!payment || payment.bill_code !== billCode) return "payment_not_found";
+    if (order.paid_at || order.status === "paid" || payment.status === "paid" || payment.status === "late_payment_review") {
+      return "ignored_terminal";
+    }
+    if (payment.status !== "pending") return `already_${payment.status}`;
+    payment.status = "failed"; // Preserves bill_creation_state='ready', bill_code, bill_url!
+    return "marked_failed";
+  }
+
+  // 1. Definite bill-creation failure -> clean retry creates new attempt; stale token rejected
+  const c1 = claim();
+  assert.equal(c1.action, "create_new");
+  assert.equal(claim().action, "in_progress"); // Concurrent claim blocked
+  assert.equal(finalize(c1.attempt_token, "failed"), "failed");
+  const c2 = claim();
+  assert.equal(c2.action, "create_new");
+  assert.notEqual(c2.attempt_token, c1.attempt_token);
+  assert.equal(finalize(c1.attempt_token, "ready", "staleBill", "https://dev.toyyibpay.com/staleBill"), "stale_attempt");
+
+  // 2. Ambiguous timeout -> blocks blind duplicate creation, then safely recovers when verified response arrives
+  assert.equal(finalize(c2.attempt_token, "ambiguous"), "ambiguous");
+  assert.equal(claim().action, "ambiguous_hold");
+  assert.equal(
+    finalize(c2.attempt_token, "ready", "billReal123", "https://dev.toyyibpay.com/billReal123"),
+    "recovered_ready"
+  );
+
+  // 3. Failed FPX payment attempt on existing valid bill -> preserves bill_code & reuses it on retry!
+  assert.equal(markFailed("billReal123"), "marked_failed");
+  assert.equal(payment.bill_creation_state, "ready");
+  assert.equal(payment.bill_code, "billReal123");
+  const cRetry = claim();
+  assert.equal(cRetry.action, "reuse_bill");
+  assert.equal(cRetry.bill_code, "billReal123");
+
+  // 4. Terminal paid / late_payment_review cannot be overwritten by delayed failed callback
+  order.status = "paid";
+  order.paid_at = "2026-11-24T04:00:00Z";
+  payment.status = "paid";
+  assert.equal(markFailed("billReal123"), "ignored_terminal");
+  assert.equal(payment.status, "paid");
+
+  order.status = "expired";
+  order.paid_at = null;
+  payment.status = "late_payment_review";
+  assert.equal(markFailed("billReal123"), "ignored_terminal");
+  assert.equal(payment.status, "late_payment_review");
 });

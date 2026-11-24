@@ -233,9 +233,15 @@ export async function ensureSandboxBillForOrder(input: {
   }
 
   const claim = (Array.isArray(claimRows) ? claimRows[0] : claimRows) as
-    | { action?: string; bill_code?: string | null; bill_url?: string | null }
+    | {
+        action?: string;
+        bill_code?: string | null;
+        bill_url?: string | null;
+        attempt_token?: string | null;
+      }
     | undefined;
   const action = claim?.action ?? "";
+  const attemptToken = claim?.attempt_token ?? null;
 
   if (action === "reuse_bill" && claim?.bill_code && claim?.bill_url) {
     return {
@@ -293,7 +299,7 @@ export async function ensureSandboxBillForOrder(input: {
     };
   }
 
-  if (action !== "create_new") {
+  if (action !== "create_new" || !attemptToken) {
     return {
       ok: false,
       orderId: order.id,
@@ -307,7 +313,7 @@ export async function ensureSandboxBillForOrder(input: {
   const deadlineIso =
     order.payment_deadline || new Date(Date.now() + 15 * 60_000).toISOString();
 
-  // 2. Call ToyyibPay Sandbox createBill and finalize slot deterministically
+  // 2. Call ToyyibPay Sandbox createBill and finalize slot with matching attempt_token
   let payload: ReturnType<typeof buildToyyibPayCreateBillPayload>;
   try {
     payload = buildToyyibPayCreateBillPayload({
@@ -327,6 +333,7 @@ export async function ensureSandboxBillForOrder(input: {
   } catch (err) {
     await service.rpc("finalize_order_bill_slot", {
       p_order_id: order.id,
+      p_attempt_token: attemptToken,
       p_outcome: "failed",
     });
     return {
@@ -342,12 +349,24 @@ export async function ensureSandboxBillForOrder(input: {
   try {
     const createdBill = await createToyyibPaySandboxBill(payload);
 
-    await service.rpc("finalize_order_bill_slot", {
+    const { data: finalizeRes } = await service.rpc("finalize_order_bill_slot", {
       p_order_id: order.id,
+      p_attempt_token: attemptToken,
       p_outcome: "ready",
       p_bill_code: createdBill.billCode,
       p_bill_url: createdBill.billUrl,
     });
+
+    if (finalizeRes !== "ready" && finalizeRes !== "recovered_ready") {
+      return {
+        ok: false,
+        orderId: order.id,
+        orderCode: order.order_code,
+        billCode: null,
+        billUrl: null,
+        error: "Bill finalization was superseded. Check My Orders for the active bill.",
+      };
+    }
 
     return {
       ok: true,
@@ -359,10 +378,11 @@ export async function ensureSandboxBillForOrder(input: {
     };
   } catch (err) {
     // Definite HTTP 4xx rejection -> safe to mark failed for clean retry.
-    // Timeout / abort / HTTP 5xx / network drop -> mark ambiguous so we NEVER blindly duplicate bills.
+    // Timeout / abort / HTTP 5xx / network drop -> mark ambiguous while retaining attemptToken for safe late recovery.
     const outcome = err instanceof ToyyibPayDefiniteError ? "failed" : "ambiguous";
     await service.rpc("finalize_order_bill_slot", {
       p_order_id: order.id,
+      p_attempt_token: attemptToken,
       p_outcome: outcome,
     });
     return {
