@@ -115,10 +115,13 @@ function mapTransactionStatus(
 ): { label: string; tone: SellerTransactionItem["statusTone"] } {
   const s = orderStatus.toLowerCase();
   if (COMPLETED_STATUSES.has(s)) {
-    return { label: "Paid", tone: "live" };
+    return { label: "Completed", tone: "live" };
   }
-  if (s === "paid" || s === "ready_for_pickup" || s === "handed_over") {
-    return { label: "Pending", tone: "pending" };
+  if (s === "handed_over") {
+    return { label: "Awaiting Receipt Confirmation", tone: "pending" };
+  }
+  if (s === "paid" || s === "ready_for_pickup") {
+    return { label: "Paid — Awaiting Handover", tone: "pending" };
   }
   if (s === "disputed") {
     return { label: "Disputed", tone: "danger" };
@@ -126,11 +129,14 @@ function mapTransactionStatus(
   if (s === "refunded") {
     return { label: "Refunded", tone: "muted" };
   }
-  if (s === "cancelled" || s === "canceled" || s === "expired") {
+  if (s === "expired") {
+    return { label: "Payment Expired", tone: "muted" };
+  }
+  if (s === "cancelled" || s === "canceled") {
     return { label: "Cancelled", tone: "muted" };
   }
   if (s === "pending_payment" && !paymentVerified) {
-    return { label: "Unpaid", tone: "muted" };
+    return { label: "Awaiting Payment", tone: "muted" };
   }
   return { label: orderStatus, tone: "muted" };
 }
@@ -180,12 +186,22 @@ export function computeSellerFinancials(input: {
   }
 
   const refundByOrder = new Map<string, number>();
+  const openDisputeOrders = new Set<string>();
+  const CLOSED_DISPUTE_STATUSES = new Set([
+    "resolved",
+    "cancelled",
+    "dismissed",
+    "closed_rejected",
+  ]);
   for (const d of input.disputes) {
-    if (d.status.toLowerCase() === "resolved" && (d.refund_amount_sen ?? 0) > 0) {
+    const ds = (d.status ?? "").toLowerCase();
+    if (ds === "resolved" && (d.refund_amount_sen ?? 0) > 0) {
       refundByOrder.set(
         d.order_id,
         (refundByOrder.get(d.order_id) ?? 0) + (d.refund_amount_sen ?? 0)
       );
+    } else if (ds && !CLOSED_DISPUTE_STATUSES.has(ds)) {
+      openDisputeOrders.add(d.order_id);
     }
   }
 
@@ -209,8 +225,13 @@ export function computeSellerFinancials(input: {
   }
 
   const transactions: SellerTransactionItem[] = [];
+  const seenOrderIds = new Set<string>();
 
   for (const order of input.orders) {
+    // Prevent duplicated earnings if an order ever appears twice in input
+    if (seenOrderIds.has(order.id)) continue;
+    seenOrderIds.add(order.id);
+
     const statusLower = (order.status ?? "").toLowerCase();
     const payment = paymentByOrder.get(order.id);
     const paymentVerified = Boolean(
@@ -228,6 +249,8 @@ export function computeSellerFinancials(input: {
 
     const isVerifiedSale =
       paymentVerified && !EXCLUDED_CANCELLED_STATUSES.has(statusLower);
+    const hasOpenDispute =
+      statusLower === "disputed" || openDisputeOrders.has(order.id);
 
     if (isVerifiedSale) {
       // Range-scoped Total Sales
@@ -237,8 +260,8 @@ export function computeSellerFinancials(input: {
         verifiedOrderCount += 1;
       }
 
-      // All-time live settlement & payout balances
-      if (IN_PROGRESS_SETTLEMENT_STATUSES.has(statusLower)) {
+      // All-time live settlement & payout balances (disputed orders stay frozen)
+      if (hasOpenDispute || IN_PROGRESS_SETTLEMENT_STATUSES.has(statusLower)) {
         pendingSettlementSen += netSen;
       } else if (COMPLETED_STATUSES.has(statusLower)) {
         completedNetSen += netSen;

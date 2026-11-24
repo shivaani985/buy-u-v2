@@ -3,24 +3,32 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import {
+  CheckCircle2,
   Clock,
   ExternalLink,
+  Flag,
   KeyRound,
   Loader2,
   MapPin,
+  MessageCircle,
   RefreshCw,
   ShieldAlert,
   Store,
+  X,
 } from "lucide-react";
 import {
   retryCheckoutSandboxBillAction,
   retryOrderSandboxBillAction,
 } from "@/app/checkout/actions";
+import { startConversationAction } from "@/app/messages/actions";
+import { confirmOrderReceiptAction } from "@/app/orders/actions";
+import { OrderTimeline } from "@/components/orders/OrderTimeline";
 import { formatSenToRm, formatShortDate } from "@/lib/format";
 import type {
   BuyerOrderView,
   BuyerPendingCheckoutView,
 } from "@/lib/orders/data";
+import { getOrderStatusBadge } from "@/lib/orders/lifecycle";
 
 interface OrdersClientProps {
   pendingCheckouts: BuyerPendingCheckoutView[];
@@ -72,9 +80,74 @@ export function OrdersClient({ pendingCheckouts, orders }: OrdersClientProps) {
   const router = useRouter();
   const [nowMs] = useState<number>(() => Date.now());
   const [busyKey, setBusyKey] = useState<string | null>(null);
+  const [confirmingOrder, setConfirmingOrder] = useState<BuyerOrderView | null>(
+    null
+  );
+  const [reportingOrder, setReportingOrder] = useState<BuyerOrderView | null>(
+    null
+  );
   const [feedbackByKey, setFeedbackByKey] = useState<
     Record<string, { type: "info" | "error"; text: string }>
   >({});
+
+  async function handleContactSeller(order: BuyerOrderView) {
+    const key = `msg:${order.id}`;
+    setBusyKey(key);
+    try {
+      const res = await startConversationAction({
+        sellerId: order.sellerId,
+        listingId: order.items[0]?.listingId ?? null,
+      });
+      if (!res.ok || !res.href) {
+        setFeedbackByKey((prev) => ({
+          ...prev,
+          [`ord:${order.id}`]: {
+            type: "error",
+            text: res.error || "Could not open chat with seller right now.",
+          },
+        }));
+        return;
+      }
+      router.push(res.href);
+    } finally {
+      setBusyKey(null);
+    }
+  }
+
+  async function handleConfirmReceipt(order: BuyerOrderView) {
+    const key = `ord:${order.id}`;
+    setBusyKey(`rcpt:${order.id}`);
+    setFeedbackByKey((prev) => {
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+    try {
+      const res = await confirmOrderReceiptAction(order.id);
+      setConfirmingOrder(null);
+      setFeedbackByKey((prev) => ({
+        ...prev,
+        [key]: {
+          type: res.ok ? "info" : "error",
+          text: res.message,
+        },
+      }));
+      if (res.ok) {
+        router.refresh();
+      }
+    } catch {
+      setConfirmingOrder(null);
+      setFeedbackByKey((prev) => ({
+        ...prev,
+        [key]: {
+          type: "error",
+          text: "Network error while confirming receipt. Please try again.",
+        },
+      }));
+    } finally {
+      setBusyKey(null);
+    }
+  }
 
   async function handlePayCheckout(checkout: BuyerPendingCheckoutView) {
     const key = `chk:${checkout.id}`;
@@ -433,10 +506,25 @@ export function OrdersClient({ pendingCheckouts, orders }: OrdersClientProps) {
         );
       })}
 
-      {/* Individual Seller Orders (Paid, Completed, Expired, & Legacy Orders) */}
+      {/* Individual Seller Orders (Paid, Handed Over, Completed, Expired & Legacy Orders) */}
       {orders.map((order) => {
         const key = `ord:${order.id}`;
-        const st = formatOrderStatus(order.status, order.latestPayment?.status);
+        const badge = getOrderStatusBadge(
+          order.status,
+          order.latestPayment?.status
+        );
+        const statusLower = order.status.toLowerCase();
+        const isEligibleForPin =
+          Boolean(order.pickupPin) &&
+          (statusLower === "paid" || statusLower === "ready_for_pickup");
+        const canConfirmReceipt = statusLower === "handed_over";
+        const canContactOrReport =
+          statusLower === "paid" ||
+          statusLower === "ready_for_pickup" ||
+          statusLower === "handed_over" ||
+          statusLower === "completed" ||
+          statusLower === "settled" ||
+          statusLower === "disputed";
         const deadlineMs = order.paymentDeadline
           ? new Date(order.paymentDeadline).getTime()
           : null;
@@ -446,6 +534,8 @@ export function OrdersClient({ pendingCheckouts, orders }: OrdersClientProps) {
           (deadlineMs === null || nowMs < deadlineMs);
         const deadlineLabel = formatDeadlineMyt(order.paymentDeadline);
         const isBusy = busyKey === key;
+        const isMsgBusy = busyKey === `msg:${order.id}`;
+        const isRcptBusy = busyKey === `rcpt:${order.id}`;
         const feedback = feedbackByKey[key];
 
         return (
@@ -485,7 +575,11 @@ export function OrdersClient({ pendingCheckouts, orders }: OrdersClientProps) {
                   </>
                 ) : null}
               </div>
-              <span className={`font-bold ${st.color}`}>{st.label}</span>
+              <span
+                className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-[11px] font-bold ${badge.toneClass}`}
+              >
+                {badge.label}
+              </span>
             </div>
 
             <ul className="divide-y divide-[#F1EFF6]">
@@ -523,18 +617,90 @@ export function OrdersClient({ pendingCheckouts, orders }: OrdersClientProps) {
               ))}
             </ul>
 
-            {order.pickupPin ? (
-              <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[#E1F1F1] bg-[#F4FAFA] px-5 py-3 text-xs">
+            <OrderTimeline
+              status={order.status}
+              createdAt={order.createdAt}
+              paidAt={order.paidAt}
+              handedOverAt={order.handedOverAt}
+              completedAt={order.completedAt}
+            />
+
+            {isEligibleForPin ? (
+              <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[#D6EEEE] bg-[#F2FAFA] px-5 py-3 text-xs">
                 <span className="inline-flex items-center gap-1.5 font-semibold text-[#008285]">
                   <KeyRound className="h-3.5 w-3.5" aria-hidden="true" />
                   <span>Private Pickup PIN (buyer-only):</span>
-                  <strong className="font-mono text-sm font-extrabold tracking-[0.2em] text-[#14121A]">
+                  <strong className="rounded-md bg-white px-2 py-0.5 font-mono text-sm font-extrabold tracking-[0.2em] text-[#14121A] ring-1 ring-[#C6E4E4]">
                     {order.pickupPin}
                   </strong>
                 </span>
                 <span className="text-[#4A4656]">
                   Share only in person at campus handover
                 </span>
+              </div>
+            ) : null}
+
+            {canConfirmReceipt ? (
+              <div className="flex flex-wrap items-center justify-between gap-3 border-t border-[#E6DDF7] bg-[#F7F3FD] px-5 py-3.5 text-xs">
+                <div className="flex items-start gap-2 text-[#3E2468]">
+                  <CheckCircle2
+                    className="mt-0.5 h-4 w-4 shrink-0 text-[#4E2A84]"
+                    aria-hidden="true"
+                  />
+                  <span>
+                    <strong className="font-bold">Handover verified.</strong>{" "}
+                    Inspect your item(s) and confirm receipt to complete this
+                    order.
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  disabled={isRcptBusy}
+                  onClick={() => setConfirmingOrder(order)}
+                  className="inline-flex items-center gap-1.5 rounded-xl bg-[#008285] px-4 py-2 text-xs font-bold text-white transition hover:bg-[#006B6E] disabled:opacity-50"
+                >
+                  {isRcptBusy ? (
+                    <Loader2
+                      className="h-3.5 w-3.5 animate-spin"
+                      aria-hidden="true"
+                    />
+                  ) : (
+                    <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
+                  )}
+                  <span>Confirm Receipt</span>
+                </button>
+              </div>
+            ) : null}
+
+            {canContactOrReport ? (
+              <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[#ECEAF3] bg-white px-5 py-3 text-xs">
+                <button
+                  type="button"
+                  disabled={isMsgBusy}
+                  onClick={() => handleContactSeller(order)}
+                  className="inline-flex items-center gap-1.5 rounded-xl border border-[#E6E3EE] bg-white px-3.5 py-2 font-semibold text-[#14121A] transition hover:border-[#4E2A84] hover:text-[#4E2A84] disabled:opacity-50"
+                >
+                  {isMsgBusy ? (
+                    <Loader2
+                      className="h-3.5 w-3.5 animate-spin"
+                      aria-hidden="true"
+                    />
+                  ) : (
+                    <MessageCircle
+                      className="h-3.5 w-3.5 text-[#4E2A84]"
+                      aria-hidden="true"
+                    />
+                  )}
+                  <span>Contact Seller / Arrange Collection</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setReportingOrder(order)}
+                  className="inline-flex items-center gap-1 rounded-xl px-2.5 py-1.5 font-semibold text-[#6B6779] transition hover:bg-[#FAF9FC] hover:text-[#B42318]"
+                >
+                  <Flag className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span>Report a Problem</span>
+                </button>
               </div>
             ) : null}
 
@@ -650,6 +816,136 @@ export function OrdersClient({ pendingCheckouts, orders }: OrdersClientProps) {
           </section>
         );
       })}
+
+      {/* Buyer Receipt Confirmation Dialog */}
+      {confirmingOrder ? (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="confirm-receipt-title"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+        >
+          <div className="w-full max-w-md rounded-2xl border border-[#E6E3EE] bg-white p-6 shadow-xl">
+            <div className="flex items-start justify-between gap-3">
+              <h2
+                id="confirm-receipt-title"
+                className="text-base font-extrabold text-[#14121A]"
+              >
+                Confirm Order Receipt
+              </h2>
+              <button
+                type="button"
+                aria-label="Close dialog"
+                onClick={() => setConfirmingOrder(null)}
+                className="rounded-lg p-1 text-[#6B6779] hover:bg-[#FAF9FC] hover:text-[#14121A]"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <p className="mt-2 text-sm text-[#4A4656]">
+              Confirm that you have received order{" "}
+              <strong className="text-[#14121A]">
+                #{confirmingOrder.orderCode}
+              </strong>{" "}
+              from{" "}
+              <strong className="text-[#14121A]">
+                {confirmingOrder.sellerName}
+              </strong>{" "}
+              in good condition.
+            </p>
+            <p className="mt-2 rounded-xl bg-[#FAF9FC] p-3 text-xs text-[#6B6779]">
+              Once confirmed, this order is marked Completed and the
+              seller&apos;s net earnings move from Pending Settlement to
+              Available for Payout.
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setConfirmingOrder(null)}
+                className="rounded-xl border border-[#E6E3EE] bg-white px-4 py-2 text-xs font-bold text-[#14121A] hover:bg-[#FAF9FC]"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={busyKey === `rcpt:${confirmingOrder.id}`}
+                onClick={() => handleConfirmReceipt(confirmingOrder)}
+                className="inline-flex items-center gap-1.5 rounded-xl bg-[#008285] px-4 py-2 text-xs font-bold text-white hover:bg-[#006B6E] disabled:opacity-50"
+              >
+                {busyKey === `rcpt:${confirmingOrder.id}` ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <CheckCircle2 className="h-3.5 w-3.5" />
+                )}
+                <span>Yes, Confirm Receipt</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {/* Phase 6D-compatible Report a Problem Entry Point Dialog */}
+      {reportingOrder ? (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="report-problem-title"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+        >
+          <div className="w-full max-w-md rounded-2xl border border-[#E6E3EE] bg-white p-6 shadow-xl">
+            <div className="flex items-start justify-between gap-3">
+              <h2
+                id="report-problem-title"
+                className="text-base font-extrabold text-[#14121A]"
+              >
+                Report a Problem · #{reportingOrder.orderCode}
+              </h2>
+              <button
+                type="button"
+                aria-label="Close dialog"
+                onClick={() => setReportingOrder(null)}
+                className="rounded-lg p-1 text-[#6B6779] hover:bg-[#FAF9FC] hover:text-[#14121A]"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <p className="mt-2 text-sm text-[#4A4656]">
+              If your item is missing, damaged, or not as described, do not
+              confirm receipt yet. Formal in-app order disputes &amp; evidence
+              submission are being activated in Phase 6D.
+            </p>
+            <p className="mt-2 rounded-xl bg-[#FAF9FC] p-3 text-xs text-[#6B6779]">
+              Keep your order reference{" "}
+              <strong className="font-mono text-[#14121A]">
+                #{reportingOrder.orderCode}
+              </strong>{" "}
+              and message the seller first to resolve campus collection issues
+              quickly.
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setReportingOrder(null)}
+                className="rounded-xl border border-[#E6E3EE] bg-white px-4 py-2 text-xs font-bold text-[#14121A] hover:bg-[#FAF9FC]"
+              >
+                Close
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const target = reportingOrder;
+                  setReportingOrder(null);
+                  handleContactSeller(target);
+                }}
+                className="inline-flex items-center gap-1.5 rounded-xl bg-[#4E2A84] px-4 py-2 text-xs font-bold text-white hover:bg-[#3F216B]"
+              >
+                <MessageCircle className="h-3.5 w-3.5" />
+                <span>Message Seller</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

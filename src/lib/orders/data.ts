@@ -34,6 +34,7 @@ export interface BuyerOrderView {
   collectionAreaName: string;
   paymentDeadline: string | null;
   paidAt: string | null;
+  handedOverAt: string | null;
   completedAt: string | null;
   createdAt: string;
   /** Strictly buyer-only pickup PIN (never queried or exposed on seller routes). */
@@ -87,7 +88,7 @@ export async function getBuyerOrdersData(
   const { data: rawOrders, error: ordersErr } = await supabase
     .from("orders")
     .select(
-      "id,order_code,source,checkout_session_id,seller_id,status,subtotal_sen,fpx_fee_sen,total_paid_sen,collection_area_name,payment_deadline,paid_at,completed_at,created_at"
+      "id,order_code,source,checkout_session_id,seller_id,status,subtotal_sen,fpx_fee_sen,total_paid_sen,collection_area_name,payment_deadline,paid_at,handed_over_at,completed_at,created_at"
     )
     .eq("buyer_id", eligibility.userId)
     .order("created_at", { ascending: false })
@@ -115,6 +116,7 @@ export async function getBuyerOrdersData(
     collection_area_name: string | null;
     payment_deadline: string | null;
     paid_at: string | null;
+    handed_over_at: string | null;
     completed_at: string | null;
     created_at: string;
   }>;
@@ -253,6 +255,7 @@ export async function getBuyerOrdersData(
     collectionAreaName: o.collection_area_name?.trim() || "UMSKAL Campus",
     paymentDeadline: o.payment_deadline,
     paidAt: o.paid_at,
+    handedOverAt: o.handed_over_at,
     completedAt: o.completed_at,
     createdAt: o.created_at,
     pickupPin: pinByOrder.get(o.id) ?? null,
