@@ -68,7 +68,7 @@ export async function getBuyerOrdersData(
   const { data: rawOrders, error: ordersErr } = await supabase
     .from("orders")
     .select(
-      "id,order_code,source,seller_id,status,subtotal_sen,fpx_fee_sen,total_paid_sen,collection_area_name,payment_deadline,paid_at,completed_at,created_at,pickup_pin"
+      "id,order_code,source,seller_id,status,subtotal_sen,fpx_fee_sen,total_paid_sen,collection_area_name,payment_deadline,paid_at,completed_at,created_at"
     )
     .eq("buyer_id", eligibility.userId)
     .order("created_at", { ascending: false })
@@ -96,7 +96,6 @@ export async function getBuyerOrdersData(
     paid_at: string | null;
     completed_at: string | null;
     created_at: string;
-    pickup_pin: string | null;
   }>;
 
   if (orderRows.length === 0) {
@@ -104,30 +103,47 @@ export async function getBuyerOrdersData(
   }
 
   const orderIds = orderRows.map((o) => o.id);
+  const paidOrderIds = orderRows
+    .filter((o) => o.status === "paid" || o.status === "ready_for_pickup")
+    .map((o) => o.id);
   const sellerIds = Array.from(new Set(orderRows.map((o) => o.seller_id)));
   const service = getServerServiceClient();
 
-  const [itemsRes, profilesRes, storefrontsRes, paymentsRes] = await Promise.all([
-    supabase
-      .from("order_items")
-      .select("id,order_id,listing_id,title_snapshot,unit_sen,quantity,image_path")
-      .in("order_id", orderIds),
-    supabase
-      .from("public_profiles")
-      .select("id,display_name")
-      .in("id", sellerIds),
-    supabase
-      .from("storefronts")
-      .select("seller_id,shop_name")
-      .in("seller_id", sellerIds),
-    service
-      ? service
-          .from("payments")
-          .select("order_id,bill_code,bill_url,status,created_at")
-          .in("order_id", orderIds)
-          .order("created_at", { ascending: false })
-      : Promise.resolve({ data: [] }),
-  ]);
+  const [itemsRes, profilesRes, storefrontsRes, paymentsRes, pinsRes] =
+    await Promise.all([
+      supabase
+        .from("order_items")
+        .select("id,order_id,listing_id,title_snapshot,unit_sen,quantity,image_path")
+        .in("order_id", orderIds),
+      supabase
+        .from("public_profiles")
+        .select("id,display_name")
+        .in("id", sellerIds),
+      supabase
+        .from("storefronts")
+        .select("seller_id,shop_name")
+        .in("seller_id", sellerIds),
+      service
+        ? service
+            .from("payments")
+            .select("order_id,bill_code,bill_url,status,created_at")
+            .in("order_id", orderIds)
+            .order("created_at", { ascending: false })
+        : Promise.resolve({ data: [] }),
+      paidOrderIds.length > 0
+        ? supabase.rpc("get_buyer_order_pickup_pins", {
+            p_order_ids: paidOrderIds,
+          })
+        : Promise.resolve({ data: [] }),
+    ]);
+
+  const pinByOrder = new Map<string, string>();
+  for (const row of (pinsRes.data ?? []) as Array<{
+    order_id: string;
+    pickup_pin: string | null;
+  }>) {
+    if (row.pickup_pin) pinByOrder.set(row.order_id, row.pickup_pin);
+  }
 
   const latestPaymentByOrder = new Map<string, BuyerOrderPaymentView>();
   for (const p of (paymentsRes.data ?? []) as Array<{
@@ -136,7 +152,11 @@ export async function getBuyerOrdersData(
     bill_url: string | null;
     status: string;
   }>) {
-    if (!latestPaymentByOrder.has(p.order_id)) {
+    if (
+      !latestPaymentByOrder.has(p.order_id) &&
+      p.bill_code &&
+      !p.bill_code.startsWith("creating:")
+    ) {
       latestPaymentByOrder.set(p.order_id, {
         billCode: p.bill_code,
         billUrl: p.bill_url,
@@ -196,10 +216,7 @@ export async function getBuyerOrdersData(
     paidAt: o.paid_at,
     completedAt: o.completed_at,
     createdAt: o.created_at,
-    pickupPin:
-      o.status === "paid" || o.status === "ready_for_pickup"
-        ? o.pickup_pin
-        : null,
+    pickupPin: pinByOrder.get(o.id) ?? null,
     latestPayment: latestPaymentByOrder.get(o.id) ?? null,
     items: itemsByOrder.get(o.id) ?? [],
   }));

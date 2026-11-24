@@ -808,21 +808,48 @@ test("Phase 6B.3 ToyyibPay Sandbox integration enforces server-only secrets, san
   assert.equal(serverMod.includes("NEXT_PUBLIC_TOYYIBPAY"), false);
   assert.ok(serverMod.includes('https://dev.toyyibpay.com'));
 
-  // 2. Duplicate-bill prevention: single-flight lock + pending bill reuse
-  assert.ok(serverMod.includes("inFlightBillCreations"));
-  assert.ok(serverMod.includes('livePayment?.status === "pending"'));
+  // 2. Persistent DB-backed bill coordination (NO process-local inFlightBillCreations map)
+  assert.equal(serverMod.includes("inFlightBillCreations"), false);
+  assert.ok(serverMod.includes('"claim_order_bill_slot"'));
+  assert.ok(serverMod.includes('"finalize_order_bill_slot"'));
+  assert.ok(serverMod.includes('"mark_order_payment_failed_atomic"'));
+  assert.ok(serverMod.includes("ToyyibPayDefiniteError"));
+  assert.ok(serverMod.includes('"ambiguous"'));
 
   // 3. Callback & Return routes NEVER confirm paid directly; both call verifyAndReconcileBillPayment -> getBillTransactions -> confirm_order_payment_atomic
   assert.ok(callbackRoute.includes("verifyAndReconcileBillPayment"));
   assert.equal(callbackRoute.includes(".rpc("), false);
   assert.ok(returnPage.includes("verifyAndReconcileBillPayment"));
-  assert.equal(returnPage.includes(".rpc("), false);
+  assert.ok(returnPage.includes('"get_buyer_order_pickup_pins"'));
+  assert.equal(returnPage.includes("confirm_order_payment_atomic"), false);
   assert.ok(serverMod.includes("/index.php/api/getBillTransactions"));
   assert.ok(serverMod.includes('"confirm_order_payment_atomic"'));
 
-  // 4. Seller code NEVER queries or exposes pickup_pin
+  // 4. DB-level PIN & raw_callback privacy + buyer-only PIN RPC (zero direct pickup_pin column selects)
+  const ordersData = fs.readFileSync(path.resolve(root, "src/lib/orders/data.ts"), "utf8");
+  assert.ok(ordersData.includes('"get_buyer_order_pickup_pins"'));
+  assert.equal(ordersData.includes(",pickup_pin"), false);
+  assert.equal(returnPage.includes(", pickup_pin"), false);
   for (const rel of ["src/lib/seller/data.ts", "src/app/seller/actions.ts"]) {
     const content = fs.readFileSync(path.resolve(root, rel), "utf8");
     assert.equal(content.includes("pickup_pin"), false, `${rel} must never query pickup_pin`);
   }
+
+  // 5. Phase 6B.3 hardening SQL invariants
+  const hardeningSql = fs.readFileSync(
+    path.resolve(root, "docs/sql/phase-6b3-payment-security-hardening.sql"),
+    "utf8"
+  );
+  assert.ok(hardeningSql.includes("REVOKE SELECT ON public.orders FROM authenticated, anon;"));
+  assert.ok(hardeningSql.includes("REVOKE SELECT ON public.payments FROM authenticated, anon;"));
+  assert.ok(hardeningSql.includes("DROP TABLE public.orders"));
+  assert.ok(hardeningSql.includes("DROP TABLE public.payments"));
+  assert.ok(hardeningSql.includes("CREATE OR REPLACE FUNCTION public.get_buyer_order_pickup_pins"));
+  assert.ok(hardeningSql.includes("CREATE OR REPLACE FUNCTION public.claim_order_bill_slot"));
+  assert.ok(hardeningSql.includes("CREATE OR REPLACE FUNCTION public.finalize_order_bill_slot"));
+  assert.ok(hardeningSql.includes("CREATE OR REPLACE FUNCTION public.mark_order_payment_failed_atomic"));
+  assert.ok(hardeningSql.includes("ambiguous_hold"));
+  assert.ok(hardeningSql.includes("ignored_terminal"));
+  // Must NOT add a redundant unique index on payments(order_id)
+  assert.equal(/CREATE UNIQUE INDEX[^\n]*payments\s*\(\s*order_id/i.test(hardeningSql), false);
 });

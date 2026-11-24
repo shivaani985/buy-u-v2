@@ -68,16 +68,25 @@ function toFormBody(record: Record<string, string | number>): URLSearchParams {
   return params;
 }
 
+class ToyyibPayDefiniteError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ToyyibPayDefiniteError";
+  }
+}
+
 async function postToyyibPayForm(
   endpointPath: string,
   formFields: Record<string, string | number>
 ): Promise<unknown> {
   const config = getToyyibPaySandboxConfig();
   if (!config.configured) {
-    throw new Error(`ToyyibPay Sandbox is not configured (${config.missing.join(", ")}).`);
+    throw new ToyyibPayDefiniteError(
+      `ToyyibPay Sandbox is not configured (${config.missing.join(", ")}).`
+    );
   }
   if (!config.baseUrl.startsWith("https://dev.toyyibpay.com")) {
-    throw new Error("Refusing non-sandbox ToyyibPay base URL.");
+    throw new ToyyibPayDefiniteError("Refusing non-sandbox ToyyibPay base URL.");
   }
 
   const controller = new AbortController();
@@ -90,6 +99,9 @@ async function postToyyibPayForm(
       cache: "no-store",
       signal: controller.signal,
     });
+    if (res.status >= 400 && res.status < 500) {
+      throw new ToyyibPayDefiniteError(`ToyyibPay Sandbox rejected request (HTTP ${res.status}).`);
+    }
     if (!res.ok) {
       throw new Error(`ToyyibPay Sandbox HTTP ${res.status}`);
     }
@@ -165,10 +177,12 @@ export interface EnsureBillResult {
   error?: string;
 }
 
-// Per-order single-flight lock prevents concurrent retries from creating duplicate ToyyibPay bills.
-// shortcut: in-process map; upgrade to a DB advisory lock or unique partial index on pending payments if scaling to multi-instance serverless.
-const inFlightBillCreations = new Map<string, Promise<EnsureBillResult>>();
-
+/**
+ * Persistent DB-backed bill-creation coordination (`claim_order_bill_slot` /
+ * `finalize_order_bill_slot`) using existing `UNIQUE(payments.order_id)`.
+ * Safe across concurrent requests, multi-instance deployments, server restarts,
+ * and ambiguous gateway timeouts (NEVER blindly recreates a bill after uncertain outcome).
+ */
 export async function ensureSandboxBillForOrder(input: {
   order: EnsureBillOrderInput;
   itemCount: number;
@@ -176,163 +190,194 @@ export async function ensureSandboxBillForOrder(input: {
   buyerEmail: string;
   origin: string;
 }): Promise<EnsureBillResult> {
-  const existingPromise = inFlightBillCreations.get(input.order.id);
-  if (existingPromise) {
-    return existingPromise;
+  const { order } = input;
+  const service = getServerServiceClient();
+  if (!service) {
+    return {
+      ok: false,
+      orderId: order.id,
+      orderCode: order.order_code,
+      billCode: null,
+      billUrl: null,
+      error: "Payment service is not configured.",
+    };
   }
 
-  const run = (async (): Promise<EnsureBillResult> => {
-    const { order } = input;
-    if (order.status !== "pending_payment") {
-      return {
-        ok: false,
-        orderId: order.id,
-        orderCode: order.order_code,
-        billCode: null,
-        billUrl: null,
-        error: `Order is already ${order.status.replace(/_/g, " ")}.`,
-      };
-    }
+  const config = getToyyibPaySandboxConfig();
+  if (!config.configured) {
+    return {
+      ok: false,
+      orderId: order.id,
+      orderCode: order.order_code,
+      billCode: null,
+      billUrl: null,
+      error: "ToyyibPay Sandbox credentials are missing on the server.",
+    };
+  }
 
-    if (order.payment_deadline && Date.now() >= new Date(order.payment_deadline).getTime()) {
-      return {
-        ok: false,
-        orderId: order.id,
-        orderCode: order.order_code,
-        billCode: null,
-        billUrl: null,
-        error: "Payment window has expired. Reserved stock will be released.",
-      };
-    }
+  // 1. Atomically claim or reuse the persistent DB bill slot for this order
+  const { data: claimRows, error: claimErr } = await service.rpc(
+    "claim_order_bill_slot",
+    { p_order_id: order.id }
+  );
 
-    const service = getServerServiceClient();
-    if (!service) {
-      return {
-        ok: false,
-        orderId: order.id,
-        orderCode: order.order_code,
-        billCode: null,
-        billUrl: null,
-        error: "Payment service is not configured.",
-      };
-    }
+  if (claimErr) {
+    return {
+      ok: false,
+      orderId: order.id,
+      orderCode: order.order_code,
+      billCode: null,
+      billUrl: null,
+      error: "Could not coordinate payment bill slot on server. Please retry.",
+    };
+  }
 
-    // Reuse an existing pending bill for this order to prevent duplicate gateway bills
-    const { data: existingPayments } = await service
-      .from("payments")
-      .select("id, bill_code, bill_url, status")
-      .eq("order_id", order.id)
-      .in("status", ["pending", "paid", "late_payment_review"])
-      .order("created_at", { ascending: false })
-      .limit(1);
+  const claim = (Array.isArray(claimRows) ? claimRows[0] : claimRows) as
+    | { action?: string; bill_code?: string | null; bill_url?: string | null }
+    | undefined;
+  const action = claim?.action ?? "";
 
-    const livePayment = existingPayments?.[0] as
-      | { id: string; bill_code: string | null; bill_url: string | null; status: string }
-      | undefined;
+  if (action === "reuse_bill" && claim?.bill_code && claim?.bill_url) {
+    return {
+      ok: true,
+      orderId: order.id,
+      orderCode: order.order_code,
+      billCode: claim.bill_code,
+      billUrl: claim.bill_url,
+      reused: true,
+    };
+  }
 
-    if (livePayment?.status === "paid") {
-      return {
-        ok: false,
-        orderId: order.id,
-        orderCode: order.order_code,
-        billCode: livePayment.bill_code,
-        billUrl: livePayment.bill_url,
-        error: "This order has already been paid.",
-      };
-    }
+  if (action === "in_progress") {
+    return {
+      ok: false,
+      orderId: order.id,
+      orderCode: order.order_code,
+      billCode: null,
+      billUrl: null,
+      error: "Your ToyyibPay bill is being prepared. Please wait a few seconds and refresh.",
+    };
+  }
 
-    if (livePayment?.status === "pending" && livePayment.bill_code && livePayment.bill_url) {
-      return {
-        ok: true,
-        orderId: order.id,
-        orderCode: order.order_code,
-        billCode: livePayment.bill_code,
-        billUrl: livePayment.bill_url,
-        reused: true,
-      };
-    }
+  if (action === "ambiguous_hold") {
+    return {
+      ok: false,
+      orderId: order.id,
+      orderCode: order.order_code,
+      billCode: null,
+      billUrl: null,
+      error:
+        "A previous payment bill request timed out with uncertain status. To prevent duplicate billing, please check My Orders or wait for the hold to reset.",
+    };
+  }
 
-    const config = getToyyibPaySandboxConfig();
-    if (!config.configured) {
-      return {
-        ok: false,
-        orderId: order.id,
-        orderCode: order.order_code,
-        billCode: null,
-        billUrl: null,
-        error: "ToyyibPay Sandbox credentials are missing on the server.",
-      };
-    }
+  if (action === "already_paid" || action === "already_terminal") {
+    return {
+      ok: false,
+      orderId: order.id,
+      orderCode: order.order_code,
+      billCode: claim?.bill_code ?? null,
+      billUrl: claim?.bill_url ?? null,
+      error: "This order already has a completed or under-review payment.",
+    };
+  }
 
-    const deadlineIso =
-      order.payment_deadline || new Date(Date.now() + 15 * 60_000).toISOString();
+  if (action === "order_expired" || action === "order_not_found") {
+    return {
+      ok: false,
+      orderId: order.id,
+      orderCode: order.order_code,
+      billCode: null,
+      billUrl: null,
+      error: "Payment window has expired. Reserved stock will be released.",
+    };
+  }
 
-    try {
-      const payload = buildToyyibPayCreateBillPayload({
-        secretKey: config.secretKey,
-        categoryCode: config.categoryCode,
-        orderCode: order.order_code,
-        itemCount: Math.max(1, input.itemCount),
-        subtotalSen: order.subtotal_sen,
-        fpxFeeSen: order.fpx_fee_sen,
-        totalPaidSen: order.total_paid_sen,
-        buyerName: input.buyerName,
-        buyerEmail: input.buyerEmail,
-        returnUrl: `${input.origin}/orders/return`,
-        callbackUrl: `${input.origin}/api/payments/toyyibpay/callback`,
-        paymentDeadlineIso: deadlineIso,
-      });
+  if (action !== "create_new") {
+    return {
+      ok: false,
+      orderId: order.id,
+      orderCode: order.order_code,
+      billCode: null,
+      billUrl: null,
+      error: "Could not reserve payment bill slot. Please refresh and try again.",
+    };
+  }
 
-      const createdBill = await createToyyibPaySandboxBill(payload);
+  const deadlineIso =
+    order.payment_deadline || new Date(Date.now() + 15 * 60_000).toISOString();
 
-      const { error: insertErr } = await service.from("payments").insert({
-        order_id: order.id,
-        provider: "toyyibpay",
-        bill_code: createdBill.billCode,
-        bill_url: createdBill.billUrl,
-        amount_sen: order.total_paid_sen,
-        status: "pending",
-      });
+  // 2. Call ToyyibPay Sandbox createBill and finalize slot deterministically
+  let payload: ReturnType<typeof buildToyyibPayCreateBillPayload>;
+  try {
+    payload = buildToyyibPayCreateBillPayload({
+      secretKey: config.secretKey,
+      categoryCode: config.categoryCode,
+      orderCode: order.order_code,
+      itemCount: Math.max(1, input.itemCount),
+      subtotalSen: order.subtotal_sen,
+      fpxFeeSen: order.fpx_fee_sen,
+      totalPaidSen: order.total_paid_sen,
+      buyerName: input.buyerName,
+      buyerEmail: input.buyerEmail,
+      returnUrl: `${input.origin}/orders/return`,
+      callbackUrl: `${input.origin}/api/payments/toyyibpay/callback`,
+      paymentDeadlineIso: deadlineIso,
+    });
+  } catch (err) {
+    await service.rpc("finalize_order_bill_slot", {
+      p_order_id: order.id,
+      p_outcome: "failed",
+    });
+    return {
+      ok: false,
+      orderId: order.id,
+      orderCode: order.order_code,
+      billCode: null,
+      billUrl: null,
+      error: err instanceof Error ? err.message : "Invalid bill payload.",
+    };
+  }
 
-      if (insertErr) {
-        return {
-          ok: false,
-          orderId: order.id,
-          orderCode: order.order_code,
-          billCode: null,
-          billUrl: null,
-          error: "Could not record payment bill on server. Please retry.",
-        };
-      }
+  try {
+    const createdBill = await createToyyibPaySandboxBill(payload);
 
-      return {
-        ok: true,
-        orderId: order.id,
-        orderCode: order.order_code,
-        billCode: createdBill.billCode,
-        billUrl: createdBill.billUrl,
-        reused: false,
-      };
-    } catch (err) {
-      return {
-        ok: false,
-        orderId: order.id,
-        orderCode: order.order_code,
-        billCode: null,
-        billUrl: null,
-        error:
-          err instanceof Error
+    await service.rpc("finalize_order_bill_slot", {
+      p_order_id: order.id,
+      p_outcome: "ready",
+      p_bill_code: createdBill.billCode,
+      p_bill_url: createdBill.billUrl,
+    });
+
+    return {
+      ok: true,
+      orderId: order.id,
+      orderCode: order.order_code,
+      billCode: createdBill.billCode,
+      billUrl: createdBill.billUrl,
+      reused: false,
+    };
+  } catch (err) {
+    // Definite HTTP 4xx rejection -> safe to mark failed for clean retry.
+    // Timeout / abort / HTTP 5xx / network drop -> mark ambiguous so we NEVER blindly duplicate bills.
+    const outcome = err instanceof ToyyibPayDefiniteError ? "failed" : "ambiguous";
+    await service.rpc("finalize_order_bill_slot", {
+      p_order_id: order.id,
+      p_outcome: outcome,
+    });
+    return {
+      ok: false,
+      orderId: order.id,
+      orderCode: order.order_code,
+      billCode: null,
+      billUrl: null,
+      error:
+        outcome === "ambiguous"
+          ? "Gateway response timed out with uncertain status. Check My Orders before retrying to avoid duplicate bills."
+          : err instanceof Error
             ? err.message
             : "ToyyibPay Sandbox bill creation failed. Please retry.",
-      };
-    }
-  })();
-
-  inFlightBillCreations.set(input.order.id, run);
-  try {
-    return await run;
-  } finally {
-    inFlightBillCreations.delete(input.order.id);
+    };
   }
 }
 
@@ -489,16 +534,23 @@ export async function verifyAndReconcileBillPayment(input: {
   }
 
   if (decision.action === "mark_failed") {
-    if (paymentRow.status === "pending") {
-      await service
-        .from("payments")
-        .update({
-          status: "failed",
-          raw_callback: input.rawCallback ?? (chosenTx as unknown as Record<string, unknown>),
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", paymentRow.id)
-        .eq("status", "pending");
+    const { data: failOutcome } = await service.rpc(
+      "mark_order_payment_failed_atomic",
+      {
+        p_order_id: orderRow.id,
+        p_bill_code: billCode,
+        p_raw_callback:
+          input.rawCallback ?? (chosenTx as unknown as Record<string, unknown>),
+      }
+    );
+    if (String(failOutcome ?? "") === "ignored_terminal") {
+      return {
+        ok: true,
+        outcome: "already_paid",
+        orderId: orderRow.id,
+        orderCode: orderRow.order_code,
+        message: "Order already reached a terminal paid or reconciliation state.",
+      };
     }
     return {
       ok: true,

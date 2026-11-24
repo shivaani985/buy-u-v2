@@ -153,11 +153,11 @@ export default async function OrderPaymentReturnPage({
     expectedOrderCode: orderCodeParam || ownedOrder.order_code,
   });
 
-  // Load fresh buyer-only order state (including buyer-only pickup_pin when paid)
+  // Load fresh buyer-only order state (pickup_pin retrieved strictly via buyer-only RPC)
   const { data: freshOrder } = await supabase
     .from("orders")
     .select(
-      "id, order_code, status, subtotal_sen, fpx_fee_sen, total_paid_sen, collection_area_name, payment_deadline, paid_at, pickup_pin"
+      "id, order_code, status, subtotal_sen, fpx_fee_sen, total_paid_sen, collection_area_name, payment_deadline, paid_at"
     )
     .eq("id", ownedOrder.id)
     .eq("buyer_id", eligibility.userId)
@@ -169,6 +169,15 @@ export default async function OrderPaymentReturnPage({
     freshOrder?.status === "paid" ||
     freshOrder?.status === "ready_for_pickup" ||
     freshOrder?.status === "completed";
+
+  let buyerPickupPin: string | null = null;
+  if (isPaid && freshOrder) {
+    const { data: pinRows } = await supabase.rpc("get_buyer_order_pickup_pins", {
+      p_order_ids: [freshOrder.id],
+    });
+    const firstPin = (pinRows as Array<{ pickup_pin?: string | null }> | null)?.[0];
+    buyerPickupPin = firstPin?.pickup_pin ?? null;
+  }
   const isLateReview = verification.outcome === "late_payment_reconciliation";
   const isFailed = verification.outcome === "failed";
   const isExpired =
@@ -240,14 +249,14 @@ export default async function OrderPaymentReturnPage({
               </div>
             </dl>
 
-            {isPaid && freshOrder.pickup_pin ? (
+            {isPaid && buyerPickupPin ? (
               <div className="rounded-xl border border-[#D8EAEB] bg-[#F4FAFA] p-4">
                 <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-[#008285]">
                   <KeyRound className="h-4 w-4" aria-hidden="true" />
                   <span>Your Private Campus Pickup PIN</span>
                 </div>
                 <p className="mt-2 font-mono text-2xl font-extrabold tracking-[0.25em] text-[#14121A]">
-                  {freshOrder.pickup_pin}
+                  {buyerPickupPin}
                 </p>
                 <p className="mt-1.5 text-xs text-[#4A4656]">
                   Keep this PIN private until you meet the seller in person at{" "}

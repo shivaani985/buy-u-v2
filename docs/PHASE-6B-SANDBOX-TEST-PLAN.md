@@ -1,21 +1,27 @@
 # Phase 6B.3 — Isolated ToyyibPay Sandbox Acceptance Plan (Gate 2)
 
 **Status:** Gate 1 Complete (code, routes, UI, and local tests verified). **STOPPED FOR OWNER APPROVAL** before any external ToyyibPay Sandbox API call or bill creation.
-**Prerequisites Verified (Phase 6B.2 Closed — 15/15 PASS, 9/9 Security Retests):**
-- `docs/sql/phase-6a-order-payment-foundation.sql` deployed; `pg_cron` Jobs 1 & 2 active.
-- `docs/sql/phase-6b2-reserved-stock-guard.sql` deployed (`a7bda62`).
+**Prerequisites:**
+- Phase 6B.2 closed (15/15 PASS, 9/9 security retests): `phase-6a-order-payment-foundation.sql`, `pg_cron` Jobs 1 & 2, and `phase-6b2-reserved-stock-guard.sql` deployed.
+- **Required before Gate 2:** Owner applies `docs/sql/phase-6b3-payment-security-hardening.sql` (DB-level `pickup_pin` & `raw_callback` privacy, Realtime table removal, persistent DB bill-creation coordination, and atomic failed-payment guard).
 - Server env ready: `TOYYIBPAY_SANDBOX_SECRET_KEY` (set), `TOYYIBPAY_SANDBOX_CATEGORY_CODE` (set), hard-pinned to `https://dev.toyyibpay.com`.
-- Note on local webhook callback: ToyyibPay's server-to-server `callbackUrl` requires a publicly reachable HTTPS URL to hit `POST /api/payments/toyyibpay/callback`; on `localhost:3000`, `/orders/return` and `/api/payments/toyyibpay/verify` still perform authoritative server-to-server `getBillTransactions` verification cleanly.
 
-## 0. Gate 2 Isolated Sandbox Acceptance Scenarios (Run Only After Owner Approval)
-1. **Fee-Contract Visual Check (First Bill):** Create 1 isolated synthetic QA cart order (`subtotal = RM 15.00`, `fpx_fee = RM 1.00`, `total_paid_sen = 1600`) → open `https://dev.toyyibpay.com/<billCode>` and visually confirm **exact `RM 16.00`** (NOT `RM 17.00`), proving `billChargeToCustomer: ""` prevents RM 1.00 double-charging.
-2. **Duplicate-Bill Prevention:** Retry/double-submit the same order → confirm existing pending `bill_code` is reused (zero duplicate Sandbox bills).
-3. **Single-Seller Cart Payment + Server Verification:** Complete FPX Sandbox approval → land on `/orders/return` → confirm server-to-server `getBillTransactions` triggers `confirm_order_payment_atomic`, order becomes `paid`, stock decrements, 6-digit `pickup_pin` appears ONLY to buyer (never seller), and duplicate callback returns `already_paid`.
-4. **Multi-Seller Cart Checkout + Partial Retry:** Checkout 2 synthetic sellers → confirm 2 separate orders & 2 separate Sandbox bills (`RM 1.00` FPX each, `2%` seller commission each), and confirm retrying a single seller bill works without affecting sibling bills.
-5. **Accepted-Offer Checkout:** Accept synthetic Pre-Loved offer → buyer clicks **Pay with ToyyibPay FPX** on `OfferCard` → confirm `create_offer_order_atomic` reuses existing 30m hold (`reserved_quantity` stays `1`, no double-reserve) and creates Sandbox bill at locked offer price + RM 1.00 FPX.
-6. **Failed / Cancelled Payment & Retry:** Cancel/fail on Sandbox bank screen → confirm `payments.status = 'failed'`, order stays `pending_payment` before deadline, and **Retry ToyyibPay FPX** on `/orders` creates a fresh bill.
-7. **Expired Order + Late Payment Reconciliation:** Confirm expired order releases stock via `pg_cron` Job 2 and any late verified payment routes to `late_payment_review` with zero stock deduction.
-8. **0-Diff Cleanup:** Release any remaining QA holds, delete ONLY QA-created rows, and confirm exact 0-diff across all 9 hosted tables.
+## 0A. Track A — Localhost (`http://localhost:3000`) Verification Tests (No Public Tunnel Needed)
+1. **DB-Level Security Verification:** Confirm seller `SELECT pickup_pin FROM orders` and `SELECT * FROM orders` fail with `42501`; seller `SELECT raw_callback FROM payments` fails with `42501`; seller calling `get_buyer_order_pickup_pins` gets 0 rows; buyer gets own paid PIN only.
+2. **Fee-Contract Visual Check (First Sandbox Bill):** Create 1 isolated synthetic QA cart order (`subtotal = RM 15.00`, `fpx_fee = RM 1.00`, `total_paid_sen = 1600`) → open `https://dev.toyyibpay.com/<billCode>` and visually confirm **exact `RM 16.00`** (NOT `RM 17.00`).
+3. **DB-Backed Duplicate-Bill & Ambiguous-Timeout Coordination:** Concurrent/repeated `claim_order_bill_slot` returns `in_progress` / `reuse_bill` (zero duplicate bills); simulated timeout marks `bill_creation_state = 'ambiguous'` and blocks blind duplicate recreation.
+4. **Return-URL + Server-to-Server Verification:** Complete FPX Sandbox approval → `/orders/return` (and `/api/payments/toyyibpay/verify`) verifies via `getBillTransactions` → `confirm_order_payment_atomic` marks `paid`, deducts stock, generates 6-digit PIN visible ONLY to buyer via `get_buyer_order_pickup_pins`.
+5. **Multi-Seller Cart & Accepted-Offer Checkout:** 2 sellers → 2 separate orders & 2 Sandbox bills (`RM 1.00` FPX each, `2%` commission each); accepted offer reuses 30m hold (`reserved_quantity = 1`, no double-reserve).
+6. **Failed Payment & Concurrent Terminal-State Protection:** Bank failure calls `mark_order_payment_failed_atomic` (`status = 'failed'`, retryable before deadline); delayed failed callback against a `paid` or `late_payment_review` order returns `ignored_terminal` without overwriting.
+7. **0-Diff Cleanup:** Release any remaining QA holds, remove ONLY QA-created rows, confirm exact 0-diff across all 9 tables.
+
+## 0B. Track B — Public HTTPS Webhook Acceptance (Requires Public HTTPS Callback URL)
+- **Required Configuration:** Set `NEXT_PUBLIC_SITE_URL=https://<public-https-domain>` (e.g., staging HTTPS deployment or verified HTTPS tunnel forwarding to `localhost:3000`) so `billCallbackUrl` resolves to `https://<public-https-domain>/api/payments/toyyibpay/callback`.
+- **Verification:**
+  1. Complete Sandbox FPX payment WITHOUT returning to `/orders/return` (close browser tab on ToyyibPay confirmation).
+  2. Confirm ToyyibPay's async `POST /api/payments/toyyibpay/callback` triggers server-to-server `getBillTransactions` → `confirm_order_payment_atomic` and transitions the order to `paid` automatically.
+  3. Replay the exact callback POST → confirm idempotent `already_paid` (no double stock deduction).
+  4. Send a tampered/forged callback POST (`status=1`, bogus `refno`) → confirm server-to-server `getBillTransactions` rejects or ignores it.
 
 ## 1. Pre-Flight SQL Deployment (Completed in Phase 6B.2)
 
