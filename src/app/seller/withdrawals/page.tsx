@@ -42,7 +42,9 @@ export default async function SellerWithdrawalsPage() {
     const [bankRes, wdrRes] = await Promise.all([
       supabase
         .from("seller_payout_accounts")
-        .select("bank_name,account_holder_name,account_number_masked,is_active")
+        .select(
+          "bank_name,account_holder_name,account_number_masked,validation_status,is_active"
+        )
         .eq("seller_id", session.profile.id)
         .maybeSingle(),
       supabase
@@ -59,9 +61,10 @@ export default async function SellerWithdrawalsPage() {
       bank_name: string;
       account_holder_name: string;
       account_number_masked: string | null;
+      validation_status: string | null;
       is_active: boolean | null;
     } | null;
-    if (b && b.is_active !== false) {
+    if (b && b.is_active === true && b.validation_status === "validated") {
       activeBankSummary = `${b.bank_name} · ${b.account_number_masked || "****"} (${b.account_holder_name})`;
     }
 

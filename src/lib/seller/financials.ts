@@ -1,5 +1,6 @@
 import {
   getProtectionExpiresAt,
+  isAuthoritativeOrderPaymentVerified,
   isEligibleForWithdrawalRelease,
 } from "../financials/policy.ts";
 
@@ -8,6 +9,8 @@ export type SalesRange = "7d" | "30d" | "all";
 export interface RawSellerOrder {
   id: string;
   order_code: string;
+  buyer_id?: string | null;
+  checkout_session_id?: string | null;
   subtotal_sen: number;
   commission_sen: number;
   seller_net_sen: number;
@@ -15,7 +18,16 @@ export interface RawSellerOrder {
   status: string;
   paid_at: string | null;
   completed_at: string | null;
+  protection_expires_at?: string | null;
   created_at: string;
+}
+
+export interface RawCheckoutSession {
+  id: string;
+  buyer_id?: string | null;
+  status: string;
+  payment_status: string;
+  paid_at: string | null;
 }
 
 export interface RawOrderItem {
@@ -179,6 +191,7 @@ export function computeSellerFinancials(input: {
   orders: RawSellerOrder[];
   orderItems: RawOrderItem[];
   payments: RawPayment[];
+  checkoutSessions?: RawCheckoutSession[];
   payoutRequests: RawPayoutRequest[];
   disputes: RawOrderDispute[];
   refunds?: RawOrderRefund[];
@@ -192,6 +205,11 @@ export function computeSellerFinancials(input: {
   const paymentByOrder = new Map<string, RawPayment>();
   for (const p of input.payments) {
     paymentByOrder.set(p.order_id, p);
+  }
+
+  const checkoutById = new Map<string, RawCheckoutSession>();
+  for (const cs of input.checkoutSessions ?? []) {
+    checkoutById.set(cs.id, cs);
   }
 
   const itemTitleByOrder = new Map<string, string>();
@@ -210,8 +228,17 @@ export function computeSellerFinancials(input: {
     string,
     { product: number; commRev: number; sellerDeduct: number }
   >();
+  const blockingRefundOrders = new Set<string>();
+  const BLOCKING_REFUND_STATUSES = new Set([
+    "pending_execution",
+    "awaiting_return",
+    "processing",
+    "failed",
+    "reconciliation_required",
+  ]);
   for (const r of input.refunds ?? []) {
-    if ((r.status ?? "").toLowerCase() === "succeeded") {
+    const rs = (r.status ?? "").toLowerCase();
+    if (rs === "succeeded") {
       const cur = refundByOrder.get(r.order_id) ?? {
         product: 0,
         commRev: 0,
@@ -221,6 +248,8 @@ export function computeSellerFinancials(input: {
       cur.commRev += r.commission_reversal_sen ?? 0;
       cur.sellerDeduct += r.seller_deduction_sen ?? 0;
       refundByOrder.set(r.order_id, cur);
+    } else if (BLOCKING_REFUND_STATUSES.has(rs)) {
+      blockingRefundOrders.add(r.order_id);
     }
   }
 
@@ -279,12 +308,21 @@ export function computeSellerFinancials(input: {
 
     const statusLower = (order.status ?? "").toLowerCase();
     const payment = paymentByOrder.get(order.id);
-    const paymentVerified = Boolean(
-      order.paid_at ||
-        (payment &&
-          payment.status.toLowerCase() === "paid" &&
-          payment.verified_at)
-    );
+    const checkoutSession = order.checkout_session_id
+      ? checkoutById.get(order.checkout_session_id) ?? null
+      : null;
+    // P0.6: Authoritative payment proof (never rely on paid_at alone when payment records are evaluated)
+    const hasAuthoritativeSources =
+      input.checkoutSessions !== undefined ||
+      Boolean(order.checkout_session_id) ||
+      input.payments.length > 0;
+    const paymentVerified = hasAuthoritativeSources
+      ? isAuthoritativeOrderPaymentVerified({
+          order,
+          checkoutSession,
+          legacyPayment: payment ?? null,
+        })
+      : Boolean(order.paid_at);
 
     const adj = refundByOrder.get(order.id);
     const refundedProductSen = adj?.product ?? 0;
@@ -299,7 +337,9 @@ export function computeSellerFinancials(input: {
     const isVerifiedSale =
       paymentVerified && !EXCLUDED_CANCELLED_STATUSES.has(statusLower);
     const isFrozenDispute =
-      statusLower === "disputed" || frozenDisputeOrders.has(order.id);
+      statusLower === "disputed" ||
+      frozenDisputeOrders.has(order.id) ||
+      blockingRefundOrders.has(order.id);
 
     if (paymentVerified && refundedProductSen > 0) {
       executedRefundsSen += refundedProductSen;
@@ -314,17 +354,26 @@ export function computeSellerFinancials(input: {
         verifiedOrderCount += 1;
       }
 
-      // Mutually exclusive all-time balance buckets with exact 72-hour protection boundary
+      // Mutually exclusive all-time balance buckets with authoritative protection deadline
       if (isFrozenDispute) {
         frozenDisputeSen += netSen;
       } else if (IN_PROGRESS_SETTLEMENT_STATUSES.has(statusLower)) {
         pendingSettlementSen += netSen;
       } else if (COMPLETED_STATUSES.has(statusLower)) {
-        if (isEligibleForWithdrawalRelease(order.completed_at, nowMs)) {
+        if (
+          isEligibleForWithdrawalRelease(
+            order.completed_at,
+            nowMs,
+            order.protection_expires_at
+          )
+        ) {
           maturedCompletedNetSen += netSen;
         } else {
           protectionReserveSen += netSen;
-          const expIso = getProtectionExpiresAt(order.completed_at);
+          const expIso = getProtectionExpiresAt(
+            order.completed_at,
+            order.protection_expires_at
+          );
           if (expIso) {
             const expMs = Date.parse(expIso);
             if (

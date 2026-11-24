@@ -53,8 +53,8 @@ export default async function SellerBankPage() {
         bankName: row.bank_name,
         accountHolderName: row.account_holder_name,
         accountNumberMasked: row.account_number_masked || "****",
-        validationStatus: row.validation_status || "validated",
-        isActive: row.is_active !== false,
+        validationStatus: row.validation_status || "re_registration_required",
+        isActive: row.is_active === true && row.validation_status === "validated",
         updatedAt: row.updated_at,
       };
     }

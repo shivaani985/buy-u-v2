@@ -15,7 +15,7 @@ import {
   adminApproveRefundRestockAction,
   adminConfigureRefundReturnAction,
   adminExecuteRefundAction,
-  adminReleaseFailedWithdrawalAction,
+  adminRunSafeRecoveryAction,
   confirmReturnReceiptAction,
 } from "@/app/financials/actions";
 import type { AdminFinancialDashboardData } from "@/lib/financials/admin-data";
@@ -291,13 +291,32 @@ export function AdminFinancialsClient({ data }: AdminFinancialsClientProps) {
                                 confirmReturnReceiptAction({
                                   refundId: r.id,
                                   itemCondition: "resellable",
-                                  isAdminException: true,
+                                  isAdminException: false,
                                 })
                               )
                             }
                             className="rounded-xl border border-[#4E2A84] bg-white px-3 py-1.5 font-bold text-[#4E2A84]"
                           >
                             Admin Confirm Return (Resellable)
+                          </button>
+                        ) : null}
+
+                        {r.status === "processing" ||
+                        r.status === "reconciliation_required" ? (
+                          <button
+                            type="button"
+                            disabled={busyKey !== null}
+                            onClick={() =>
+                              runAction(`recr:${r.id}`, () =>
+                                adminRunSafeRecoveryAction({
+                                  entityType: "refund",
+                                  entityId: r.id,
+                                })
+                              )
+                            }
+                            className="rounded-xl border border-[#B42318] bg-white px-3 py-1.5 font-bold text-[#B42318] hover:bg-[#FEF2F2]"
+                          >
+                            Run Safe Recovery Check
                           </button>
                         ) : null}
 
@@ -453,16 +472,15 @@ export function AdminFinancialsClient({ data }: AdminFinancialsClientProps) {
                           disabled={busyKey !== null}
                           onClick={() =>
                             runAction(`relw:${w.id}`, () =>
-                              adminReleaseFailedWithdrawalAction({
-                                withdrawalId: w.id,
-                                adminNotes:
-                                  "Verified not transferred; releasing reserved funds.",
+                              adminRunSafeRecoveryAction({
+                                entityType: "withdrawal",
+                                entityId: w.id,
                               })
                             )
                           }
-                          className="rounded-lg border border-[#B42318] px-2.5 py-1 text-[11px] font-bold text-[#B42318] hover:bg-[#FEF2F2]"
+                          className="rounded-lg border border-[#4E2A84] px-2.5 py-1 text-[11px] font-bold text-[#4E2A84] hover:bg-[#F3EEFA]"
                         >
-                          Release Failed Reserve
+                          Run Safe Recovery Check
                         </button>
                       ) : (
                         <span className="text-[#8B869B]">—</span>

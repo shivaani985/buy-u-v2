@@ -1,9 +1,11 @@
 import { resolvePublicStorageUrl } from "@/lib/format";
 import { getPublicSupabaseEnv } from "@/lib/supabase/env";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { getServerServiceClient } from "@/lib/supabase/service";
 import type { AuthSessionSummary, Category } from "@/types/marketplace";
 import {
   computeSellerFinancials,
+  type RawCheckoutSession,
   type RawOrderDispute,
   type RawOrderItem,
   type RawOrderRefund,
@@ -144,7 +146,9 @@ export async function getSellerHubData(
       .limit(50),
     supabase
       .from("seller_payout_accounts")
-      .select("bank_name, account_number, account_holder_name, duitnow_id, updated_at")
+      .select(
+        "bank_name, account_holder_name, account_number_last4, account_number_masked, validation_status, is_active, updated_at"
+      )
       .eq("seller_id", userId)
       .maybeSingle(),
     supabase.from("categories").select("id, name").eq("active", true),
@@ -152,7 +156,7 @@ export async function getSellerHubData(
     supabase
       .from("orders")
       .select(
-        "id, order_code, subtotal_sen, commission_sen, seller_net_sen, total_paid_sen, status, paid_at, completed_at, created_at"
+        "id, order_code, buyer_id, checkout_session_id, subtotal_sen, commission_sen, seller_net_sen, total_paid_sen, status, paid_at, completed_at, created_at"
       )
       .eq("seller_id", userId)
       .order("created_at", { ascending: false })
@@ -256,16 +260,27 @@ export async function getSellerHubData(
     ).length,
   };
 
+  const rawBank = payoutRes.error
+    ? null
+    : (payoutRes.data as {
+        bank_name?: string | null;
+        account_holder_name?: string | null;
+        account_number_last4?: string | null;
+        account_number_masked?: string | null;
+        validation_status?: string | null;
+        is_active?: boolean | null;
+        updated_at?: string | null;
+      } | null);
+
   const payout = maskPayoutAccount(
-    payoutRes.error
-      ? null
-      : (payoutRes.data as {
-          bank_name?: string | null;
-          account_number?: string | null;
-          account_holder_name?: string | null;
-          duitnow_id?: string | null;
-          updated_at?: string | null;
-        } | null)
+    rawBank && rawBank.is_active && rawBank.validation_status === "validated"
+      ? {
+          bank_name: rawBank.bank_name,
+          account_number: rawBank.account_number_masked ?? rawBank.account_number_last4,
+          account_holder_name: rawBank.account_holder_name,
+          updated_at: rawBank.updated_at,
+        }
+      : null
   );
 
   let financials: SellerFinancialSummary = unavailableFinancials;
@@ -273,41 +288,63 @@ export async function getSellerHubData(
     const orders = (ordersRes.data ?? []) as RawSellerOrder[];
     const payoutRequests = (payoutReqRes.data ?? []) as RawPayoutRequest[];
     const orderIds = orders.map((o) => o.id);
+    const checkoutSessionIds = Array.from(
+      new Set(
+        orders
+          .map((o) => o.checkout_session_id)
+          .filter((id): id is string => Boolean(id))
+      )
+    );
 
     let orderItems: RawOrderItem[] = [];
     let payments: RawPayment[] = [];
+    let checkoutSessions: RawCheckoutSession[] = [];
     let disputes: RawOrderDispute[] = [];
     let refunds: RawOrderRefund[] = [];
 
     if (orderIds.length > 0) {
-      const [itemsRes, paymentsRes, disputesRes, refundsRes] = await Promise.all([
-        supabase
-          .from("order_items")
-          .select("order_id, title_snapshot, quantity")
-          .in("order_id", orderIds),
-        supabase
-          .from("payments")
-          .select("order_id, status, verified_at")
-          .in("order_id", orderIds),
-        supabase
-          .from("order_disputes")
-          .select("order_id, status, refund_amount_sen, refund_execution_status")
-          .in("order_id", orderIds),
-        supabase
-          .from("order_refunds")
-          .select("order_id, refund_amount_sen, commission_reversal_sen, seller_deduction_sen, status")
-          .in("order_id", orderIds),
-      ]);
+      const service = getServerServiceClient();
+      const [itemsRes, paymentsRes, disputesRes, refundsRes, csRes] =
+        await Promise.all([
+          supabase
+            .from("order_items")
+            .select("order_id, title_snapshot, quantity")
+            .in("order_id", orderIds),
+          supabase
+            .from("payments")
+            .select("order_id, status, verified_at")
+            .in("order_id", orderIds),
+          supabase
+            .from("order_disputes")
+            .select("order_id, status, refund_amount_sen, refund_execution_status")
+            .in("order_id", orderIds),
+          supabase
+            .from("order_refunds")
+            .select(
+              "order_id, refund_amount_sen, commission_reversal_sen, seller_deduction_sen, status"
+            )
+            .in("order_id", orderIds),
+          checkoutSessionIds.length > 0 && service
+            ? service
+                .from("checkout_sessions")
+                .select("id, buyer_id, status, payment_status, paid_at")
+                .in("id", checkoutSessionIds)
+            : Promise.resolve({ data: [], error: null }),
+        ]);
       if (!itemsRes.error) orderItems = (itemsRes.data ?? []) as RawOrderItem[];
       if (!paymentsRes.error) payments = (paymentsRes.data ?? []) as RawPayment[];
       if (!disputesRes.error) disputes = (disputesRes.data ?? []) as RawOrderDispute[];
       if (!refundsRes.error) refunds = (refundsRes.data ?? []) as RawOrderRefund[];
+      if (!csRes.error) {
+        checkoutSessions = (csRes.data ?? []) as RawCheckoutSession[];
+      }
     }
 
     financials = computeSellerFinancials({
       orders,
       orderItems,
       payments,
+      checkoutSessions,
       payoutRequests,
       disputes,
       refunds,

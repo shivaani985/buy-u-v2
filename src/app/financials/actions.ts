@@ -243,6 +243,14 @@ export async function requestSellerWithdrawalAction(input: {
       err instanceof Error ? err.message : "Simulated bank provider error";
   }
 
+  // Persist authoritative provider outcome BEFORE finalization so crashes/restarts recover safely (P0.5)
+  await service.rpc("record_provider_attempt_outcome_atomic", {
+    p_attempt_token: row.attempt_token,
+    p_provider_outcome: outcome,
+    p_simulation_ref: transferRef,
+    p_reason: failureReason,
+  });
+
   await service.rpc("finalize_seller_withdrawal_atomic", {
     p_withdrawal_id: row.withdrawal_id,
     p_attempt_token: row.attempt_token,
@@ -312,6 +320,7 @@ export async function confirmReturnReceiptAction(input: {
   refundId: string;
   itemCondition: "resellable" | "damaged" | "missing";
   isAdminException?: boolean;
+  exceptionReason?: string;
 }): Promise<ActionFeedback> {
   if (!isValidUuid(input.refundId)) {
     return { ok: false, message: "Invalid refund reference." };
@@ -323,8 +332,21 @@ export async function confirmReturnReceiptAction(input: {
     p_refund_id: input.refundId,
     p_item_condition: input.itemCondition,
     p_is_admin_exception: Boolean(input.isAdminException),
+    p_exception_reason: input.exceptionReason?.trim() || null,
   });
   if (error) {
+    if (error.message.includes("ADMIN_EXCEPTION_REASON_REQUIRED")) {
+      return {
+        ok: false,
+        message: "Admin return exceptions require a written justification (min 10 characters).",
+      };
+    }
+    if (error.message.includes("MISSING_ITEM_REQUIRES_ADMIN_EXCEPTION")) {
+      return {
+        ok: false,
+        message: "Missing items cannot be marked returned; record an admin return exception instead.",
+      };
+    }
     return { ok: false, message: "Could not confirm return receipt." };
   }
   revalidatePath("/orders");
@@ -332,7 +354,9 @@ export async function confirmReturnReceiptAction(input: {
   revalidatePath("/admin");
   return {
     ok: true,
-    message: "Physical return confirmed. Refund is now eligible for execution.",
+    message: input.isAdminException
+      ? "Admin return exception recorded. Refund is now eligible for review."
+      : "Physical return confirmed. Refund is now eligible for execution.",
   };
 }
 
@@ -373,6 +397,7 @@ export async function adminConfigureRefundReturnAction(input: {
 export async function adminApproveRefundRestockAction(input: {
   refundId: string;
   approve: boolean;
+  items?: Array<{ order_item_id: string; quantity: number }>;
 }): Promise<ActionFeedback> {
   if (!isValidUuid(input.refundId)) {
     return { ok: false, message: "Invalid refund reference." };
@@ -389,6 +414,7 @@ export async function adminApproveRefundRestockAction(input: {
     {
       p_refund_id: input.refundId,
       p_approve: input.approve,
+      p_items: input.items ?? null,
     }
   );
   if (error) {
@@ -399,6 +425,18 @@ export async function adminApproveRefundRestockAction(input: {
           "Handed-over items require confirmed physical return in resellable condition before restocking.",
       };
     }
+    if (error.message.includes("FOOD_OR_SERVICE_NOT_RESTOCKABLE")) {
+      return {
+        ok: false,
+        message: "Food and service listings cannot be restocked.",
+      };
+    }
+    if (error.message.includes("RESTOCK_UNSUITABLE_CONDITION")) {
+      return {
+        ok: false,
+        message: "Damaged or missing items cannot be restocked.",
+      };
+    }
     return { ok: false, message: "Could not process restock decision." };
   }
   revalidatePath("/admin");
@@ -407,9 +445,11 @@ export async function adminApproveRefundRestockAction(input: {
     message:
       data === "approved_restocked"
         ? "Stock restored safely (logged immutably)."
-        : data === "inventory_exception"
-          ? "Inventory exception logged (listing/variant no longer exists)."
-          : "Restock declined.",
+        : data === "approved_pending_refund"
+          ? "Restock plan approved; inventory will update atomically when refund succeeds."
+          : data === "inventory_exception"
+            ? "Inventory exception logged (listing/variant ineligible or missing)."
+            : "Restock declined.",
   };
 }
 
@@ -449,6 +489,7 @@ export async function adminExecuteRefundAction(
     | {
         action: string;
         attempt_token: string | null;
+        logical_tx_id: string;
         refund_code: string;
         refund_amount: number;
         refund_type: string;
@@ -477,7 +518,7 @@ export async function adminExecuteRefundAction(
       refundCode: row.refund_code,
       orderId: row.order_id,
       amountSen: row.refund_amount,
-      idempotencyKey: `rfd-${refundId}`,
+      idempotencyKey: row.logical_tx_id || `rfd-${refundId}`,
     });
     outcome = res.outcome;
     refundRef = res.refundRef ?? null;
@@ -486,6 +527,14 @@ export async function adminExecuteRefundAction(
     outcome = "reconciliation_required";
     failureReason = err instanceof Error ? err.message : "Provider error";
   }
+
+  // Persist authoritative provider outcome BEFORE finalization (P0.5)
+  await service.rpc("record_provider_attempt_outcome_atomic", {
+    p_attempt_token: row.attempt_token,
+    p_provider_outcome: outcome,
+    p_simulation_ref: refundRef,
+    p_reason: failureReason,
+  });
 
   await service.rpc("finalize_order_refund_atomic", {
     p_refund_id: refundId,
@@ -514,39 +563,66 @@ export async function adminExecuteRefundAction(
   };
 }
 
-export async function adminReleaseFailedWithdrawalAction(input: {
-  withdrawalId: string;
-  adminNotes: string;
+/**
+ * Evidence-based durable recovery check (P0.4 / P0.5).
+ * NEVER releases reserved/frozen funds on admin note or elapsed time alone;
+ * only finalizes from trusted persisted provider evidence.
+ */
+export async function adminRunSafeRecoveryAction(input: {
+  entityType: "withdrawal" | "refund";
+  entityId: string;
 }): Promise<ActionFeedback> {
-  if (!isValidUuid(input.withdrawalId)) {
-    return { ok: false, message: "Invalid withdrawal reference." };
+  if (!isValidUuid(input.entityId)) {
+    return { ok: false, message: "Invalid financial reference." };
   }
   const session = await getSessionSummary();
-  if (!session.isAuthenticated || !session.isActiveAdmin) {
+  const adminId = session.profile?.id;
+  if (!session.isAuthenticated || !session.isActiveAdmin || !adminId) {
     return { ok: false, message: "Active administrator access required." };
   }
-  const supabase = await createSupabaseServerClient();
-  if (!supabase) return { ok: false, message: "Database unavailable." };
+  const service = getServerServiceClient();
+  if (!service) return { ok: false, message: "Database service unavailable." };
 
-  const { error } = await supabase.rpc(
-    "admin_release_failed_withdrawal_atomic",
-    {
-      p_withdrawal_id: input.withdrawalId,
-      p_admin_notes: input.adminNotes.trim() || "Admin exception recovery",
-    }
-  );
+  const { data, error } = await service.rpc("recover_financial_execution_atomic", {
+    p_entity_type: input.entityType,
+    p_entity_id: input.entityId,
+    p_admin_id: adminId,
+  });
+
   if (error) {
     return {
       ok: false,
-      message: "Could not release withdrawal exception (must be processing or reconciliation_required).",
+      message: "Could not run safe recovery check right now.",
     };
   }
 
   revalidatePath("/admin");
   revalidatePath("/seller/withdrawals");
   revalidatePath("/seller");
+  revalidatePath("/orders");
+
+  if (data === "paid" || data === "succeeded") {
+    return {
+      ok: true,
+      message: `Recovered from persisted provider evidence: finalized as ${data}.`,
+    };
+  }
+  if (data === "failed") {
+    return {
+      ok: true,
+      message:
+        "Recovered from verified provider failure: marked failed and released reserved allocations once.",
+    };
+  }
+  if (data === "held_uncertain") {
+    return {
+      ok: false,
+      message:
+        "Provider outcome remains uncertain (no definitive persisted failure or success). Funds remain safely reserved.",
+    };
+  }
   return {
     ok: true,
-    message: "Exception resolved: withdrawal marked failed and reserved funds released back to seller.",
+    message: `Recovery check result: ${String(data)}.`,
   };
 }

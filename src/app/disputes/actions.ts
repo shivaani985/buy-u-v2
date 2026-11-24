@@ -266,6 +266,8 @@ export async function adminResolveDisputeAction(input: {
   resolutionType: DisputeResolutionType;
   refundAmountSen?: number | null;
   adminNotes?: string;
+  returnRequired?: boolean;
+  returnInstructions?: string;
 }): Promise<AdminDisputeActionResult> {
   if (!isValidUuid(input.disputeId)) {
     return { ok: false, message: "Invalid dispute reference." };
@@ -287,6 +289,10 @@ export async function adminResolveDisputeAction(input: {
         ? (input.refundAmountSen ?? null)
         : null,
     p_admin_notes: input.adminNotes?.trim() ? input.adminNotes.trim() : null,
+    p_return_required: Boolean(input.returnRequired),
+    p_return_instructions: input.returnInstructions?.trim()
+      ? input.returnInstructions.trim()
+      : null,
   });
 
   if (error) {

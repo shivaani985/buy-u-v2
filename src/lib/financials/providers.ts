@@ -17,6 +17,7 @@ export interface RefundProviderRequest {
 export interface RefundProviderResult {
   provider: string;
   simulationMode: boolean;
+  logicalTxId: string;
   outcome: "succeeded" | "failed" | "reconciliation_required";
   refundRef?: string;
   failureReason?: string;
@@ -24,6 +25,7 @@ export interface RefundProviderResult {
 
 export interface RefundExecutionProvider {
   executeRefund(req: RefundProviderRequest): Promise<RefundProviderResult>;
+  deriveDeterministicRef(refundCode: string, logicalTxId: string): string;
 }
 
 export interface BankPayoutProviderRequest {
@@ -40,6 +42,7 @@ export interface BankPayoutProviderRequest {
 export interface BankPayoutProviderResult {
   provider: string;
   simulationMode: boolean;
+  logicalTxId: string;
   outcome: "paid" | "failed" | "reconciliation_required";
   transferRef?: string;
   failureReason?: string;
@@ -49,6 +52,7 @@ export interface BankPayoutProvider {
   executeDisbursement(
     req: BankPayoutProviderRequest
   ): Promise<BankPayoutProviderResult>;
+  deriveDeterministicRef(withdrawalCode: string, logicalTxId: string): string;
 }
 
 function assertNotProductionRealExecution(): void {
@@ -59,7 +63,20 @@ function assertNotProductionRealExecution(): void {
   }
 }
 
+function deterministicHexTag(logicalTxId: string): string {
+  return crypto
+    .createHash("sha256")
+    .update(logicalTxId, "utf8")
+    .digest("hex")
+    .slice(0, 8)
+    .toUpperCase();
+}
+
 export class SimulatedRefundProvider implements RefundExecutionProvider {
+  deriveDeterministicRef(refundCode: string, logicalTxId: string): string {
+    return `SIM-RFD-${refundCode.replace(/^RFD-/, "")}-${deterministicHexTag(logicalTxId)}`;
+  }
+
   async executeRefund(
     req: RefundProviderRequest
   ): Promise<RefundProviderResult> {
@@ -68,6 +85,7 @@ export class SimulatedRefundProvider implements RefundExecutionProvider {
       return {
         provider: "simulated_refund",
         simulationMode: true,
+        logicalTxId: req.idempotencyKey || "",
         outcome: "failed",
         failureReason: "Invalid refund execution payload.",
       };
@@ -78,31 +96,38 @@ export class SimulatedRefundProvider implements RefundExecutionProvider {
       return {
         provider: "simulated_refund",
         simulationMode: true,
+        logicalTxId: req.idempotencyKey,
         outcome: "failed",
-        failureReason: "Simulated refund provider declined transfer (QA fail mode).",
+        failureReason:
+          "Simulated refund provider declined transfer (QA fail mode).",
       };
     }
     if (mode === "reconciliation_required") {
       return {
         provider: "simulated_refund",
         simulationMode: true,
+        logicalTxId: req.idempotencyKey,
         outcome: "reconciliation_required",
         failureReason:
           "Simulated provider timeout; outcome uncertain and requires reconciliation.",
       };
     }
 
-    const token = crypto.randomBytes(4).toString("hex").toUpperCase();
     return {
       provider: "simulated_refund",
       simulationMode: true,
+      logicalTxId: req.idempotencyKey,
       outcome: "succeeded",
-      refundRef: `SIM-RFD-${req.refundCode.replace(/^RFD-/, "")}-${token}`,
+      refundRef: this.deriveDeterministicRef(req.refundCode, req.idempotencyKey),
     };
   }
 }
 
 export class SimulatedBankPayoutProvider implements BankPayoutProvider {
+  deriveDeterministicRef(withdrawalCode: string, logicalTxId: string): string {
+    return `SIM-TRF-${withdrawalCode.replace(/^WDR-/, "")}-${deterministicHexTag(logicalTxId)}`;
+  }
+
   async executeDisbursement(
     req: BankPayoutProviderRequest
   ): Promise<BankPayoutProviderResult> {
@@ -116,6 +141,7 @@ export class SimulatedBankPayoutProvider implements BankPayoutProvider {
       return {
         provider: "simulated_bank",
         simulationMode: true,
+        logicalTxId: req.idempotencyKey || "",
         outcome: "failed",
         failureReason: "Invalid bank disbursement payload.",
       };
@@ -126,6 +152,7 @@ export class SimulatedBankPayoutProvider implements BankPayoutProvider {
       return {
         provider: "simulated_bank",
         simulationMode: true,
+        logicalTxId: req.idempotencyKey,
         outcome: "failed",
         failureReason:
           "Simulated Malaysian bank disbursement rejected (QA fail mode).",
@@ -135,18 +162,22 @@ export class SimulatedBankPayoutProvider implements BankPayoutProvider {
       return {
         provider: "simulated_bank",
         simulationMode: true,
+        logicalTxId: req.idempotencyKey,
         outcome: "reconciliation_required",
         failureReason:
           "Simulated bank gateway timed out; transfer status uncertain and held for reconciliation.",
       };
     }
 
-    const token = crypto.randomBytes(4).toString("hex").toUpperCase();
     return {
       provider: "simulated_bank",
       simulationMode: true,
+      logicalTxId: req.idempotencyKey,
       outcome: "paid",
-      transferRef: `SIM-TRF-${req.withdrawalCode.replace(/^WDR-/, "")}-${token}`,
+      transferRef: this.deriveDeterministicRef(
+        req.withdrawalCode,
+        req.idempotencyKey
+      ),
     };
   }
 }

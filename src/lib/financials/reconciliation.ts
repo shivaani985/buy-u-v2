@@ -1,7 +1,11 @@
-import { isEligibleForWithdrawalRelease } from "./policy.ts";
+import {
+  isAuthoritativeOrderPaymentVerified,
+  isEligibleForWithdrawalRelease,
+} from "./policy.ts";
 
 export interface ReconCheckoutSession {
   id: string;
+  buyer_id?: string | null;
   checkout_code: string;
   combined_subtotal_sen: number;
   fpx_fee_sen: number;
@@ -23,6 +27,7 @@ export interface ReconPayment {
 
 export interface ReconOrder {
   id: string;
+  buyer_id?: string | null;
   order_code: string;
   checkout_session_id: string | null;
   seller_id: string;
@@ -33,6 +38,7 @@ export interface ReconOrder {
   status: string;
   paid_at: string | null;
   completed_at: string | null;
+  protection_expires_at?: string | null;
 }
 
 export interface ReconRefund {
@@ -140,8 +146,16 @@ export function computePlatformFinancialReconciliation(input: {
     }
   }
 
-  // 2. Executed refunds by order
+  // 2. Executed & blocking refunds by order
   const refundByOrder = new Map<string, { product: number; commRev: number; sellerDeduct: number }>();
+  const blockingRefundOrders = new Set<string>();
+  const BLOCKING_REFUND_STATUSES = new Set([
+    "pending_execution",
+    "awaiting_return",
+    "processing",
+    "failed",
+    "reconciliation_required",
+  ]);
   let executedRefundsSen = 0;
   let commissionReversalsSen = 0;
   let overRefundFlag = false;
@@ -151,7 +165,8 @@ export function computePlatformFinancialReconciliation(input: {
     if (r.refund_amount_sen !== r.commission_reversal_sen + r.seller_deduction_sen) {
       refundAccountingFlag = true;
     }
-    if (r.status === "succeeded") {
+    const rs = (r.status ?? "").toLowerCase();
+    if (rs === "succeeded") {
       executedRefundsSen += r.refund_amount_sen;
       commissionReversalsSen += r.commission_reversal_sen;
       const cur = refundByOrder.get(r.order_id) ?? { product: 0, commRev: 0, sellerDeduct: 0 };
@@ -163,6 +178,8 @@ export function computePlatformFinancialReconciliation(input: {
       if (ord && cur.product > ord.subtotal_sen) {
         overRefundFlag = true;
       }
+    } else if (BLOCKING_REFUND_STATUSES.has(rs)) {
+      blockingRefundOrders.add(r.order_id);
     }
   }
 
@@ -171,12 +188,15 @@ export function computePlatformFinancialReconciliation(input: {
   for (const d of input.disputes) {
     const ds = (d.status ?? "").toLowerCase();
     const es = (d.refund_execution_status ?? "").toLowerCase();
-    if (ds === "open" || ds === "under_review" || es === "pending_execution") {
+    if (ds === "open" || ds === "under_review" || es === "pending_execution" || es === "failed") {
       frozenOrders.add(d.order_id);
     }
   }
 
-  // 4. Seller order buckets (mutually exclusive!)
+  const csById = new Map(input.checkoutSessions.map((cs) => [cs.id, cs]));
+  const payByOrderId = new Map(input.legacyPayments.map((p) => [p.order_id, p]));
+
+  // 4. Seller order buckets (mutually exclusive, authoritative payment proof & protection deadline!)
   let grossProductSalesSen = 0;
   let originalCommissionSen = 0;
   let originalSellerEarningsSen = 0;
@@ -188,7 +208,13 @@ export function computePlatformFinancialReconciliation(input: {
 
   for (const o of input.orders) {
     const s = (o.status ?? "").toLowerCase();
-    if (!o.paid_at || EXCLUDED_UNPAID.has(s)) continue;
+    if (EXCLUDED_UNPAID.has(s)) continue;
+    const verified = isAuthoritativeOrderPaymentVerified({
+      order: o,
+      checkoutSession: o.checkout_session_id ? csById.get(o.checkout_session_id) ?? null : null,
+      legacyPayment: payByOrderId.get(o.id) ?? null,
+    });
+    if (!verified) continue;
 
     grossProductSalesSen += o.subtotal_sen;
     originalCommissionSen += o.commission_sen;
@@ -202,12 +228,12 @@ export function computePlatformFinancialReconciliation(input: {
     if (s === "refunded" || adjustedNet === 0) {
       continue;
     }
-    if (s === "disputed" || frozenOrders.has(o.id)) {
+    if (s === "disputed" || frozenOrders.has(o.id) || blockingRefundOrders.has(o.id)) {
       frozenEarningsSen += adjustedNet;
     } else if (s === "paid" || s === "handed_over") {
       pendingSettlementSen += adjustedNet;
     } else if (s === "completed") {
-      if (isEligibleForWithdrawalRelease(o.completed_at, nowMs)) {
+      if (isEligibleForWithdrawalRelease(o.completed_at, nowMs, o.protection_expires_at)) {
         maturedCompletedNetSen += adjustedNet;
       } else {
         protectionReserveSen += adjustedNet;

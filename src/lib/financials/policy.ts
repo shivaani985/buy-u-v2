@@ -4,13 +4,19 @@
  */
 export const BUYER_PROTECTION_HOURS = 72;
 export const BUYER_PROTECTION_MS = BUYER_PROTECTION_HOURS * 60 * 60 * 1000;
+export const LEGACY_BUYER_PROTECTION_HOURS = 168; // 7 days (preserved for historical pre-6D completions)
 export const MIN_WITHDRAWAL_SEN = 200; // RM 2.00
 export const WITHDRAWAL_FEE_SEN = 0; // RM 0.00 simulated withdrawal fee
 export const COMMISSION_RATE = 0.02; // 2% of eligible product subtotal
 
 export function getProtectionExpiresAt(
-  completedAt: string | null | undefined
+  completedAt: string | null | undefined,
+  explicitProtectionExpiresAt?: string | null
 ): string | null {
+  if (explicitProtectionExpiresAt) {
+    const expMs = Date.parse(explicitProtectionExpiresAt);
+    if (!Number.isNaN(expMs)) return new Date(expMs).toISOString();
+  }
   if (!completedAt) return null;
   const ms = Date.parse(completedAt);
   if (Number.isNaN(ms)) return null;
@@ -19,30 +25,83 @@ export function getProtectionExpiresAt(
 
 /**
  * Exact boundary: buyer post-completion dispute is eligible strictly when
- * `nowMs < completed_at + 72 hours`.
+ * `nowMs < protection_expires_at` (falling back to `completed_at + 72 hours`).
  */
 export function isWithinBuyerProtectionWindow(
   completedAt: string | null | undefined,
-  nowMs: number = Date.now()
+  nowMs: number = Date.now(),
+  explicitProtectionExpiresAt?: string | null
 ): boolean {
-  if (!completedAt) return false;
-  const ms = Date.parse(completedAt);
-  if (Number.isNaN(ms)) return false;
-  return nowMs < ms + BUYER_PROTECTION_MS;
+  const expIso = getProtectionExpiresAt(completedAt, explicitProtectionExpiresAt);
+  if (!expIso) return false;
+  return nowMs < Date.parse(expIso);
 }
 
 /**
  * Exact boundary: undisputed completed earnings become withdrawable at
- * `nowMs >= completed_at + 72 hours`.
+ * `nowMs >= protection_expires_at` (falling back to `completed_at + 72 hours`).
  */
 export function isEligibleForWithdrawalRelease(
   completedAt: string | null | undefined,
-  nowMs: number = Date.now()
+  nowMs: number = Date.now(),
+  explicitProtectionExpiresAt?: string | null
 ): boolean {
-  if (!completedAt) return false;
-  const ms = Date.parse(completedAt);
-  if (Number.isNaN(ms)) return false;
-  return nowMs >= ms + BUYER_PROTECTION_MS;
+  const expIso = getProtectionExpiresAt(completedAt, explicitProtectionExpiresAt);
+  if (!expIso) return false;
+  return nowMs >= Date.parse(expIso);
+}
+
+/**
+ * Authoritative payment proof helper (P0.6):
+ * Requires BOTH `order.paid_at` AND either:
+ *   - Unified parent `checkout_sessions` verified paid (`status='paid'`, `payment_status='paid'`, `paid_at`), OR
+ *   - Legacy `payments` row verified paid (`status='paid'`, `verified_at`).
+ * Never relies on `orders.paid_at` alone.
+ */
+export function isAuthoritativeOrderPaymentVerified(input: {
+  order: {
+    id: string;
+    buyer_id?: string | null;
+    checkout_session_id?: string | null;
+    paid_at: string | null;
+  };
+  checkoutSession?: {
+    id: string;
+    buyer_id?: string | null;
+    status: string;
+    payment_status: string;
+    paid_at: string | null;
+  } | null;
+  legacyPayment?: {
+    order_id: string;
+    status: string;
+    verified_at: string | null;
+  } | null;
+}): boolean {
+  if (!input.order.paid_at) return false;
+  if (input.order.checkout_session_id) {
+    const cs = input.checkoutSession;
+    if (!cs || cs.id !== input.order.checkout_session_id) return false;
+    if (
+      input.order.buyer_id &&
+      cs.buyer_id &&
+      cs.buyer_id !== input.order.buyer_id
+    ) {
+      return false;
+    }
+    return (
+      cs.status.toLowerCase() === "paid" &&
+      cs.payment_status.toLowerCase() === "paid" &&
+      Boolean(cs.paid_at)
+    );
+  }
+  const p = input.legacyPayment;
+  return Boolean(
+    p &&
+      p.order_id === input.order.id &&
+      p.status.toLowerCase() === "paid" &&
+      p.verified_at
+  );
 }
 
 export interface RefundBreakdown {
