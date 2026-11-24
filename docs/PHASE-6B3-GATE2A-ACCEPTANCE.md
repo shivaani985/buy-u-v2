@@ -49,3 +49,31 @@
    - On **Approve**: verify status is **Payment Confirmed** and your private 6-digit **Campus Pickup PIN** is displayed. Open `http://localhost:3000/orders` to confirm it appears there too; sign in as seller to confirm the PIN is never visible.
    - On **Decline**: verify status is **Payment Failed or Cancelled**, open `http://localhost:3000/orders`, click **Retry ToyyibPay FPX**, and confirm it reopens the same Sandbox bill before the 15m deadline.
 5. **Gate 2B (Separate):** To test async server-to-server ToyyibPay webhook delivery without returning to `/orders/return`, set `NEXT_PUBLIC_SITE_URL=https://<public-https-domain>` pointing to `localhost:3000` (or staging) and repeat Step 3 closing the browser tab before redirect.
+
+## 6. Owner Manual Sandbox Acceptance Results (2026-11-24 — PASS)
+- **Live Gateway-Confirmed Order (Preserved for Phase 6C Handover QA):**
+  - Order Code: **`BU-2611-3CB12A`** (`id: 3faaeecf-cd0d-45ef-b4b5-ea0910203103`)
+  - ToyyibPay Sandbox Bill: **`91bbcj6m`** (`https://dev.toyyibpay.com/91bbcj6m`)
+  - Verified Transaction Reference: **`TP2611241359322034`**
+  - Verified Paid Amount: **`RM 16.00`** (`1600 sen` = `RM 15.00` subtotal + `RM 1.00` FPX; `commission = RM 0.30`, `seller_net = RM 14.70`)
+  - Timestamps: `paid_at = verified_at = 2026-11-24T05:10:50.280913+00:00`
+  - Stock Deduction: QA listing `3436ee88-db3c-4f35-9e0e-91d4b40f73c4` decremented **`5 → 4`**, `reserved_quantity = 0`.
+  - Pickup PIN Privacy: 6-digit PIN generated and visible ONLY to buyer; seller dashboard showed `RM 30.00` total sales, `RM 14.70` pending settlement, and **zero PIN exposure**.
+  - Failed Payment & Automatic Expiry: Verified failed payment handling and automatic expiry/stock release.
+- **Preservation Note:** Paid QA order `BU-2611-3CB12A` and QA listing `3436ee88-db3c-4f35-9e0e-91d4b40f73c4` are intentionally preserved for **Phase 6C (Pickup PIN & Campus Handover)** testing.
+
+## 7. Observations & Follow-Up Items
+1. **ToyyibPay 10-Minute Retry Cooldown:** ToyyibPay Sandbox enforced an observed ~10-minute cooldown after a failed FPX attempt. Successful same-bill retry after cooldown and whether the cooldown is scoped per-bill vs across different bills remain unverified.
+2. **Phase 6C Seller UI Polish:** Seller dashboard transaction labels (`Pending`, `Cancelled`) should be clarified in Phase 6C to distinguish `Awaiting Payment`, `Paid · Awaiting Handover`, `Expired`, and `Cancelled`.
+
+## 8. Minimal Targeted Test — Retry & Multi-Bill Cooldown Scope
+*(Run on `http://localhost:3000` with 2-seller cart checkout when ready — no code/SQL changes required):*
+1. **Multi-Bill Cooldown Scope (Immediate Check, <2 min):**
+   - Add 1 item from Seller A and 1 item from Seller B → Checkout → creates `Bill A` and `Bill B` (15m hold).
+   - Open `Bill A` → **Decline** on SBI Bank A → return to `/orders` (note `Bill A` enters ToyyibPay's 10m cooldown).
+   - **Immediately** open `Bill B` and attempt **Approve** on SBI Bank A:
+     - If `Bill B` succeeds immediately → ToyyibPay cooldown is **per-bill** (multi-seller sibling bills unaffected).
+     - If `Bill B` is also blocked for 10m → ToyyibPay cooldown is **per-payer/merchant** (document UX guidance on `/orders`).
+2. **Same-Bill Retry After Cooldown (~10–11 min mark, before 15m deadline):**
+   - Wait until `t + 10m 30s` (still ~4.5m before `Bill A`'s 15m expiry) → click **Retry ToyyibPay FPX** on `Bill A` (reuses exact `Bill A` `bill_code`) → **Approve** on SBI Bank A → confirm `/orders/return` transitions `Bill A` to `paid`, deducts stock, and generates a buyer-only PIN.
+
