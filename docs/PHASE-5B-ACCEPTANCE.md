@@ -74,3 +74,14 @@
   8. 30-minute hold release & idempotency: **PASS** — `release_expired_offer_reservations()` returned `1` (`status='expired'`, `reservation_released_at` set, `reserved_quantity=0`); repeat call returned `0`.
   9. **Security Finding (Follow-up 1-function SQL patch):** `is_member_blocked_between` checked `current_user` inside `SECURITY DEFINER` (which is always `'postgres'`), allowing outsider `examiner.staff` to call it directly and receive `false`. Fixed in `docs/sql/phase-5b-atomic-bargaining.sql` to check `COALESCE(auth.role(), '') = 'authenticated'` so outsiders receive `42501`.
 - **Cleanup & Data Integrity:** **PASS (0-DIFF)** — BEFORE and AFTER snapshots match identically (`listingCount: 2`, `IOT Box` untouched, `offerCount: 0`, `orderCount: 1`, `blockCount: 0`, `conversations.last_message_at` restored).
+
+---
+
+## Phase 5B — Final Security Hotfix Verification & Closure
+
+- **Outsider block-status lookup (`examiner.staff`):** **PASS** — rejected with `42501: Forbidden block status lookup`.
+- **Buyer & seller own-pair lookup:** **PASS** — both `examiner.buyer` and `examiner.seller` queried their own pair (`false` when unblocked, `true` when blocked).
+- **Bidirectional blocks:** **PASS** — `seller → buyer` blocked buyer offer `INSERT`; `buyer → seller` blocked `accept_offer_atomic` (`MEMBER_BLOCKED`).
+- **Atomic offer acceptance, 30m hold release & `pg_cron`:** **PASS** — competing stock=1 accept yielded 1 winner (`aa2e3f9e-9418-45d3-a3ba-b2c5cd91a946`), 1 `OUT_OF_STOCK` loser, `reserved_quantity=1`; `release_expired_offer_reservations()` released `1` hold (`reserved_quantity=0`), repeat call returned `0`; `pg_cron` Job ID 1 remains active.
+- **Data integrity:** **PASS (0-DIFF)** — BEFORE and AFTER snapshots match identically (`listingCount: 2`, `IOT Box` untouched, `offerCount: 0`, `orderCount: 1`, `blockCount: 0`, `conversations.last_message_at` restored).
+- **Status:** **PHASE 5B CLOSED — ALL CHECKS PASS.**
