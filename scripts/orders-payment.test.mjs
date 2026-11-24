@@ -683,3 +683,31 @@ test("Concurrency model: simultaneous identical submissions, mid-checkout cart a
   );
   assert.equal(state.listings.get("L2").reserved, 0);
 });
+
+test("Phase 6B.2 reserved-stock guard SQL protects listings and listing_variants with SECURITY INVOKER + current_user + 42501", () => {
+  const guardSql = fs.readFileSync(
+    path.resolve(process.cwd(), "docs/sql/phase-6b2-reserved-stock-guard.sql"),
+    "utf8"
+  );
+
+  // SECURITY INVOKER + effective-role check (never auth.role(), which breaks SECURITY DEFINER RPCs)
+  assert.ok(guardSql.includes("SECURITY INVOKER"));
+  assert.ok(guardSql.includes("SET search_path = public, pg_temp"));
+  assert.ok(guardSql.includes("current_user NOT IN ('authenticated', 'anon')"));
+  assert.equal(guardSql.includes("auth.role()"), false);
+
+  // Rejects forged INSERT, direct reserved_quantity UPDATE, quantity < reserved, active/mode tampering, and DELETE with 42501
+  assert.ok(guardSql.includes("COALESCE(NEW.reserved_quantity, 0) <> 0"));
+  assert.ok(guardSql.includes("NEW.reserved_quantity IS DISTINCT FROM OLD.reserved_quantity"));
+  assert.ok(guardSql.includes("NEW.quantity < COALESCE(OLD.reserved_quantity, 0)"));
+  assert.ok(guardSql.includes("NEW.has_variants IS DISTINCT FROM OLD.has_variants"));
+  assert.ok(guardSql.includes("NEW.active IS NOT TRUE"));
+  assert.ok(guardSql.includes("TG_OP = 'DELETE'"));
+  assert.ok((guardSql.match(/ERRCODE = '42501'/g) || []).length >= 6);
+
+  // Triggers attached to BOTH listings and listing_variants for INSERT/UPDATE/DELETE + rollback included
+  assert.ok(guardSql.includes("BEFORE INSERT OR UPDATE OR DELETE ON public.listings"));
+  assert.ok(guardSql.includes("BEFORE INSERT OR UPDATE OR DELETE ON public.listing_variants"));
+  assert.ok(guardSql.includes("DROP TRIGGER IF EXISTS trg_guard_listings_reserved_stock"));
+  assert.ok(guardSql.includes("DROP TRIGGER IF EXISTS trg_guard_listing_variants_reserved_stock"));
+});
