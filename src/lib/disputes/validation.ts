@@ -39,7 +39,7 @@ export const DISPUTE_REASONS: Array<{
   { code: "damaged", label: "Damaged or defective item" },
   { code: "wrong_item", label: "Wrong item received" },
   { code: "missing_item", label: "Missing item or quantity" },
-  { code: "other", label: "Other" },
+  { code: "other", label: "Other order issue" },
 ];
 
 const UUID_RE =

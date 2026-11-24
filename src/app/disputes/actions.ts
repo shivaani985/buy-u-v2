@@ -65,6 +65,15 @@ function mapDisputeRpcError(message: string): string {
   if (message.includes("TOO_MANY_EVIDENCE_FILES")) {
     return "You can attach up to 5 supporting images.";
   }
+  if (message.includes("EVIDENCE_OBJECT_NOT_FOUND")) {
+    return "One or more evidence images were not found in private storage. Please re-upload.";
+  }
+  if (message.includes("ORDER_NOT_DISPUTED")) {
+    return "This order is not currently in a disputed state.";
+  }
+  if (message.includes("ORDER_ALREADY_REFUNDED")) {
+    return "No refundable balance remains on this order.";
+  }
   if (message.includes("INVALID_EVIDENCE_PATH")) {
     return "One or more evidence files are invalid or unauthorized.";
   }

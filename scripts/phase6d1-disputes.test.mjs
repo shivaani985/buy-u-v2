@@ -23,9 +23,16 @@ const SELLER_ID = "d3b398d8-9103-4bc2-84d3-6e0101b7659a";
 const OTHER_ID = "17d414ce-8349-4dc2-bccd-94d9bd0ebc52";
 const ORDER_ID = "3faaeecf-cd0d-45ef-b4b5-ea0910203103";
 
-test("1. Dispute reasons, eligibility (paid/handed_over/7d completed window), and invalid status rejection", () => {
+test("1. Dispute reasons (all 6 >= 10 chars), eligibility (paid/handed_over/7d completed window), and invalid status rejection", () => {
   assert.equal(DISPUTE_REASONS.length, 6);
-  assert.equal(isValidDisputeReasonCode("not_received"), true);
+  for (const r of DISPUTE_REASONS) {
+    assert.equal(isValidDisputeReasonCode(r.code), true);
+    assert.ok(
+      r.label.length >= 10,
+      `Reason "${r.code}" label "${r.label}" must be >= 10 chars for order_disputes_reason_check`
+    );
+  }
+  assert.equal(DISPUTE_REASONS.find((r) => r.code === "other")?.label, "Other order issue");
   assert.equal(isValidDisputeReasonCode("invalid_reason"), false);
 
   const nowMs = Date.parse("2026-11-24T12:00:00Z");
@@ -208,8 +215,21 @@ test("4. Phase 6D.1 SQL migration security, atomicity, lock order, and privacy i
   );
 
   assert.match(sql, /STATUS:\s*PROPOSAL ONLY/i);
-  // Concurrency-safe partial unique index for 1 active dispute per order
+  // Drop legacy single-dispute-ever UNIQUE(order_id); retain partial unique index for active disputes
+  assert.match(sql, /DROP CONSTRAINT IF EXISTS order_disputes_order_id_key/);
   assert.match(sql, /idx_order_disputes_one_active_per_order/);
+  // All 6 stored reason labels >= 10 chars ("Other order issue")
+  assert.match(sql, /WHEN 'other'\s+THEN 'Other order issue'/);
+  // Temporarily revoke direct client writes on payout_requests until Phase 6D.4
+  assert.match(sql, /REVOKE INSERT, UPDATE, DELETE ON public\.payout_requests FROM PUBLIC, anon, authenticated/);
+  // Hosted payout statuses aligned (pending, paid)
+  assert.match(sql, /IN \('pending', 'paid'\)/);
+  // Evidence objects verified to exist in storage.objects for private dispute-evidence bucket
+  assert.match(sql, /FROM storage\.objects so/);
+  assert.match(sql, /EVIDENCE_OBJECT_NOT_FOUND/);
+  // Admin resolution requires genuinely disputed order & guards against repeated refunds
+  assert.match(sql, /IF v_order\.status <> 'disputed' THEN\s+RAISE EXCEPTION 'ORDER_NOT_DISPUTED'/);
+  assert.match(sql, /ORDER_ALREADY_REFUNDED/);
   // Admin-only columns revoked from authenticated/anon
   assert.match(sql, /REVOKE ALL ON public\.order_disputes FROM PUBLIC, anon, authenticated/);
   assert.doesNotMatch(sql, /GRANT SELECT \([^)]*admin_notes/i);

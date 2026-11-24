@@ -56,6 +56,12 @@ WHERE dispute_code IS NULL;
 ALTER TABLE public.order_disputes
   ALTER COLUMN dispute_code SET NOT NULL;
 
+-- Drop legacy single-dispute-ever UNIQUE(order_id) so a new eligible dispute can
+-- be opened after a `release_to_seller` resolution while still blocking duplicate
+-- active disputes via `idx_order_disputes_one_active_per_order`.
+ALTER TABLE public.order_disputes
+  DROP CONSTRAINT IF EXISTS order_disputes_order_id_key;
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_order_disputes_dispute_code
   ON public.order_disputes (dispute_code);
 
@@ -168,6 +174,10 @@ UPDATE storage.buckets
 SET public = false
 WHERE id = 'dispute-evidence';
 
+-- Temporarily close direct client writes on `public.payout_requests` until
+-- Phase 6D.4 implements atomic withdrawal RPCs (preserves SELECT & existing rows)
+REVOKE INSERT, UPDATE, DELETE ON public.payout_requests FROM PUBLIC, anon, authenticated;
+
 -- -----------------------------------------------------------------------------
 -- 3. Buyer-only Atomic Dispute Creation (`open_order_dispute_atomic`)
 --    Completed-order protection window: 7 days from `completed_at` AND seller's
@@ -222,7 +232,7 @@ BEGIN
     WHEN 'damaged'          THEN 'Damaged or defective item'
     WHEN 'wrong_item'       THEN 'Wrong item received'
     WHEN 'missing_item'     THEN 'Missing item or quantity'
-    WHEN 'other'            THEN 'Other'
+    WHEN 'other'            THEN 'Other order issue'
     ELSE NULL
   END;
 
@@ -239,11 +249,20 @@ BEGIN
   END IF;
 
   -- Validate every evidence path belongs strictly to `<buyer_uid>/<order_id>/<safe-file>`
+  -- AND actually exists in the private `dispute-evidence` storage bucket
   FOREACH v_path IN ARRAY v_paths LOOP
     IF v_path IS NULL
        OR v_path LIKE '%..%'
        OR v_path !~ ('^' || v_uid::text || '/' || p_order_id::text || '/[A-Za-z0-9._-]+$') THEN
       RAISE EXCEPTION 'INVALID_EVIDENCE_PATH';
+    END IF;
+    IF NOT EXISTS (
+      SELECT 1
+      FROM storage.objects so
+      WHERE so.bucket_id = 'dispute-evidence'
+        AND so.name = v_path
+    ) THEN
+      RAISE EXCEPTION 'EVIDENCE_OBJECT_NOT_FOUND';
     END IF;
   END LOOP;
 
@@ -272,14 +291,15 @@ BEGIN
     RAISE EXCEPTION 'ORDER_NOT_DISPUTABLE';
   END IF;
 
-  -- Block if an active dispute or pending-execution refund already exists
+  -- Block if an active dispute OR pending/executed refund already exists on this order
+  -- (Allows a new eligible dispute after `release_to_seller`, never repeated refunds)
   IF EXISTS (
     SELECT 1
     FROM public.order_disputes d
     WHERE d.order_id = v_order.id
       AND (
         lower(COALESCE(d.status, '')) IN ('open', 'under_review')
-        OR d.refund_execution_status = 'pending_execution'
+        OR d.refund_execution_status IN ('pending_execution', 'executed')
       )
   ) THEN
     RAISE EXCEPTION 'DISPUTE_ALREADY_ACTIVE';
@@ -326,11 +346,14 @@ BEGIN
       AND o2.status = 'completed'
       AND o2.paid_at IS NOT NULL;
 
+    -- Actual hosted payout_requests statuses: pending, paid, rejected.
+    -- Phase 6D.4 must coordinate withdrawals & disputes via a shared seller-level
+    -- lock and reserve sufficient funds for the 7-day buyer protection window.
     SELECT COALESCE(SUM(pr.amount_sen), 0)::bigint
     INTO v_active_payouts_total
     FROM public.payout_requests pr
     WHERE pr.seller_id = v_order.seller_id
-      AND lower(COALESCE(pr.status, '')) IN ('pending', 'processing', 'approved', 'paid', 'completed');
+      AND lower(COALESCE(pr.status, '')) IN ('pending', 'paid');
 
     IF (v_completed_net_total - v_active_payouts_total) < v_order.seller_net_sen THEN
       RAISE EXCEPTION 'FUNDS_ALREADY_DISBURSED';
@@ -475,6 +498,14 @@ BEGIN
        OR v_path !~ ('^' || v_uid::text || '/' || v_order.id::text || '/[A-Za-z0-9._-]+$') THEN
       RAISE EXCEPTION 'INVALID_EVIDENCE_PATH';
     END IF;
+    IF NOT EXISTS (
+      SELECT 1
+      FROM storage.objects so
+      WHERE so.bucket_id = 'dispute-evidence'
+        AND so.name = v_path
+    ) THEN
+      RAISE EXCEPTION 'EVIDENCE_OBJECT_NOT_FOUND';
+    END IF;
   END LOOP;
 
   v_now := clock_timestamp();
@@ -612,6 +643,8 @@ DECLARE
   v_dispute public.order_disputes;
   v_now timestamptz;
   v_res_type text := lower(trim(COALESCE(p_resolution_type, '')));
+  v_prior_refunded_sen integer := 0;
+  v_remaining_refundable integer := 0;
   v_refund_sen integer := 0;
   v_exec_status text := 'not_applicable';
   v_next_order_status text;
@@ -650,6 +683,21 @@ BEGIN
     RAISE EXCEPTION 'DISPUTE_ALREADY_RESOLVED';
   END IF;
 
+  -- Require a genuinely disputed order before recording any admin resolution
+  IF v_order.status <> 'disputed' THEN
+    RAISE EXCEPTION 'ORDER_NOT_DISPUTED';
+  END IF;
+
+  -- Prevent repeated refunds against already-refunded or pending-execution amounts
+  SELECT COALESCE(SUM(d2.refund_amount_sen), 0)::integer
+  INTO v_prior_refunded_sen
+  FROM public.order_disputes d2
+  WHERE d2.order_id = v_order.id
+    AND d2.id <> v_dispute.id
+    AND d2.refund_execution_status IN ('pending_execution', 'executed');
+
+  v_remaining_refundable := GREATEST(0, v_order.subtotal_sen - v_prior_refunded_sen);
+
   IF v_res_type = 'release_to_seller' THEN
     v_refund_sen := 0;
     v_exec_status := 'not_applicable';
@@ -664,15 +712,21 @@ BEGIN
       v_next_order_status := 'paid';
     END IF;
   ELSIF v_res_type = 'full_refund' THEN
-    v_refund_sen := v_order.subtotal_sen;
+    IF v_remaining_refundable <= 0 THEN
+      RAISE EXCEPTION 'ORDER_ALREADY_REFUNDED';
+    END IF;
+    v_refund_sen := v_remaining_refundable;
     v_exec_status := 'pending_execution';
     -- Keep order frozen (`disputed`) until Phase 6D.2 executes refund
     v_next_order_status := 'disputed';
   ELSE
     -- partial_refund
+    IF v_remaining_refundable <= 1 THEN
+      RAISE EXCEPTION 'ORDER_ALREADY_REFUNDED';
+    END IF;
     IF p_refund_amount_sen IS NULL
        OR p_refund_amount_sen <= 0
-       OR p_refund_amount_sen >= v_order.subtotal_sen THEN
+       OR p_refund_amount_sen >= v_remaining_refundable THEN
       RAISE EXCEPTION 'INVALID_PARTIAL_REFUND_AMOUNT';
     END IF;
     v_refund_sen := p_refund_amount_sen;

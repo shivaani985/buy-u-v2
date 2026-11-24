@@ -74,6 +74,17 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
+  // Enforce server-side per-participant file count limit (max 5 per order)
+  const { data: existingFiles } = await service.storage
+    .from(DISPUTE_EVIDENCE_BUCKET)
+    .list(`${userId}/${orderId}`, { limit: 10 });
+  if ((existingFiles?.length ?? 0) >= 5) {
+    return NextResponse.json(
+      { error: "Maximum 5 supporting evidence images per order reached." },
+      { status: 400 }
+    );
+  }
+
   const fileName = `${Date.now()}-${crypto.randomBytes(6).toString("hex")}.${check.ext}`;
   const storagePath = `${userId}/${orderId}/${fileName}`;
   const buffer = Buffer.from(await file.arrayBuffer());
@@ -137,9 +148,11 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
-  const isParticipant =
-    order.buyer_id === userId || order.seller_id === userId;
-  if (!isParticipant && !session.isActiveAdmin) {
+  const isActiveParticipant =
+    session.isEmailVerified &&
+    session.profile?.status?.toLowerCase() === "active" &&
+    (order.buyer_id === userId || order.seller_id === userId);
+  if (!isActiveParticipant && !session.isActiveAdmin) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 

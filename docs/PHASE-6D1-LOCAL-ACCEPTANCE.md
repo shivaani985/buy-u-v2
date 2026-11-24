@@ -8,7 +8,8 @@
 
 ## 1. Completed-Order Buyer Protection Window Policy
 - **Paid (`paid`) & Handed Over (`handed_over`) orders:** Eligible for buyer dispute at any time (verified payment required; funds are in Pending Settlement).
-- **Completed (`completed`) orders:** Eligible within **7 days of `completed_at`**, **ONLY IF** the seller's un-disbursed completed net balance (`SUM(completed seller_net_sen) - SUM(active/paid payout_requests)`) covers `order.seller_net_sen`. If funds were already disbursed, `open_order_dispute_atomic` rejects with `FUNDS_ALREADY_DISBURSED`.
+- **Completed (`completed`) orders:** Eligible within **7 days of `completed_at`**, **ONLY IF** the seller's un-disbursed completed net balance (`SUM(completed seller_net_sen) - SUM(payout_requests WHERE status IN ('pending', 'paid'))`) covers `order.seller_net_sen`. If funds were already disbursed, `open_order_dispute_atomic` rejects with `FUNDS_ALREADY_DISBURSED`.
+- **Phase 6D.4 Coordination Requirement (Documented):** When Phase 6D.4 introduces atomic seller withdrawal RPCs, withdrawals and disputes MUST coordinate using a shared seller-level lock (`SELECT ... FROM public.profiles WHERE id = seller_id FOR UPDATE`) and reserve sufficient funds for the 7-day completed-order buyer protection window. Direct client writes to `public.payout_requests` are temporarily revoked in Phase 6D.1 until Phase 6D.4 ships.
 - **Blocked statuses:** `pending_payment`, `expired`, `cancelled`, `refunded`, already `disputed`, or orders with a `pending_execution` refund.
 
 ## 2. Implemented Components & Security Boundaries

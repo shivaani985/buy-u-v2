@@ -88,15 +88,10 @@ const EXCLUDED_CANCELLED_STATUSES = new Set([
   "pending_payment",
 ]);
 
-const ACTIVE_PAYOUT_DEDUCTION_STATUSES = new Set([
-  "pending",
-  "processing",
-  "approved",
-  "paid",
-  "completed",
-]);
+// Actual hosted payout_requests statuses: pending, paid, rejected
+const ACTIVE_PAYOUT_DEDUCTION_STATUSES = new Set(["pending", "paid"]);
 
-const PAID_OUT_STATUSES = new Set(["paid", "completed"]);
+const PAID_OUT_STATUSES = new Set(["paid"]);
 
 export function parseSalesRange(raw: string | undefined): SalesRange {
   if (raw === "30d" || raw === "all") return raw;
