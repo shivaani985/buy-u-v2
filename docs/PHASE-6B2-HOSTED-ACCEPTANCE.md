@@ -3,7 +3,7 @@
 - **Target Supabase Project:** `duwwlcpdidrxkixvflag`
 - **Date:** 2026-11-24
 - **Scope:** Isolated hosted DB acceptance of Phase 6A/6B.1 RPCs, constraints, grants, indexes, `pg_cron` Job 2, and reserved-stock protection. Zero ToyyibPay API calls, zero real payments, zero schema changes, zero production data edits.
-- **Overall Result:** **14/15 PASS, 1 FAIL (CONFIRMED BLOCKER)**
+- **Overall Result:** **15/15 PASS (CLOSED)** after applying `docs/sql/phase-6b2-reserved-stock-guard.sql` (commit `a7bda62`) and passing 9/9 final hosted security retests.
 
 ## Hosted Evidence
 
@@ -22,9 +22,11 @@
 | 6b | Payment confirm, stock deduction, duplicate callback, conflict & replay | **PASS** | `confirmed_paid`, 6-digit `pickup_pin=097128`, `qtyA=8`, `qtyVM=4`; duplicate callback → `already_paid`; conflicting ref → `TRANSACTION_REF_CONFLICT`; cross-order ref replay → `23505` (`idx_payments_unique_transaction_ref`). |
 | 6c | Late payment after expiry (expiry race) | **PASS** | Returned `late_payment_reconciliation` (idempotent on retry), `payments.status='late_payment_review'`, order remained `'expired'`, zero stock oversell. |
 | 6d | Accepted-offer payment confirmation | **PASS** | `confirmed_paid`, deducted 1 unit & cleared hold (`qty=0`, `res=0`). |
-| 7 | Protect `reserved_quantity` from direct seller UPDATE | **FAIL (BLOCKER)** | Direct seller `UPDATE listings SET quantity = 0` was blocked by `listings_check`, **but direct seller `UPDATE listings SET reserved_quantity = 0` SUCCEEDED (`before: {quantity:5, reserved_quantity:2}` → `after: {quantity:5, reserved_quantity:0}`)**. |
-| 8 | 0-diff cleanup & existing data preservation | **PASS** | Exact 0-diff across all 9 tables (`listings: 2`, `listing_variants: 0`, `cart_items: 1`, `conversations: 1`, `offers: 0`, `orders: 1`, `order_items: 1`, `payments: 1`, `notifications: 27`). |
+| 7 | Protect `reserved_quantity` from direct seller UPDATE & structural bypasses | **PASS (RETESTED)** | Initial run caught direct seller `UPDATE listings SET reserved_quantity = 0`. After applying `phase-6b2-reserved-stock-guard.sql` (`a7bda62`), **9/9 final retests PASSED**: forged listing/variant INSERT (`42501`), all 9 direct seller tamper/delete attacks on reserved listing & variant (`42501`), `update_listing_atomic` bypasses (mode flip `P0001`, option rename **`42501`**, omit/deactivate `P0001`), legitimate seller edits via `update_listing_atomic` succeeded, and cart checkout, bargaining acceptance, synthetic payment confirmation, and both cron sweepers remained operational. |
+| 8 | 0-diff cleanup & existing data preservation | **PASS** | Exact 0-diff across all 9 tables in both initial run and final retest (`listings: 2`, `listing_variants: 0`, `cart_items: 1`, `conversations: 1`, `offers: 0`, `orders: 1`, `order_items: 1`, `payments: 1`, `notifications: 27`). |
 
-## Blocker & Recommended Next Fix (Awaiting Owner Approval)
-- **Blocker:** Authenticated sellers can directly mutate `listings.reserved_quantity` (and should also be verified/guarded on `listing_variants.reserved_quantity`), allowing them to wipe active buyer holds and subsequently reduce `quantity` below held stock.
-- **Recommended Minimal Fix (SQL hotfix, not yet applied):** Add a `BEFORE UPDATE` trigger on `public.listings` and `public.listing_variants` blocking `NEW.reserved_quantity IS DISTINCT FROM OLD.reserved_quantity` when invoked directly by `authenticated` (allowing mutations only via `SECURITY DEFINER` RPCs / `service_role`, e.g., using a `pg_trigger_depth()` / session-context or `current_user` guard).
+## Final Security Retest Summary (Post-Hotfix `a7bda62`)
+- **Result:** **9/9 PASS, 0 FAIL** — Phase 6B.2 **CLOSED**.
+- **Triggers & `SECURITY INVOKER` Verification:** All 6 `BEFORE INSERT/UPDATE/DELETE` trigger events confirmed active across `public.listings` and `public.listing_variants`; `SECURITY INVOKER` effective-role check blocked all direct `authenticated` tampering (`42501`) while permitting authenticated callers of `SECURITY DEFINER` RPCs (`create_cart_orders_atomic`, `accept_offer_atomic`).
+- **Notable Defense-in-Depth Catch:** `update_listing_atomic` (which is `SECURITY DEFINER`) attempted to rename `option_values` on a reserved variant and was explicitly blocked by the new trigger with `42501: Cannot change variant options while reservations are active`.
+- **Cleanup:** Synthetic reservations released prior to deletion; exact 0-diff across all 9 tables verified.
