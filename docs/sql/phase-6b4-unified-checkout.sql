@@ -1,32 +1,50 @@
 -- =============================================================================
--- Buy-U Phase 6B.4 — Unified Multi-Seller Checkout Migration
+-- Buy-U Phase 6B.4 — Unified Multi-Seller Checkout Migration (Safety-Hardened)
 -- STATUS: PROPOSAL ONLY — DO NOT APPLY WITHOUT EXPLICIT OWNER APPROVAL
 -- TARGET PROJECT: duwwlcpdidrxkixvflag
 --
--- Architecture:
---   One Checkout (`public.checkout_sessions`) = One ToyyibPay Bill = One RM 1.00
---   FPX Fee = N Independent Internal Seller Orders (`public.orders` with
---   `checkout_session_id` FK, `fpx_fee_sen = 0`, `total_paid_sen = subtotal_sen`,
---   `commission_sen = 2%`, `seller_net_sen = subtotal - commission`, own 6-digit
---   buyer-only `pickup_pin`, collection area, handover & dispute lifecycle).
---
--- Safety & Legacy Guarantees:
---   1. Preserves ALL existing historical `orders` & `payments` rows untouched
---      (`checkout_session_id IS NULL`), including `BU-2611-0DB3` and `BU-2611-3CB12A`.
---   2. Prevents legacy RPCs (`claim_order_bill_slot`, `confirm_order_payment_atomic`,
---      `mark_order_payment_failed_atomic`) from individually billing or confirming
---      unified checkout child orders (`checkout_session_id IS NOT NULL`).
---   3. Enforces cross-table `transaction_ref` uniqueness across BOTH `payments`
---      and `checkout_sessions`.
---   4. Prevents `pg_cron` Job 1 (offer holds) & Job 2 (cart orders/checkouts) from
---      ever double-releasing reservations.
---   5. Preserves persistent attempt-token coordination, ambiguous bill recovery,
---      buyer-only PIN privacy, RLS, and `raw_callback` / token column restrictions.
+-- Safety & Integrity Guarantees:
+--   1. One Checkout (`public.checkout_sessions`) = One ToyyibPay Bill = One
+--      RM 1.00 FPX Fee = N Independent Internal Seller Orders (`public.orders`).
+--   2. Retires `authenticated` access to legacy `create_cart_orders_atomic` and
+--      `create_offer_order_atomic` while preserving legacy bill verification,
+--      retry, and reconciliation RPCs for historical `checkout_session_id IS NULL` rows.
+--   3. Concurrency-safe cross-table `transaction_ref` uniqueness via shared
+--      `public.payment_transaction_registry` (backfilled with historical refs).
+--   4. Authenticated checkout creation RPCs return ONLY explicitly safe columns
+--      (never exposing `raw_callback` or `bill_creation_attempt_token`).
+--   5. Zero global expiry sweeps inside checkout creation transactions; consistent
+--      lock ordering (`offers -> checkout_sessions -> orders -> listings -> variants`),
+--      exact stock release (no `GREATEST(0, ...)`), and post-lock deadline revalidation.
+--   6. Strict all-or-nothing pre-confirmation checks (bill readiness, non-null exact
+--      amount, all child orders pending/unpaid/same buyer/same source, subtotal sum
+--      & order_items total match).
+--   7. Protects `late_payment_review` from conflicting `transaction_ref` overwrites
+--      and preserves `expired` state during delayed bill finalization.
 -- =============================================================================
 
 BEGIN;
 
--- 1. Parent `public.checkout_sessions` table (one consolidated gateway bill per checkout)
+-- 1. Shared atomic transaction_ref uniqueness registry across legacy `payments` & `checkout_sessions`
+CREATE TABLE IF NOT EXISTS public.payment_transaction_registry (
+  transaction_ref text PRIMARY KEY,
+  owner_kind      text NOT NULL CHECK (owner_kind IN ('legacy_payment', 'checkout_session')),
+  owner_id        uuid NOT NULL,
+  created_at      timestamptz NOT NULL DEFAULT now()
+);
+
+REVOKE ALL ON public.payment_transaction_registry FROM PUBLIC, anon, authenticated;
+GRANT ALL ON public.payment_transaction_registry TO service_role;
+
+-- Backfill all existing historical payment transaction_refs (preserves BU-2611-0DB3, BU-2611-3CB12A, etc.)
+INSERT INTO public.payment_transaction_registry (transaction_ref, owner_kind, owner_id)
+SELECT p.transaction_ref, 'legacy_payment', p.order_id
+FROM public.payments p
+WHERE p.transaction_ref IS NOT NULL
+  AND length(trim(p.transaction_ref)) > 0
+ON CONFLICT (transaction_ref) DO NOTHING;
+
+-- 2. Parent `public.checkout_sessions` table (one consolidated gateway bill per checkout)
 CREATE TABLE IF NOT EXISTS public.checkout_sessions (
   id                          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   checkout_code               text NOT NULL UNIQUE,
@@ -100,7 +118,7 @@ GRANT SELECT (
 ) ON public.checkout_sessions TO authenticated;
 GRANT ALL ON public.checkout_sessions TO service_role;
 
--- 2. Additive link on `public.orders` (legacy orders keep `checkout_session_id IS NULL`)
+-- 3. Additive link on `public.orders` (legacy orders keep `checkout_session_id IS NULL`)
 ALTER TABLE public.orders
   ADD COLUMN IF NOT EXISTS checkout_session_id uuid REFERENCES public.checkout_sessions(id);
 
@@ -111,11 +129,23 @@ CREATE INDEX IF NOT EXISTS idx_orders_checkout_session_id
 -- Grant SELECT on the new non-sensitive FK column to authenticated (preserving pickup_pin revoke!)
 GRANT SELECT (checkout_session_id) ON public.orders TO authenticated;
 
--- 3. Unified atomic multi-seller cart checkout (1 checkout_session + N seller orders, ONE RM 1.00 FPX fee)
+-- 4. Unified atomic multi-seller cart checkout (returns ONLY explicitly safe columns;
+--    NO global expiry sweeps inside checkout transaction — handled by pg_cron Jobs 1 & 2)
+DROP FUNCTION IF EXISTS public.create_cart_checkout_atomic(text);
+
 CREATE OR REPLACE FUNCTION public.create_cart_checkout_atomic(
   p_idempotency_key text
 )
-RETURNS public.checkout_sessions
+RETURNS TABLE (
+  id                    uuid,
+  checkout_code         text,
+  source                text,
+  combined_subtotal_sen integer,
+  fpx_fee_sen           integer,
+  total_paid_sen        integer,
+  status                text,
+  payment_deadline      timestamptz
+)
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = public, pg_temp
@@ -155,19 +185,19 @@ BEGIN
   -- Serialize concurrent cart checkout submissions for the same buyer before table locks
   PERFORM pg_advisory_xact_lock(hashtextextended('buyu_cart_checkout:' || v_uid::text, 0));
 
-  -- Fast idempotent return
+  -- Fast idempotent return (explicitly safe fields only)
   SELECT * INTO v_existing
-  FROM public.checkout_sessions
-  WHERE buyer_id = v_uid
-    AND source = 'cart'
-    AND idempotency_key = v_key;
+  FROM public.checkout_sessions cs
+  WHERE cs.buyer_id = v_uid
+    AND cs.source = 'cart'
+    AND cs.idempotency_key = v_key;
   IF FOUND THEN
-    RETURN v_existing;
+    RETURN QUERY SELECT
+      v_existing.id, v_existing.checkout_code, v_existing.source,
+      v_existing.combined_subtotal_sen, v_existing.fpx_fee_sen,
+      v_existing.total_paid_sen, v_existing.status, v_existing.payment_deadline;
+    RETURN;
   END IF;
-
-  -- Sweep expired holds before locking stock
-  PERFORM public.release_expired_offer_reservations();
-  PERFORM public.release_expired_cart_orders();
 
   -- Lock & snapshot exact buyer cart item IDs (concurrent additions preserved untouched)
   SELECT array_agg(locked.id ORDER BY locked.listing_id, locked.variant_id NULLS FIRST, locked.id)
@@ -182,12 +212,16 @@ BEGIN
 
   -- Recheck idempotency after acquiring checkout locks
   SELECT * INTO v_existing
-  FROM public.checkout_sessions
-  WHERE buyer_id = v_uid
-    AND source = 'cart'
-    AND idempotency_key = v_key;
+  FROM public.checkout_sessions cs
+  WHERE cs.buyer_id = v_uid
+    AND cs.source = 'cart'
+    AND cs.idempotency_key = v_key;
   IF FOUND THEN
-    RETURN v_existing;
+    RETURN QUERY SELECT
+      v_existing.id, v_existing.checkout_code, v_existing.source,
+      v_existing.combined_subtotal_sen, v_existing.fpx_fee_sen,
+      v_existing.total_paid_sen, v_existing.status, v_existing.payment_deadline;
+    RETURN;
   END IF;
 
   IF v_cart_item_ids IS NULL OR cardinality(v_cart_item_ids) = 0 THEN
@@ -215,6 +249,9 @@ BEGIN
   )
   ORDER BY lv.id
   FOR UPDATE;
+
+  -- Refresh clock after lock acquisition
+  v_now := now();
 
   -- Validate every snapshotted cart item, reserve stock, and accumulate combined subtotal
   FOR v_ci IN
@@ -405,23 +442,38 @@ BEGIN
   WHERE user_id = v_uid
     AND id = ANY(v_cart_item_ids);
 
-  RETURN v_session;
+  RETURN QUERY SELECT
+    v_session.id, v_session.checkout_code, v_session.source,
+    v_session.combined_subtotal_sen, v_session.fpx_fee_sen,
+    v_session.total_paid_sen, v_session.status, v_session.payment_deadline;
 END;
 $$;
 
--- 4. Unified accepted-offer checkout (separate purchase, 1 checkout_session + 1 order, reuses 30m hold)
+-- 5. Unified accepted-offer checkout (returns ONLY explicitly safe columns;
+--    NO global expiry sweep; strict post-lock deadline revalidation)
+DROP FUNCTION IF EXISTS public.create_offer_checkout_atomic(uuid, text);
+
 CREATE OR REPLACE FUNCTION public.create_offer_checkout_atomic(
   p_offer_id uuid,
   p_idempotency_key text DEFAULT NULL
 )
-RETURNS public.checkout_sessions
+RETURNS TABLE (
+  id                    uuid,
+  checkout_code         text,
+  source                text,
+  combined_subtotal_sen integer,
+  fpx_fee_sen           integer,
+  total_paid_sen        integer,
+  status                text,
+  payment_deadline      timestamptz
+)
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = public, pg_temp
 AS $$
 DECLARE
   v_uid uuid := auth.uid();
-  v_now timestamptz := now();
+  v_now timestamptz;
   v_key text := trim(COALESCE(p_idempotency_key, 'offer-' || p_offer_id::text));
   v_offer public.offers;
   v_listing public.listings;
@@ -441,8 +493,7 @@ BEGIN
     RAISE EXCEPTION 'UNAUTHORIZED';
   END IF;
 
-  PERFORM public.release_expired_offer_reservations();
-
+  -- Lock order: offers -> checkout_sessions -> orders -> listings
   SELECT * INTO v_offer
   FROM public.offers
   WHERE id = p_offer_id
@@ -451,6 +502,9 @@ BEGIN
   IF NOT FOUND THEN
     RAISE EXCEPTION 'OFFER_NOT_FOUND';
   END IF;
+
+  -- Post-lock clock for authoritative deadline revalidation
+  v_now := now();
 
   IF v_offer.buyer_id <> v_uid THEN
     RAISE EXCEPTION 'FORBIDDEN_BUYER_ONLY';
@@ -465,12 +519,18 @@ BEGIN
     SELECT * INTO v_existing_order FROM public.orders WHERE id = v_offer.order_id;
     IF FOUND AND v_existing_order.checkout_session_id IS NOT NULL THEN
       SELECT * INTO v_session
-      FROM public.checkout_sessions
-      WHERE id = v_existing_order.checkout_session_id;
+      FROM public.checkout_sessions cs
+      WHERE cs.id = v_existing_order.checkout_session_id
+      FOR UPDATE;
+      v_now := now();
       IF FOUND
          AND v_session.status = 'pending_payment'
          AND v_now < v_session.payment_deadline THEN
-        RETURN v_session;
+        RETURN QUERY SELECT
+          v_session.id, v_session.checkout_code, v_session.source,
+          v_session.combined_subtotal_sen, v_session.fpx_fee_sen,
+          v_session.total_paid_sen, v_session.status, v_session.payment_deadline;
+        RETURN;
       END IF;
     END IF;
     RAISE EXCEPTION 'OFFER_ORDER_ALREADY_TERMINAL';
@@ -499,6 +559,12 @@ BEGIN
   FROM public.listings
   WHERE id = v_offer.listing_id
   FOR UPDATE;
+
+  -- Revalidate offer hold deadline after acquiring listing lock
+  v_now := now();
+  IF v_now >= v_offer.reservation_expires_at THEN
+    RAISE EXCEPTION 'OFFER_HOLD_EXPIRED';
+  END IF;
 
   IF NOT FOUND OR v_listing.seller_id <> v_offer.seller_id THEN
     RAISE EXCEPTION 'LISTING_OWNER_MISMATCH';
@@ -564,11 +630,15 @@ BEGIN
   SET order_id = v_order.id
   WHERE id = v_offer.id;
 
-  RETURN v_session;
+  RETURN QUERY SELECT
+    v_session.id, v_session.checkout_code, v_session.source,
+    v_session.combined_subtotal_sen, v_session.fpx_fee_sen,
+    v_session.total_paid_sen, v_session.status, v_session.payment_deadline;
 END;
 $$;
 
--- 5. Persistent attempt-token bill coordination on `public.checkout_sessions`
+-- 6. Persistent attempt-token bill coordination on `public.checkout_sessions`
+--    Preserves `expired` state if a delayed bill finalization arrives after expiry!
 CREATE OR REPLACE FUNCTION public.claim_checkout_bill_slot(
   p_checkout_session_id uuid
 )
@@ -584,7 +654,7 @@ SET search_path = public, pg_temp
 AS $$
 DECLARE
   v_session public.checkout_sessions;
-  v_now timestamptz := now();
+  v_now timestamptz;
   v_token uuid;
   v_placeholder text;
   v_has_valid_bill boolean := false;
@@ -598,6 +668,9 @@ BEGIN
     RETURN QUERY SELECT 'checkout_not_found'::text, NULL::text, NULL::text, NULL::uuid;
     RETURN;
   END IF;
+
+  -- Post-lock deadline revalidation
+  v_now := now();
 
   IF v_session.paid_at IS NOT NULL OR v_session.status = 'paid' THEN
     RETURN QUERY SELECT 'already_paid'::text, v_session.bill_code, v_session.bill_url, NULL::uuid;
@@ -654,7 +727,6 @@ BEGIN
     RETURN;
   END IF;
 
-  -- Only create a new attempt when not_started OR definite creation failure with no valid bill
   IF v_session.bill_creation_state IN ('not_started', 'failed')
      AND (v_session.bill_code IS NULL OR left(v_session.bill_code, 9) = 'creating:') THEN
     v_token := gen_random_uuid();
@@ -691,8 +763,9 @@ SECURITY DEFINER
 SET search_path = public, pg_temp
 AS $$
 DECLARE
-  v_now timestamptz := now();
+  v_now timestamptz;
   v_session public.checkout_sessions;
+  v_is_expired boolean := false;
 BEGIN
   IF p_attempt_token IS NULL THEN
     RETURN 'missing_attempt_token';
@@ -707,7 +780,10 @@ BEGIN
     RETURN 'missing_slot';
   END IF;
 
-  IF v_session.payment_status IN ('paid', 'late_payment_review') THEN
+  v_now := now();
+
+  IF v_session.status = 'paid'
+     OR v_session.payment_status IN ('paid', 'late_payment_review') THEN
     RETURN 'ignored_terminal';
   END IF;
 
@@ -715,24 +791,38 @@ BEGIN
     RETURN 'stale_attempt';
   END IF;
 
+  v_is_expired := (
+    v_session.status IN ('expired', 'cancelled')
+    OR v_session.payment_status = 'expired'
+    OR v_now >= v_session.payment_deadline
+  );
+
   IF p_outcome = 'ready' AND p_bill_code IS NOT NULL AND p_bill_url IS NOT NULL THEN
     IF v_session.bill_creation_state NOT IN ('creating', 'ambiguous') THEN
       RETURN 'ignored_state';
     END IF;
 
+    -- Record the real bill_code for reconciliation while STRICTLY preserving expired/cancelled state
     UPDATE public.checkout_sessions
     SET bill_code = p_bill_code,
         bill_url = p_bill_url,
-        payment_status = 'pending',
+        payment_status = CASE WHEN v_is_expired THEN 'expired' ELSE 'pending' END,
         bill_creation_state = 'ready',
         bill_creation_attempt_token = NULL,
         updated_at = v_now
     WHERE id = v_session.id;
 
+    IF v_is_expired THEN
+      RETURN 'recorded_expired';
+    END IF;
     IF v_session.bill_creation_state = 'ambiguous' THEN
       RETURN 'recovered_ready';
     END IF;
     RETURN 'ready';
+  END IF;
+
+  IF v_is_expired THEN
+    RETURN 'ignored_terminal';
   END IF;
 
   IF v_session.bill_creation_state <> 'creating' THEN
@@ -757,7 +847,9 @@ BEGIN
 END;
 $$;
 
--- 6. Atomic consolidated payment confirmation (ALL-OR-NOTHING across all child seller orders)
+-- 7. Atomic consolidated payment confirmation (ALL-OR-NOTHING across all child orders;
+--    atomic cross-table transaction_ref registry; strict child & subtotal invariants;
+--    late_payment_review conflict protection)
 --    Lock order: offers (if offer) -> checkout_sessions -> child orders (ORDER BY id)
 --                -> listings (ORDER BY id) -> listing_variants (ORDER BY id).
 CREATE OR REPLACE FUNCTION public.confirm_checkout_payment_atomic(
@@ -780,13 +872,20 @@ DECLARE
   v_item RECORD;
   v_listing public.listings;
   v_variant public.listing_variants;
-  v_now timestamptz := now();
+  v_now timestamptz;
   v_pin text;
   v_offer_released boolean := false;
-  v_child_count integer := 0;
+  v_total_children integer := 0;
+  v_invalid_children integer := 0;
+  v_child_subtotal_sum integer := 0;
+  v_items_total_sum integer := 0;
 BEGIN
   IF p_transaction_ref IS NULL OR length(trim(p_transaction_ref)) = 0 THEN
     RAISE EXCEPTION 'MISSING_TRANSACTION_REF';
+  END IF;
+
+  IF p_amount_sen IS NULL OR p_amount_sen <= 0 THEN
+    RAISE EXCEPTION 'AMOUNT_MISMATCH';
   END IF;
 
   -- Non-locking peek so `offers` is locked BEFORE `checkout_sessions`/`orders` (deadlock-free with Job 1)
@@ -808,12 +907,6 @@ BEGIN
     IF NOT FOUND THEN
       RAISE EXCEPTION 'LINKED_OFFER_NOT_FOUND';
     END IF;
-
-    IF v_offer.reservation_released_at IS NOT NULL
-       OR v_offer.status <> 'accepted'
-       OR (v_offer.reservation_expires_at IS NOT NULL AND v_now >= v_offer.reservation_expires_at) THEN
-      v_offer_released := true;
-    END IF;
   END IF;
 
   SELECT * INTO v_session
@@ -825,24 +918,46 @@ BEGIN
     RAISE EXCEPTION 'CHECKOUT_NOT_FOUND';
   END IF;
 
-  IF v_session.bill_code IS DISTINCT FROM p_bill_code THEN
-    RAISE EXCEPTION 'PAYMENT_BILL_NOT_FOUND';
+  -- Refresh clock AFTER acquiring all parent locks
+  v_now := now();
+
+  IF v_source = 'offer' THEN
+    IF v_offer.reservation_released_at IS NOT NULL
+       OR v_offer.status <> 'accepted'
+       OR (v_offer.reservation_expires_at IS NOT NULL AND v_now >= v_offer.reservation_expires_at) THEN
+      v_offer_released := true;
+    END IF;
   END IF;
 
-  IF p_amount_sen <> v_session.total_paid_sen THEN
+  -- Validate bill readiness & exact bill_code match
+  IF v_session.bill_creation_state <> 'ready'
+     OR v_session.bill_code IS NULL
+     OR left(v_session.bill_code, 9) = 'creating:'
+     OR v_session.bill_code <> p_bill_code THEN
+    RAISE EXCEPTION 'PAYMENT_BILL_NOT_READY';
+  END IF;
+
+  IF p_amount_sen <> v_session.total_paid_sen
+     OR v_session.total_paid_sen <> (v_session.combined_subtotal_sen + v_session.fpx_fee_sen) THEN
     RAISE EXCEPTION 'AMOUNT_MISMATCH';
   END IF;
 
-  -- Cross-table transaction_ref uniqueness against legacy `public.payments`
-  IF EXISTS (
+  -- Atomic cross-table `transaction_ref` claim (concurrency-safe via PRIMARY KEY)
+  INSERT INTO public.payment_transaction_registry (transaction_ref, owner_kind, owner_id)
+  VALUES (p_transaction_ref, 'checkout_session', v_session.id)
+  ON CONFLICT (transaction_ref) DO NOTHING;
+
+  IF NOT EXISTS (
     SELECT 1
-    FROM public.payments
+    FROM public.payment_transaction_registry
     WHERE transaction_ref = p_transaction_ref
+      AND owner_kind = 'checkout_session'
+      AND owner_id = v_session.id
   ) THEN
     RAISE EXCEPTION 'TRANSACTION_REF_REUSED' USING ERRCODE = '23505';
   END IF;
 
-  -- Duplicate callback check
+  -- Duplicate callback check on already-paid checkout
   IF v_session.paid_at IS NOT NULL OR v_session.status = 'paid' THEN
     IF v_session.transaction_ref IS NULL OR v_session.transaction_ref <> p_transaction_ref THEN
       RAISE EXCEPTION 'TRANSACTION_REF_CONFLICT';
@@ -850,13 +965,15 @@ BEGIN
     RETURN 'already_paid';
   END IF;
 
-  -- Late payment after expiry/released hold -> reconciliation ONLY (zero stock deduction)
+  -- Late payment after expiry/released hold -> reconciliation ONLY (never overwrite prior late_payment_review ref!)
   IF v_offer_released
      OR v_session.status IN ('expired', 'cancelled')
      OR v_now >= v_session.payment_deadline THEN
-    IF v_session.payment_status = 'late_payment_review'
-       AND v_session.transaction_ref = p_transaction_ref THEN
-      RETURN 'late_payment_reconciliation';
+    IF v_session.payment_status = 'late_payment_review' THEN
+      IF v_session.transaction_ref = p_transaction_ref THEN
+        RETURN 'late_payment_reconciliation';
+      END IF;
+      RAISE EXCEPTION 'LATE_PAYMENT_TRANSACTION_REF_CONFLICT';
     END IF;
 
     UPDATE public.checkout_sessions
@@ -874,21 +991,44 @@ BEGIN
     RAISE EXCEPTION 'CHECKOUT_NOT_PAYABLE';
   END IF;
 
-  -- Lock ALL child seller orders deterministically
+  -- Lock ALL child seller orders deterministically and validate EVERY child invariant
   PERFORM 1
   FROM public.orders
   WHERE checkout_session_id = v_session.id
   ORDER BY id
   FOR UPDATE;
 
-  SELECT count(*) INTO v_child_count
+  SELECT
+    count(*)::integer,
+    count(*) FILTER (
+      WHERE status <> 'pending_payment'
+         OR paid_at IS NOT NULL
+         OR buyer_id <> v_session.buyer_id
+         OR source <> v_session.source
+         OR fpx_fee_sen <> 0
+         OR total_paid_sen <> subtotal_sen
+    )::integer,
+    COALESCE(SUM(subtotal_sen), 0)::integer
+  INTO v_total_children, v_invalid_children, v_child_subtotal_sum
   FROM public.orders
-  WHERE checkout_session_id = v_session.id
-    AND status = 'pending_payment'
-    AND paid_at IS NULL;
+  WHERE checkout_session_id = v_session.id;
 
-  IF v_child_count = 0 THEN
+  IF v_total_children = 0 OR v_invalid_children > 0 THEN
     RAISE EXCEPTION 'CHECKOUT_CHILD_ORDERS_INVALID';
+  END IF;
+
+  IF v_child_subtotal_sum <> v_session.combined_subtotal_sen THEN
+    RAISE EXCEPTION 'CHECKOUT_SUBTOTAL_MISMATCH';
+  END IF;
+
+  SELECT COALESCE(SUM(oi.unit_sen * oi.quantity), 0)::integer
+  INTO v_items_total_sum
+  FROM public.order_items oi
+  JOIN public.orders ord ON ord.id = oi.order_id
+  WHERE ord.checkout_session_id = v_session.id;
+
+  IF v_items_total_sum <> v_session.combined_subtotal_sen THEN
+    RAISE EXCEPTION 'CHECKOUT_ITEMS_TOTAL_MISMATCH';
   END IF;
 
   -- Pre-lock ALL listings BEFORE variants across all child orders (deadlock-free)
@@ -992,7 +1132,7 @@ BEGIN
 END;
 $$;
 
--- 7. Atomic failed-payment guard on `public.checkout_sessions` (preserves valid bill_code)
+-- 8. Atomic failed-payment guard on `public.checkout_sessions` (preserves valid bill_code)
 CREATE OR REPLACE FUNCTION public.mark_checkout_payment_failed_atomic(
   p_checkout_session_id uuid,
   p_bill_code text,
@@ -1021,8 +1161,8 @@ BEGIN
   END IF;
 
   IF v_session.paid_at IS NOT NULL
-     OR v_session.status = 'paid'
-     OR v_session.payment_status IN ('paid', 'late_payment_review') THEN
+     OR v_session.status IN ('paid', 'expired', 'cancelled')
+     OR v_session.payment_status IN ('paid', 'late_payment_review', 'expired') THEN
     RETURN 'ignored_terminal';
   END IF;
 
@@ -1040,8 +1180,8 @@ BEGIN
 END;
 $$;
 
--- 8. Harden legacy single-order RPCs so they NEVER bill, confirm, or fail unified child orders
---    AND enforce cross-table `transaction_ref` uniqueness against `checkout_sessions`.
+-- 9. Harden legacy single-order RPCs: block unified child orders (`checkout_session_id IS NOT NULL`),
+--    enforce atomic `payment_transaction_registry` uniqueness, and protect `late_payment_review`.
 CREATE OR REPLACE FUNCTION public.claim_order_bill_slot(
   p_order_id uuid
 )
@@ -1058,7 +1198,7 @@ AS $$
 DECLARE
   v_order public.orders;
   v_payment public.payments;
-  v_now timestamptz := now();
+  v_now timestamptz;
   v_token uuid;
   v_placeholder text;
   v_has_valid_bill boolean := false;
@@ -1077,6 +1217,8 @@ BEGIN
     RETURN QUERY SELECT 'use_checkout_session'::text, NULL::text, NULL::text, NULL::uuid;
     RETURN;
   END IF;
+
+  v_now := now();
 
   IF v_order.paid_at IS NOT NULL
      OR v_order.status IN ('paid', 'ready_for_pickup', 'handed_over', 'completed') THEN
@@ -1218,8 +1360,8 @@ BEGIN
   END IF;
 
   IF v_order.paid_at IS NOT NULL
-     OR v_order.status IN ('paid', 'ready_for_pickup', 'handed_over', 'completed')
-     OR v_payment.status IN ('paid', 'late_payment_review') THEN
+     OR v_order.status IN ('paid', 'ready_for_pickup', 'handed_over', 'completed', 'expired', 'cancelled')
+     OR v_payment.status IN ('paid', 'late_payment_review', 'expired') THEN
     RETURN 'ignored_terminal';
   END IF;
 
@@ -1258,12 +1400,16 @@ DECLARE
   v_item RECORD;
   v_listing public.listings;
   v_variant public.listing_variants;
-  v_now timestamptz := now();
+  v_now timestamptz;
   v_pin text;
   v_offer_released boolean := false;
 BEGIN
   IF p_transaction_ref IS NULL OR length(trim(p_transaction_ref)) = 0 THEN
     RAISE EXCEPTION 'MISSING_TRANSACTION_REF';
+  END IF;
+
+  IF p_amount_sen IS NULL OR p_amount_sen <= 0 THEN
+    RAISE EXCEPTION 'AMOUNT_MISMATCH';
   END IF;
 
   SELECT source, checkout_session_id INTO v_source, v_checkout_session_id
@@ -1274,18 +1420,8 @@ BEGIN
     RAISE EXCEPTION 'ORDER_NOT_FOUND';
   END IF;
 
-  -- Block legacy per-order confirmation on unified checkout child orders
   IF v_checkout_session_id IS NOT NULL THEN
     RAISE EXCEPTION 'UNIFIED_CHECKOUT_USE_SESSION_RPC';
-  END IF;
-
-  -- Cross-table transaction_ref uniqueness against unified `checkout_sessions`
-  IF EXISTS (
-    SELECT 1
-    FROM public.checkout_sessions
-    WHERE transaction_ref = p_transaction_ref
-  ) THEN
-    RAISE EXCEPTION 'TRANSACTION_REF_REUSED' USING ERRCODE = '23505';
   END IF;
 
   IF v_source = 'offer' THEN
@@ -1296,12 +1432,6 @@ BEGIN
 
     IF NOT FOUND THEN
       RAISE EXCEPTION 'LINKED_OFFER_NOT_FOUND';
-    END IF;
-
-    IF v_offer.reservation_released_at IS NOT NULL
-       OR v_offer.status <> 'accepted'
-       OR (v_offer.reservation_expires_at IS NOT NULL AND v_now >= v_offer.reservation_expires_at) THEN
-      v_offer_released := true;
     END IF;
   END IF;
 
@@ -1324,8 +1454,33 @@ BEGIN
     RAISE EXCEPTION 'PAYMENT_BILL_NOT_FOUND';
   END IF;
 
+  v_now := now();
+
+  IF v_source = 'offer' THEN
+    IF v_offer.reservation_released_at IS NOT NULL
+       OR v_offer.status <> 'accepted'
+       OR (v_offer.reservation_expires_at IS NOT NULL AND v_now >= v_offer.reservation_expires_at) THEN
+      v_offer_released := true;
+    END IF;
+  END IF;
+
   IF p_amount_sen <> v_order.total_paid_sen OR p_amount_sen <> v_payment.amount_sen THEN
     RAISE EXCEPTION 'AMOUNT_MISMATCH';
+  END IF;
+
+  -- Atomic cross-table `transaction_ref` claim (concurrency-safe via PRIMARY KEY)
+  INSERT INTO public.payment_transaction_registry (transaction_ref, owner_kind, owner_id)
+  VALUES (p_transaction_ref, 'legacy_payment', v_order.id)
+  ON CONFLICT (transaction_ref) DO NOTHING;
+
+  IF NOT EXISTS (
+    SELECT 1
+    FROM public.payment_transaction_registry
+    WHERE transaction_ref = p_transaction_ref
+      AND owner_kind = 'legacy_payment'
+      AND owner_id = v_order.id
+  ) THEN
+    RAISE EXCEPTION 'TRANSACTION_REF_REUSED' USING ERRCODE = '23505';
   END IF;
 
   IF v_order.paid_at IS NOT NULL
@@ -1339,9 +1494,11 @@ BEGIN
   IF v_offer_released
      OR v_order.status IN ('expired', 'cancelled')
      OR (v_order.payment_deadline IS NOT NULL AND v_now >= v_order.payment_deadline) THEN
-    IF v_payment.status = 'late_payment_review'
-       AND v_payment.transaction_ref = p_transaction_ref THEN
-      RETURN 'late_payment_reconciliation';
+    IF v_payment.status = 'late_payment_review' THEN
+      IF v_payment.transaction_ref = p_transaction_ref THEN
+        RETURN 'late_payment_reconciliation';
+      END IF;
+      RAISE EXCEPTION 'LATE_PAYMENT_TRANSACTION_REF_CONFLICT';
     END IF;
 
     UPDATE public.payments
@@ -1429,9 +1586,9 @@ BEGIN
 END;
 $$;
 
--- 9. Update `pg_cron` Job 2 (`release_expired_cart_orders`) to handle BOTH legacy standalone
---    cart orders (`checkout_session_id IS NULL`) AND unified cart `checkout_sessions` atomically.
---    Strictly `source = 'cart'` so Job 1 (`release_expired_offer_reservations`) and Job 2 NEVER overlap.
+-- 10. Update `pg_cron` Job 2 (`release_expired_cart_orders`): strictly `source = 'cart'`
+--     Part A: legacy standalone cart orders (`checkout_session_id IS NULL`)
+--     Part B: unified cart `checkout_sessions` (whole-checkout expiry + exact stock release)
 CREATE OR REPLACE FUNCTION public.release_expired_cart_orders()
 RETURNS integer
 LANGUAGE plpgsql
@@ -1623,8 +1780,8 @@ BEGIN
 END;
 $$;
 
--- 10. Update `pg_cron` Job 1 (`release_expired_offer_reservations`) so expired offer
---     holds ALSO expire their linked unified `checkout_sessions` row atomically.
+-- 11. Update `pg_cron` Job 1 (`release_expired_offer_reservations`): strictly `offer` holds;
+--     consistent lock order (`offers -> checkout_sessions -> orders -> listings`) + exact release (NO GREATEST)
 CREATE OR REPLACE FUNCTION public.release_expired_offer_reservations()
 RETURNS integer
 LANGUAGE plpgsql
@@ -1634,6 +1791,7 @@ AS $$
 DECLARE
   v_now timestamptz := now();
   v_rec RECORD;
+  v_listing public.listings;
   v_released integer := 0;
   v_checkout_session_id uuid;
 BEGIN
@@ -1659,101 +1817,136 @@ BEGIN
             OR ord.status IN ('paid', 'ready_for_pickup', 'handed_over', 'completed')
           )
       )
+    ORDER BY o.id
     FOR UPDATE OF o SKIP LOCKED
   LOOP
-    v_checkout_session_id := NULL;
+    BEGIN
+      v_checkout_session_id := NULL;
 
-    IF v_rec.order_id IS NOT NULL THEN
-      SELECT checkout_session_id INTO v_checkout_session_id
-      FROM public.orders
-      WHERE id = v_rec.order_id
+      IF v_rec.order_id IS NOT NULL THEN
+        -- Non-locking peek so we lock `checkout_sessions` BEFORE `orders` (matches confirm_checkout_payment_atomic!)
+        SELECT checkout_session_id INTO v_checkout_session_id
+        FROM public.orders
+        WHERE id = v_rec.order_id;
+
+        IF v_checkout_session_id IS NOT NULL THEN
+          PERFORM 1
+          FROM public.checkout_sessions
+          WHERE id = v_checkout_session_id
+          FOR UPDATE;
+        END IF;
+
+        PERFORM 1
+        FROM public.orders
+        WHERE id = v_rec.order_id
+        FOR UPDATE;
+      END IF;
+
+      SELECT * INTO v_listing
+      FROM public.listings
+      WHERE id = v_rec.listing_id
       FOR UPDATE;
 
-      UPDATE public.orders
-      SET status = 'expired',
-          updated_at = v_now
-      WHERE id = v_rec.order_id
-        AND status = 'pending_payment'
-        AND paid_at IS NULL;
+      IF NOT FOUND OR v_listing.reserved_quantity < 1 THEN
+        RAISE EXCEPTION 'INSUFFICIENT_LISTING_RESERVATION';
+      END IF;
 
-      IF v_checkout_session_id IS NOT NULL THEN
-        UPDATE public.checkout_sessions
+      UPDATE public.listings
+      SET reserved_quantity = reserved_quantity - 1,
+          updated_at = v_now
+      WHERE id = v_rec.listing_id;
+
+      IF v_rec.order_id IS NOT NULL THEN
+        UPDATE public.orders
         SET status = 'expired',
-            payment_status = CASE
-              WHEN payment_status IN ('paid', 'late_payment_review') THEN payment_status
-              ELSE 'expired'
-            END,
             updated_at = v_now
-        WHERE id = v_checkout_session_id
+        WHERE id = v_rec.order_id
           AND status = 'pending_payment'
           AND paid_at IS NULL;
+
+        IF v_checkout_session_id IS NOT NULL THEN
+          UPDATE public.checkout_sessions
+          SET status = 'expired',
+              payment_status = CASE
+                WHEN payment_status IN ('paid', 'late_payment_review') THEN payment_status
+                ELSE 'expired'
+              END,
+              updated_at = v_now
+          WHERE id = v_checkout_session_id
+            AND status = 'pending_payment'
+            AND paid_at IS NULL;
+        END IF;
       END IF;
-    END IF;
 
-    UPDATE public.listings
-    SET reserved_quantity = GREATEST(0, reserved_quantity - 1),
-        updated_at = v_now
-    WHERE id = v_rec.listing_id;
+      UPDATE public.offers
+      SET status = 'expired',
+          reservation_released_at = v_now,
+          updated_at = v_now
+      WHERE id = v_rec.id;
 
-    UPDATE public.offers
-    SET status = 'expired',
-        reservation_released_at = v_now,
-        updated_at = v_now
-    WHERE id = v_rec.id;
-
-    v_released := v_released + 1;
+      v_released := v_released + 1;
+    EXCEPTION WHEN OTHERS THEN
+      RAISE WARNING 'release_expired_offer_reservations skipped offer % due to %', v_rec.id, SQLERRM;
+    END;
   END LOOP;
 
   RETURN v_released;
 END;
 $$;
 
-REVOKE ALL ON FUNCTION public.create_cart_checkout_atomic(text) FROM PUBLIC;
+-- 12. Explicit RPC Grants & Retirement of Legacy Authenticated Order-Creation RPCs
+REVOKE ALL ON FUNCTION public.create_cart_orders_atomic(text) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.create_offer_order_atomic(uuid, text) FROM PUBLIC, anon, authenticated;
+
+REVOKE ALL ON FUNCTION public.create_cart_checkout_atomic(text) FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION public.create_cart_checkout_atomic(text) TO authenticated;
 
-REVOKE ALL ON FUNCTION public.create_offer_checkout_atomic(uuid, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.create_offer_checkout_atomic(uuid, text) FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION public.create_offer_checkout_atomic(uuid, text) TO authenticated;
 
-REVOKE ALL ON FUNCTION public.claim_checkout_bill_slot(uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.claim_checkout_bill_slot(uuid) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.claim_checkout_bill_slot(uuid) TO service_role;
 
-REVOKE ALL ON FUNCTION public.finalize_checkout_bill_slot(uuid, uuid, text, text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.finalize_checkout_bill_slot(uuid, uuid, text, text, text) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.finalize_checkout_bill_slot(uuid, uuid, text, text, text) TO service_role;
 
-REVOKE ALL ON FUNCTION public.confirm_checkout_payment_atomic(uuid, text, text, integer, jsonb) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.confirm_checkout_payment_atomic(uuid, text, text, integer, jsonb) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.confirm_checkout_payment_atomic(uuid, text, text, integer, jsonb) TO service_role;
 
-REVOKE ALL ON FUNCTION public.mark_checkout_payment_failed_atomic(uuid, text, jsonb) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.mark_checkout_payment_failed_atomic(uuid, text, jsonb) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.mark_checkout_payment_failed_atomic(uuid, text, jsonb) TO service_role;
 
-REVOKE ALL ON FUNCTION public.claim_order_bill_slot(uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.claim_order_bill_slot(uuid) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.claim_order_bill_slot(uuid) TO service_role;
 
-REVOKE ALL ON FUNCTION public.mark_order_payment_failed_atomic(uuid, text, jsonb) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.mark_order_payment_failed_atomic(uuid, text, jsonb) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.mark_order_payment_failed_atomic(uuid, text, jsonb) TO service_role;
 
-REVOKE ALL ON FUNCTION public.confirm_order_payment_atomic(uuid, text, text, integer, jsonb) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.confirm_order_payment_atomic(uuid, text, text, integer, jsonb) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.confirm_order_payment_atomic(uuid, text, text, integer, jsonb) TO service_role;
 
-REVOKE ALL ON FUNCTION public.release_expired_cart_orders() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.release_expired_cart_orders() FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.release_expired_cart_orders() TO service_role;
 
-REVOKE ALL ON FUNCTION public.release_expired_offer_reservations() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.release_expired_offer_reservations() FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.release_expired_offer_reservations() TO service_role;
 
 COMMIT;
 
 -- =============================================================================
--- ROLLBACK SQL (if ever needed):
---   BEGIN;
---   DROP FUNCTION IF EXISTS public.mark_checkout_payment_failed_atomic(uuid, text, jsonb);
---   DROP FUNCTION IF EXISTS public.confirm_checkout_payment_atomic(uuid, text, text, integer, jsonb);
---   DROP FUNCTION IF EXISTS public.finalize_checkout_bill_slot(uuid, uuid, text, text, text);
---   DROP FUNCTION IF EXISTS public.claim_checkout_bill_slot(uuid);
---   DROP FUNCTION IF EXISTS public.create_offer_checkout_atomic(uuid, text);
---   DROP FUNCTION IF EXISTS public.create_cart_checkout_atomic(text);
---   DROP INDEX IF EXISTS public.idx_orders_checkout_session_id;
---   ALTER TABLE public.orders DROP COLUMN IF EXISTS checkout_session_id;
---   DROP TABLE IF EXISTS public.checkout_sessions;
---   COMMIT;
+-- SAFE NON-DESTRUCTIVE ROLLBACK STRATEGY (preserves ALL payment history):
+--   Step 1: Re-enable legacy authenticated checkout RPCs & disable unified creation:
+--     BEGIN;
+--     REVOKE ALL ON FUNCTION public.create_cart_checkout_atomic(text) FROM authenticated;
+--     REVOKE ALL ON FUNCTION public.create_offer_checkout_atomic(uuid, text) FROM authenticated;
+--     GRANT EXECUTE ON FUNCTION public.create_cart_orders_atomic(text) TO authenticated;
+--     GRANT EXECUTE ON FUNCTION public.create_offer_order_atomic(uuid, text) TO authenticated;
+--     COMMIT;
+--   Step 2: Restore prior function bodies from git commits:
+--     - `docs/sql/phase-6a-order-payment-foundation.sql` (`confirm_order_payment_atomic`, `release_expired_cart_orders`)
+--     - `docs/sql/phase-6b3-bill-lifecycle-hardening.sql` (`claim_order_bill_slot`, `mark_order_payment_failed_atomic`)
+--     - `docs/sql/phase-5b-atomic-bargaining.sql` (`release_expired_offer_reservations`)
+--   Step 3: DO NOT drop `public.checkout_sessions`, `public.payment_transaction_registry`,
+--           or `orders.checkout_session_id` if any unified checkout records exist — retain
+--           them read-only for audit & refund reconciliation.
 -- =============================================================================

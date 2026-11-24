@@ -162,14 +162,18 @@ export async function startCartToyyibPayCheckoutAction(input: {
     { p_idempotency_key: key }
   );
 
-  if (rpcErr || !checkoutRow) {
+  const firstSession = (
+    Array.isArray(checkoutRow) ? checkoutRow[0] : checkoutRow
+  ) as EnsureCheckoutSessionInput | undefined;
+
+  if (rpcErr || !firstSession?.id) {
     return {
       ok: false,
       error: mapCheckoutRpcError(rpcErr?.message ?? "CART_EMPTY"),
     };
   }
 
-  const typedSession = checkoutRow as EnsureCheckoutSessionInput;
+  const typedSession = firstSession;
 
   const { data: childOrders } = await supabase
     .from("orders")
@@ -414,14 +418,18 @@ export async function startOfferToyyibPayCheckoutAction(
     }
   );
 
-  if (rpcErr || !checkoutRow) {
+  const firstSession = (
+    Array.isArray(checkoutRow) ? checkoutRow[0] : checkoutRow
+  ) as EnsureCheckoutSessionInput | undefined;
+
+  if (rpcErr || !firstSession?.id) {
     return {
       ok: false,
       error: mapCheckoutRpcError(rpcErr?.message ?? "OFFER_HOLD_EXPIRED"),
     };
   }
 
-  const typedSession = checkoutRow as EnsureCheckoutSessionInput;
+  const typedSession = firstSession;
   const buyerName =
     session.profile?.display_name?.trim() ||
     session.profile?.full_name?.trim() ||

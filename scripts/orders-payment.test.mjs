@@ -1092,28 +1092,60 @@ test("Phase 6B.4 unified checkout pricing, SQL guards, cross-table tx_ref unique
   assert.equal(ordB?.financials.sellerNetSen, 1960);
   assert.equal((ordA?.financials.commissionSen ?? 0) + (ordB?.financials.commissionSen ?? 0), 70);
 
-  // SQL architecture, legacy-RPC guards, cross-table tx_ref uniqueness, cron isolation, and RLS privacy
+  // SQL static contract tests (local file verification — NOT live PostgreSQL execution)
   const sql = fs.readFileSync(
     path.resolve(root, "docs/sql/phase-6b4-unified-checkout.sql"),
     "utf8"
   );
+  assert.ok(sql.includes("CREATE TABLE IF NOT EXISTS public.payment_transaction_registry"));
+  assert.ok(sql.includes("INSERT INTO public.payment_transaction_registry (transaction_ref, owner_kind, owner_id)"));
   assert.ok(sql.includes("CREATE TABLE IF NOT EXISTS public.checkout_sessions"));
   assert.ok(sql.includes("ALTER TABLE public.checkout_sessions ENABLE ROW LEVEL SECURITY"));
   assert.ok(sql.includes("GRANT SELECT (checkout_session_id) ON public.orders TO authenticated"));
-  assert.ok(sql.includes("CREATE OR REPLACE FUNCTION public.create_cart_checkout_atomic"));
-  assert.ok(sql.includes("CREATE OR REPLACE FUNCTION public.create_offer_checkout_atomic"));
-  assert.ok(sql.includes("CREATE OR REPLACE FUNCTION public.claim_checkout_bill_slot"));
-  assert.ok(sql.includes("CREATE OR REPLACE FUNCTION public.finalize_checkout_bill_slot"));
-  assert.ok(sql.includes("CREATE OR REPLACE FUNCTION public.confirm_checkout_payment_atomic"));
-  assert.ok(sql.includes("CREATE OR REPLACE FUNCTION public.mark_checkout_payment_failed_atomic"));
-  // Legacy RPC guards block unified child orders
+
+  // 1. Legacy creation RPCs retired for authenticated/anon/PUBLIC
+  assert.ok(sql.includes("REVOKE ALL ON FUNCTION public.create_cart_orders_atomic(text) FROM PUBLIC, anon, authenticated;"));
+  assert.ok(sql.includes("REVOKE ALL ON FUNCTION public.create_offer_order_atomic(uuid, text) FROM PUBLIC, anon, authenticated;"));
+
+  // 2. Atomic cross-table transaction_ref registry used in BOTH unified and legacy confirmation RPCs
+  const confirmUnifiedFn = extractSqlFunction(sql, "confirm_checkout_payment_atomic");
+  const confirmLegacyFn = extractSqlFunction(sql, "confirm_order_payment_atomic");
+  assert.ok(confirmUnifiedFn.includes("INSERT INTO public.payment_transaction_registry"));
+  assert.ok(confirmLegacyFn.includes("INSERT INTO public.payment_transaction_registry"));
+
+  // 3. Strict pre-confirmation invariants & late_payment_review conflict protection
+  assert.ok(confirmUnifiedFn.includes("PAYMENT_BILL_NOT_READY"));
+  assert.ok(confirmUnifiedFn.includes("CHECKOUT_CHILD_ORDERS_INVALID"));
+  assert.ok(confirmUnifiedFn.includes("CHECKOUT_SUBTOTAL_MISMATCH"));
+  assert.ok(confirmUnifiedFn.includes("CHECKOUT_ITEMS_TOTAL_MISMATCH"));
+  assert.ok(confirmUnifiedFn.includes("LATE_PAYMENT_TRANSACTION_REF_CONFLICT"));
+  assert.ok(confirmLegacyFn.includes("LATE_PAYMENT_TRANSACTION_REF_CONFLICT"));
+
+  // 4. Safe explicit RETURNS TABLE on authenticated checkout creation RPCs (no full-row raw_callback/token exposure)
+  const createCartFn = extractSqlFunction(sql, "create_cart_checkout_atomic");
+  const createOfferFn = extractSqlFunction(sql, "create_offer_checkout_atomic");
+  assert.ok(createCartFn.includes("RETURNS TABLE ("));
+  assert.ok(createOfferFn.includes("RETURNS TABLE ("));
+  assert.equal(createCartFn.includes("RETURNS public.checkout_sessions"), false);
+  assert.equal(createOfferFn.includes("RETURNS public.checkout_sessions"), false);
+
+  // 5. No global expiry sweeps inside checkout creation RPCs + exact stock release (no GREATEST) in offer sweeper
+  assert.equal(createCartFn.includes("release_expired_cart_orders"), false);
+  assert.equal(createCartFn.includes("release_expired_offer_reservations"), false);
+  assert.equal(createOfferFn.includes("release_expired_offer_reservations"), false);
+  const offerSweepFn = extractSqlFunction(sql, "release_expired_offer_reservations");
+  assert.equal(offerSweepFn.includes("GREATEST(0"), false);
+  assert.ok(offerSweepFn.includes("INSUFFICIENT_LISTING_RESERVATION"));
+
+  // 6. Delayed bill finalization preserves expired state + legacy RPC guards block unified child orders
+  const finalizeUnifiedFn = extractSqlFunction(sql, "finalize_checkout_bill_slot");
+  assert.ok(finalizeUnifiedFn.includes("RETURN 'recorded_expired'"));
   assert.ok(sql.includes("RETURN QUERY SELECT 'use_checkout_session'"));
   assert.ok(sql.includes("RAISE EXCEPTION 'UNIFIED_CHECKOUT_USE_SESSION_RPC'"));
-  // Cross-table transaction_ref uniqueness in BOTH directions
-  assert.ok(sql.includes("FROM public.payments\n    WHERE transaction_ref = p_transaction_ref"));
-  assert.ok(sql.includes("FROM public.checkout_sessions\n    WHERE transaction_ref = p_transaction_ref"));
-  // Cron Job 2 Part A excludes unified child orders (`checkout_session_id IS NULL`)
   assert.ok(sql.includes("AND checkout_session_id IS NULL"));
+
+  // 7. Non-destructive rollback documented
+  assert.ok(sql.includes("SAFE NON-DESTRUCTIVE ROLLBACK STRATEGY"));
 
   // UI invariant: CheckoutClient has NO separate "Pay Seller Bill" button and shows RM1 once
   const checkoutUi = fs.readFileSync(
