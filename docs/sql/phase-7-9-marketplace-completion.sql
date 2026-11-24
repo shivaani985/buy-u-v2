@@ -19,23 +19,47 @@
 BEGIN;
 
 -- =============================================================================
--- SECTION 1: Profiles, Privacy-Safe Blocking & Admin Audit Helper (P0.1/P0.3/P0.5)
+-- SECTION 1: Profiles, Privacy-Safe Blocking & Admin Audit Helper (P0.1/P0.3/P0.5/P0.13/P0.16)
 -- =============================================================================
 ALTER TABLE public.profiles
   ADD COLUMN IF NOT EXISTS last_active_at timestamptz,
   ADD COLUMN IF NOT EXISTS notification_prefs jsonb NOT NULL DEFAULT '{"inquiries":true,"reviews":true,"community":true}'::jsonb;
 
--- Prevent arbitrary direct client updates to last_active_at (maintained by trusted RPCs only)
+-- Strict JSON structure constraint on notification_prefs (P0.13: exact 3 boolean keys only)
+DO $$
+BEGIN
+  ALTER TABLE public.profiles DROP CONSTRAINT IF EXISTS profiles_notification_prefs_valid_check;
+  ALTER TABLE public.profiles
+    ADD CONSTRAINT profiles_notification_prefs_valid_check CHECK (
+      jsonb_typeof(notification_prefs) = 'object'
+      AND notification_prefs ?& ARRAY['inquiries', 'reviews', 'community']
+      AND jsonb_typeof(notification_prefs->'inquiries') = 'boolean'
+      AND jsonb_typeof(notification_prefs->'reviews') = 'boolean'
+      AND jsonb_typeof(notification_prefs->'community') = 'boolean'
+      AND (notification_prefs - 'inquiries' - 'reviews' - 'community') = '{}'::jsonb
+    );
+END;
+$$;
+
+-- P0.13: SECURITY INVOKER guard matching hosted guard_profile_sensitive_columns() semantics!
+-- Trusted SECURITY DEFINER RPCs execute with current_user = 'postgres' and CAN update last_active_at
+-- & notification_prefs; direct authenticated client UPDATEs (current_user = 'authenticated') are rejected!
 CREATE OR REPLACE FUNCTION public.guard_profile_system_fields_trigger()
 RETURNS trigger
 LANGUAGE plpgsql
-SECURITY DEFINER
+SECURITY INVOKER
 SET search_path = public, pg_temp
 AS $$
 BEGIN
-  IF auth.uid() IS NOT NULL AND current_setting('role', true) = 'authenticated' THEN
-    NEW.last_active_at := OLD.last_active_at;
+  IF current_user IN ('postgres', 'service_role') THEN
+    RETURN NEW;
   END IF;
+
+  IF NEW.last_active_at IS DISTINCT FROM OLD.last_active_at
+     OR NEW.notification_prefs IS DISTINCT FROM OLD.notification_prefs THEN
+    RAISE EXCEPTION 'FORBIDDEN_SYSTEM_PROFILE_FIELD' USING ERRCODE = '42501';
+  END IF;
+
   RETURN NEW;
 END;
 $$;
@@ -45,6 +69,53 @@ CREATE TRIGGER trg_profiles_guard_system_fields
   BEFORE UPDATE ON public.profiles
   FOR EACH ROW
   EXECUTE FUNCTION public.guard_profile_system_fields_trigger();
+
+-- P0.13: Dedicated validated RPC for member non-essential notification preferences
+-- (keeps profiles column-level UPDATE grants minimal without exposing notification_prefs directly!)
+DROP FUNCTION IF EXISTS public.update_notification_preferences_atomic(boolean, boolean, boolean);
+CREATE OR REPLACE FUNCTION public.update_notification_preferences_atomic(
+  p_inquiries boolean,
+  p_reviews boolean,
+  p_community boolean
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_uid uuid := auth.uid();
+  v_prefs jsonb;
+  v_now timestamptz := clock_timestamp();
+BEGIN
+  IF v_uid IS NULL THEN
+    RAISE EXCEPTION 'UNAUTHORIZED' USING ERRCODE = '42501';
+  END IF;
+  IF p_inquiries IS NULL OR p_reviews IS NULL OR p_community IS NULL THEN
+    RAISE EXCEPTION 'INVALID_NOTIFICATION_PREFS';
+  END IF;
+
+  v_prefs := jsonb_build_object(
+    'inquiries', p_inquiries,
+    'reviews', p_reviews,
+    'community', p_community
+  );
+
+  UPDATE public.profiles
+  SET notification_prefs = v_prefs,
+      updated_at = v_now
+  WHERE id = v_uid;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'PROFILE_NOT_FOUND';
+  END IF;
+
+  RETURN v_prefs;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.update_notification_preferences_atomic(boolean, boolean, boolean) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.update_notification_preferences_atomic(boolean, boolean, boolean) TO authenticated;
 
 -- Internal-only symmetric block helper (NEVER callable directly by authenticated/anon!)
 CREATE OR REPLACE FUNCTION public.internal_is_blocked_between(p_user_a uuid, p_user_b uuid)
@@ -128,7 +199,7 @@ $$;
 REVOKE ALL ON FUNCTION public.toggle_member_block_atomic(uuid, boolean) FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION public.toggle_member_block_atomic(uuid, boolean) TO authenticated;
 
--- P0.5: Backend blocking enforcement triggers on conversations, messages, and offers!
+-- P0.5 & P0.16: Backend blocking & immutable-relationship enforcement on conversations, messages, and offers!
 CREATE OR REPLACE FUNCTION public.enforce_block_on_conversation_trigger()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -149,6 +220,29 @@ CREATE TRIGGER trg_conversations_block_guard
   FOR EACH ROW
   EXECUTE FUNCTION public.enforce_block_on_conversation_trigger();
 
+CREATE OR REPLACE FUNCTION public.guard_conversation_immutable_fields_trigger()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+  IF current_user IN ('postgres', 'service_role') THEN
+    RETURN NEW;
+  END IF;
+  IF NEW.member_a IS DISTINCT FROM OLD.member_a OR NEW.member_b IS DISTINCT FROM OLD.member_b THEN
+    RAISE EXCEPTION 'IMMUTABLE_CONVERSATION_PARTICIPANTS' USING ERRCODE = '42501';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_conversations_immutable_guard ON public.conversations;
+CREATE TRIGGER trg_conversations_immutable_guard
+  BEFORE UPDATE ON public.conversations
+  FOR EACH ROW
+  EXECUTE FUNCTION public.guard_conversation_immutable_fields_trigger();
+
 CREATE OR REPLACE FUNCTION public.enforce_block_on_message_trigger()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -158,19 +252,53 @@ AS $$
 DECLARE
   v_conv public.conversations;
   v_other uuid;
+  v_order_valid boolean := false;
 BEGIN
   SELECT c.* INTO v_conv FROM public.conversations c WHERE c.id = NEW.conversation_id;
-  IF NOT FOUND THEN RETURN NEW; END IF;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'CONVERSATION_NOT_FOUND';
+  END IF;
+  IF NEW.sender_id <> v_conv.member_a AND NEW.sender_id <> v_conv.member_b THEN
+    RAISE EXCEPTION 'FORBIDDEN_CONVERSATION_SENDER' USING ERRCODE = '42501';
+  END IF;
   v_other := CASE WHEN v_conv.member_a = NEW.sender_id THEN v_conv.member_b ELSE v_conv.member_a END;
 
+  -- P0.16: ALWAYS verify attached order_id belongs to these two participants (even if not blocked!)
+  IF NEW.order_id IS NOT NULL THEN
+    SELECT EXISTS (
+      SELECT 1 FROM public.orders o
+      WHERE o.id = NEW.order_id
+        AND ((o.buyer_id = NEW.sender_id AND o.seller_id = v_other)
+          OR (o.seller_id = NEW.sender_id AND o.buyer_id = v_other))
+    ) INTO v_order_valid;
+    IF NOT v_order_valid THEN
+      RAISE EXCEPTION 'INVALID_ORDER_ATTACHMENT' USING ERRCODE = '42501';
+    END IF;
+  END IF;
+
   IF public.internal_is_blocked_between(NEW.sender_id, v_other) THEN
-    -- Preserve ONLY controlled active/disputed paid-order obligation messages
+    -- Preserve ONLY controlled active/disputed AUTHORITATIVELY PAID order obligation messages!
     IF NEW.order_id IS NOT NULL AND EXISTS (
       SELECT 1 FROM public.orders o
       WHERE o.id = NEW.order_id
         AND o.status IN ('paid', 'handed_over', 'disputed')
+        AND o.paid_at IS NOT NULL
         AND ((o.buyer_id = NEW.sender_id AND o.seller_id = v_other)
           OR (o.seller_id = NEW.sender_id AND o.buyer_id = v_other))
+        AND (
+          EXISTS (
+            SELECT 1 FROM public.checkout_sessions cs
+            WHERE cs.id = o.checkout_session_id
+              AND cs.payment_status = 'paid'
+              AND cs.paid_at IS NOT NULL
+          )
+          OR EXISTS (
+            SELECT 1 FROM public.payments p
+            WHERE p.order_id = o.id
+              AND p.status = 'paid'
+              AND p.verified_at IS NOT NULL
+          )
+        )
     ) THEN
       RETURN NEW;
     END IF;
@@ -185,6 +313,34 @@ CREATE TRIGGER trg_messages_block_guard
   BEFORE INSERT ON public.messages
   FOR EACH ROW
   EXECUTE FUNCTION public.enforce_block_on_message_trigger();
+
+CREATE OR REPLACE FUNCTION public.guard_message_immutable_fields_trigger()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+  IF current_user IN ('postgres', 'service_role') THEN
+    RETURN NEW;
+  END IF;
+  IF NEW.conversation_id IS DISTINCT FROM OLD.conversation_id
+     OR NEW.sender_id IS DISTINCT FROM OLD.sender_id
+     OR NEW.order_id IS DISTINCT FROM OLD.order_id
+     OR NEW.listing_id IS DISTINCT FROM OLD.listing_id
+     OR NEW.free_notice_id IS DISTINCT FROM OLD.free_notice_id
+     OR NEW.service_request_id IS DISTINCT FROM OLD.service_request_id THEN
+    RAISE EXCEPTION 'IMMUTABLE_MESSAGE_LINKS' USING ERRCODE = '42501';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_messages_immutable_guard ON public.messages;
+CREATE TRIGGER trg_messages_immutable_guard
+  BEFORE UPDATE ON public.messages
+  FOR EACH ROW
+  EXECUTE FUNCTION public.guard_message_immutable_fields_trigger();
 
 CREATE OR REPLACE FUNCTION public.enforce_block_on_offer_trigger()
 RETURNS trigger
@@ -205,6 +361,40 @@ CREATE TRIGGER trg_offers_block_guard
   BEFORE INSERT ON public.offers
   FOR EACH ROW
   EXECUTE FUNCTION public.enforce_block_on_offer_trigger();
+
+-- P0.16: Enforce blocking on pending -> accepted offer transitions & immutability of relationship columns
+-- (while preserving cancel/decline on pending offers and expiry/fulfilment on already-accepted offers!)
+CREATE OR REPLACE FUNCTION public.enforce_block_on_offer_update_trigger()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+  IF current_user NOT IN ('postgres', 'service_role') THEN
+    IF NEW.buyer_id IS DISTINCT FROM OLD.buyer_id
+       OR NEW.seller_id IS DISTINCT FROM OLD.seller_id
+       OR NEW.listing_id IS DISTINCT FROM OLD.listing_id
+       OR NEW.conversation_id IS DISTINCT FROM OLD.conversation_id THEN
+      RAISE EXCEPTION 'IMMUTABLE_OFFER_RELATIONSHIPS' USING ERRCODE = '42501';
+    END IF;
+  END IF;
+
+  IF OLD.status = 'pending' AND NEW.status = 'accepted' THEN
+    IF public.internal_is_blocked_between(OLD.buyer_id, OLD.seller_id) THEN
+      RAISE EXCEPTION 'INTERACTION_BLOCKED' USING ERRCODE = '42501';
+    END IF;
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_offers_update_block_guard ON public.offers;
+CREATE TRIGGER trg_offers_update_block_guard
+  BEFORE UPDATE ON public.offers
+  FOR EACH ROW
+  EXECUTE FUNCTION public.enforce_block_on_offer_update_trigger();
 
 -- P0.3: Admin audit log helper matching EXACT hosted types (id bigint, target_id uuid nullable!)
 DROP FUNCTION IF EXISTS public.log_admin_audit_internal(uuid, text, text, text, text, jsonb);
@@ -240,7 +430,8 @@ $$;
 
 REVOKE ALL ON FUNCTION public.log_admin_audit_internal(uuid, text, text, uuid, text, jsonb) FROM PUBLIC, anon, authenticated;
 
--- Preference-respecting notification helper for non-essential categories (P0.10)
+-- Preference-respecting notification helper for non-essential categories (P0.10 & P0.13)
+-- Safely guards against malformed JSONB so notification failures NEVER abort parent transactions!
 CREATE OR REPLACE FUNCTION public.safe_insert_member_notification(
   p_user_id uuid,
   p_kind text,
@@ -257,15 +448,25 @@ SET search_path = public, pg_temp
 AS $$
 DECLARE
   v_prefs jsonb;
+  v_enabled boolean := true;
 BEGIN
   IF p_user_id IS NULL THEN RETURN; END IF;
   IF p_pref_group IS NOT NULL THEN
     SELECT p.notification_prefs INTO v_prefs FROM public.profiles p WHERE p.id = p_user_id;
-    IF v_prefs IS NOT NULL AND COALESCE((v_prefs->>p_pref_group)::boolean, true) = false THEN
+    IF v_prefs IS NOT NULL
+       AND jsonb_typeof(v_prefs) = 'object'
+       AND jsonb_typeof(v_prefs->p_pref_group) = 'boolean' THEN
+      v_enabled := (v_prefs->>p_pref_group)::boolean;
+    END IF;
+    IF NOT v_enabled THEN
       RETURN;
     END IF;
   END IF;
-  PERFORM public.safe_insert_notification(p_user_id, p_kind, p_title, p_body, p_href, p_dedupe_key);
+  BEGIN
+    PERFORM public.safe_insert_notification(p_user_id, p_kind, p_title, p_body, p_href, p_dedupe_key);
+  EXCEPTION WHEN OTHERS THEN
+    RETURN;
+  END;
 END;
 $$;
 
@@ -477,6 +678,54 @@ $$;
 REVOKE ALL ON FUNCTION public.create_service_request_atomic(uuid, text, text, timestamptz) FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION public.create_service_request_atomic(uuid, text, text, timestamptz) TO authenticated;
 
+-- P0.14: Trusted standalone expiry sweeper for overdue 'requested' service requests (Phase 11 cron & server calls)
+-- NEVER expires accepted, in_progress, delivered, completed, declined, or cancelled requests!
+DROP FUNCTION IF EXISTS public.expire_stale_service_requests_atomic(uuid);
+CREATE OR REPLACE FUNCTION public.expire_stale_service_requests_atomic(p_request_id uuid DEFAULT NULL)
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_now timestamptz;
+  v_req RECORD;
+  v_count integer := 0;
+BEGIN
+  FOR v_req IN
+    SELECT sr.id, sr.buyer_id, sr.seller_id, sr.request_code
+    FROM public.service_requests sr
+    WHERE sr.status = 'requested'
+      AND (p_request_id IS NULL OR sr.id = p_request_id)
+      AND sr.respond_by <= clock_timestamp()
+    ORDER BY sr.id
+    FOR UPDATE SKIP LOCKED
+  LOOP
+    v_now := clock_timestamp();
+    UPDATE public.service_requests
+    SET status = 'expired', updated_at = v_now
+    WHERE id = v_req.id AND status = 'requested' AND respond_by <= v_now;
+
+    IF FOUND THEN
+      v_count := v_count + 1;
+      PERFORM public.safe_insert_member_notification(
+        v_req.buyer_id,
+        'service_expired',
+        'inquiries',
+        'Service request ' || COALESCE(v_req.request_code, '') || ' expired',
+        'Provider did not respond within the 48-hour window. You may submit a new request.',
+        '/requests',
+        'svc-' || v_req.id::text || '-expired'
+      );
+    END IF;
+  END LOOP;
+  RETURN v_count;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.expire_stale_service_requests_atomic(uuid) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.expire_stale_service_requests_atomic(uuid) TO service_role;
+
 DROP FUNCTION IF EXISTS public.update_service_request_status_atomic(uuid, text, text);
 CREATE OR REPLACE FUNCTION public.update_service_request_status_atomic(
   p_request_id uuid,
@@ -498,7 +747,7 @@ DECLARE
   v_listing public.listings;
   v_act text := lower(trim(COALESCE(p_action, '')));
   v_note text := NULLIF(trim(COALESCE(p_note, '')), '');
-  v_now timestamptz := clock_timestamp();
+  v_now timestamptz;
   v_next text;
   v_notify_uid uuid;
   v_notify_title text;
@@ -511,14 +760,32 @@ BEGIN
   SELECT sr.* INTO v_sr FROM public.service_requests sr WHERE sr.id = p_request_id FOR UPDATE;
   IF NOT FOUND THEN RAISE EXCEPTION 'SERVICE_REQUEST_NOT_FOUND'; END IF;
 
+  -- Evaluate authoritative DB time AFTER acquiring row lock (P0.14)
+  v_now := clock_timestamp();
+
   IF v_uid <> v_sr.buyer_id AND v_uid <> v_sr.seller_id THEN
     RAISE EXCEPTION 'FORBIDDEN' USING ERRCODE = '42501';
   END IF;
 
-  -- Enforce 48h respond_by expiry on requested items!
+  -- P0.14: Persist 'expired' cleanly and RETURN structured outcome (NEVER raise exception that rolls back!)
   IF v_sr.status = 'requested' AND v_sr.respond_by <= v_now THEN
-    UPDATE public.service_requests SET status = 'expired', updated_at = v_now WHERE id = v_sr.id;
-    RAISE EXCEPTION 'SERVICE_REQUEST_EXPIRED';
+    UPDATE public.service_requests
+    SET status = 'expired', updated_at = v_now
+    WHERE id = v_sr.id
+    RETURNING * INTO v_sr;
+
+    PERFORM public.safe_insert_member_notification(
+      v_sr.buyer_id,
+      'service_expired',
+      'inquiries',
+      'Service request ' || COALESCE(v_sr.request_code, '') || ' expired',
+      'The 48-hour response deadline passed. You can now submit a new request.',
+      '/requests',
+      'svc-' || v_sr.id::text || '-expired'
+    );
+
+    RETURN QUERY SELECT v_sr.id, v_sr.status, v_sr.updated_at;
+    RETURN;
   END IF;
 
   IF v_act = 'accept' THEN
@@ -618,13 +885,37 @@ ALTER TABLE public.free_notices
   ADD COLUMN IF NOT EXISTS collection_instructions text,
   ADD COLUMN IF NOT EXISTS moderated_prev_status text;
 
+-- P0.15: Minimal MIME-type, 5 MB file-size & student-ownership hardening ONLY on already-public 'free-items' bucket
+-- (Never alters visibility of any private bucket!)
+UPDATE storage.buckets
+SET file_size_limit = 5242880,
+    allowed_mime_types = ARRAY['image/jpeg', 'image/png', 'image/webp']
+WHERE id = 'free-items';
+
+DROP POLICY IF EXISTS free_items_student_upload ON storage.objects;
+CREATE POLICY free_items_student_upload ON storage.objects
+  FOR INSERT TO authenticated
+  WITH CHECK (
+    bucket_id = 'free-items'
+    AND public.is_active_student()
+    AND (storage.foldername(name))[1] = auth.uid()::text
+  );
+
+DROP POLICY IF EXISTS free_items_owner_delete ON storage.objects;
+CREATE POLICY free_items_owner_delete ON storage.objects
+  FOR DELETE TO authenticated
+  USING (
+    bucket_id = 'free-items'
+    AND (storage.foldername(name))[1] = auth.uid()::text
+  );
+
 -- Separate private draft table so incomplete drafts persist & recover cleanly without weakening free_notices constraints!
 CREATE TABLE IF NOT EXISTS public.free_notice_drafts (
   id                      uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   contributor_id          uuid NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
   title                   text NOT NULL DEFAULT '',
   description             text NOT NULL DEFAULT '',
-  condition               text NOT NULL DEFAULT 'Good / Usable',
+  condition               text NOT NULL DEFAULT 'Good',
   quantity                integer NOT NULL DEFAULT 1 CHECK (quantity >= 1 AND quantity <= 99),
   spot_id                 text REFERENCES public.donation_spots(id),
   category_id             text REFERENCES public.categories(id),
@@ -666,7 +957,11 @@ CREATE INDEX IF NOT EXISTS idx_free_notice_claims_donor
 CREATE INDEX IF NOT EXISTS idx_free_notice_claims_recipient
   ON public.free_notice_claims (recipient_id, created_at DESC);
 
--- Authorized publish RPC for free_notices (enforces all published constraints + student-only + already_placed = true + 1..5 images!)
+-- P0.15: Authorized publish RPC for free_notices:
+--   - Exact hosted condition vocabulary ('New/Unused','Like New','Good','Fair')
+--   - Active donation spot + active product category validation
+--   - 1..5 distinct, safe, student-owned image paths verified to exist in storage.objects (bucket_id = 'free-items')
+--   - Concurrency-safe FOR UPDATE draft locking preventing duplicate publication on replay!
 DROP FUNCTION IF EXISTS public.publish_free_notice_atomic(text, text, text, integer, text, text, text, text[], uuid);
 CREATE OR REPLACE FUNCTION public.publish_free_notice_atomic(
   p_title text,
@@ -690,7 +985,10 @@ DECLARE
   v_desc text := trim(COALESCE(p_description, ''));
   v_cond text := trim(COALESCE(p_condition, ''));
   v_qty integer := COALESCE(p_quantity, 1);
+  v_cat text := NULLIF(trim(COALESCE(p_category_id, '')), '');
   v_imgs text[] := COALESCE(p_image_paths, '{}'::text[]);
+  v_img text;
+  v_distinct_count integer;
   v_now timestamptz := clock_timestamp();
   v_notice_id uuid;
 BEGIN
@@ -703,14 +1001,58 @@ BEGIN
   IF length(v_desc) < 10 OR length(v_desc) > 2000 THEN
     RAISE EXCEPTION 'INVALID_FREE_DESCRIPTION';
   END IF;
-  IF length(v_cond) = 0 OR v_qty < 1 OR v_qty > 99 THEN
+  IF v_cond NOT IN ('New/Unused', 'Like New', 'Good', 'Fair') THEN
+    RAISE EXCEPTION 'INVALID_FREE_CONDITION';
+  END IF;
+  IF v_qty < 1 OR v_qty > 99 THEN
     RAISE EXCEPTION 'INVALID_FREE_DETAILS';
   END IF;
   IF COALESCE(cardinality(v_imgs), 0) < 1 OR COALESCE(cardinality(v_imgs), 0) > 5 THEN
     RAISE EXCEPTION 'FREE_ITEM_IMAGES_REQUIRED';
   END IF;
+
+  -- Reject duplicate image paths
+  SELECT count(DISTINCT trim(x)) INTO v_distinct_count FROM unnest(v_imgs) AS x;
+  IF v_distinct_count <> cardinality(v_imgs) THEN
+    RAISE EXCEPTION 'DUPLICATE_IMAGE_PATHS';
+  END IF;
+
+  -- Validate every image path: safe, student-owned prefix `<uid>/...`, and actually exists in storage.objects ('free-items')!
+  FOREACH v_img IN ARRAY v_imgs LOOP
+    v_img := trim(COALESCE(v_img, ''));
+    IF v_img = ''
+       OR position('..' in v_img) > 0
+       OR position('\' in v_img) > 0
+       OR left(v_img, 1) = '/'
+       OR v_img !~ ('^' || v_uid::text || '/[A-Za-z0-9._-]+\.(jpg|jpeg|png|webp)$') THEN
+      RAISE EXCEPTION 'INVALID_FREE_IMAGE_PATH';
+    END IF;
+    IF NOT EXISTS (
+      SELECT 1 FROM storage.objects so
+      WHERE so.bucket_id = 'free-items' AND so.name = v_img
+    ) THEN
+      RAISE EXCEPTION 'FREE_IMAGE_OBJECT_NOT_FOUND';
+    END IF;
+  END LOOP;
+
   IF NOT EXISTS (SELECT 1 FROM public.donation_spots ds WHERE ds.id = p_spot_id AND ds.active = true) THEN
     RAISE EXCEPTION 'INVALID_DONATION_SPOT';
+  END IF;
+
+  IF v_cat IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM public.categories c WHERE c.id = v_cat AND c.kind = 'product' AND c.active = true
+  ) THEN
+    RAISE EXCEPTION 'INVALID_CATEGORY';
+  END IF;
+
+  -- Lock & validate draft ownership atomically BEFORE inserting to block concurrent replay / duplicate publication!
+  IF p_draft_id IS NOT NULL THEN
+    PERFORM 1 FROM public.free_notice_drafts d
+    WHERE d.id = p_draft_id AND d.contributor_id = v_uid
+    FOR UPDATE;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'DRAFT_NOT_FOUND_OR_ALREADY_PUBLISHED';
+    END IF;
   END IF;
 
   INSERT INTO public.free_notices (
@@ -719,7 +1061,7 @@ BEGIN
     image_paths, already_placed, status, published_at, expires_at, created_at, updated_at
   ) VALUES (
     v_uid, v_title, v_desc, v_cond, v_qty, 0,
-    v_qty::text || ' available', p_spot_id, p_category_id,
+    v_qty::text || ' available', p_spot_id, v_cat,
     NULLIF(trim(COALESCE(p_collection_instructions, '')), ''),
     v_imgs, true, 'active', v_now, v_now + interval '72 hours', v_now, v_now
   )
@@ -736,6 +1078,85 @@ $$;
 
 REVOKE ALL ON FUNCTION public.publish_free_notice_atomic(text, text, text, integer, text, text, text, text[], uuid) FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION public.publish_free_notice_atomic(text, text, text, integer, text, text, text, text[], uuid) TO authenticated;
+
+-- P0.15: Authorized donor management RPC (edit / close own published free notice after direct writes were revoked!)
+DROP FUNCTION IF EXISTS public.manage_free_notice_atomic(uuid, text, text, text, text, integer, text);
+CREATE OR REPLACE FUNCTION public.manage_free_notice_atomic(
+  p_notice_id uuid,
+  p_action text,
+  p_title text DEFAULT NULL,
+  p_description text DEFAULT NULL,
+  p_condition text DEFAULT NULL,
+  p_quantity integer DEFAULT NULL,
+  p_collection_instructions text DEFAULT NULL
+)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_uid uuid := auth.uid();
+  v_fn public.free_notices;
+  v_act text := lower(trim(COALESCE(p_action, '')));
+  v_title text;
+  v_desc text;
+  v_cond text;
+  v_qty integer;
+  v_now timestamptz;
+BEGIN
+  IF v_uid IS NULL OR NOT public.is_active_student() THEN
+    RAISE EXCEPTION 'FORBIDDEN_ACTIVE_STUDENT_ONLY' USING ERRCODE = '42501';
+  END IF;
+
+  SELECT fn.* INTO v_fn FROM public.free_notices fn WHERE fn.id = p_notice_id FOR UPDATE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'FREE_NOTICE_NOT_FOUND'; END IF;
+  IF v_fn.contributor_id <> v_uid THEN RAISE EXCEPTION 'FORBIDDEN_DONOR_ONLY' USING ERRCODE = '42501'; END IF;
+  IF v_fn.status = 'hidden' THEN RAISE EXCEPTION 'FREE_NOTICE_MODERATED_HIDDEN' USING ERRCODE = '42501'; END IF;
+
+  v_now := clock_timestamp();
+
+  IF v_act = 'close' THEN
+    IF v_fn.reserved_quantity > 0 THEN
+      RAISE EXCEPTION 'CANNOT_CLOSE_WITH_ACTIVE_RESERVATIONS';
+    END IF;
+    UPDATE public.free_notices
+    SET status = 'closed', updated_at = v_now
+    WHERE id = v_fn.id;
+    RETURN 'closed';
+  ELSIF v_act = 'edit' THEN
+    v_title := COALESCE(NULLIF(trim(COALESCE(p_title, '')), ''), v_fn.title);
+    v_desc := COALESCE(NULLIF(trim(COALESCE(p_description, '')), ''), v_fn.description);
+    v_cond := COALESCE(NULLIF(trim(COALESCE(p_condition, '')), ''), v_fn.condition);
+    v_qty := COALESCE(p_quantity, v_fn.quantity);
+
+    IF length(v_title) < 5 OR length(v_title) > 100 THEN RAISE EXCEPTION 'INVALID_FREE_TITLE'; END IF;
+    IF length(v_desc) < 10 OR length(v_desc) > 2000 THEN RAISE EXCEPTION 'INVALID_FREE_DESCRIPTION'; END IF;
+    IF v_cond NOT IN ('New/Unused', 'Like New', 'Good', 'Fair') THEN RAISE EXCEPTION 'INVALID_FREE_CONDITION'; END IF;
+    IF v_qty < 1 OR v_qty > 99 THEN RAISE EXCEPTION 'INVALID_FREE_DETAILS'; END IF;
+    IF v_qty < v_fn.reserved_quantity THEN RAISE EXCEPTION 'QUANTITY_BELOW_RESERVED'; END IF;
+
+    UPDATE public.free_notices
+    SET title = v_title,
+        description = v_desc,
+        condition = v_cond,
+        quantity = v_qty,
+        quantity_note = (v_qty - v_fn.reserved_quantity)::text || ' available',
+        collection_instructions = CASE
+          WHEN p_collection_instructions IS NOT NULL THEN NULLIF(trim(p_collection_instructions), '')
+          ELSE collection_instructions
+        END,
+        updated_at = v_now
+    WHERE id = v_fn.id;
+    RETURN v_fn.status;
+  ELSE
+    RAISE EXCEPTION 'INVALID_ACTION';
+  END IF;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.manage_free_notice_atomic(uuid, text, text, text, text, integer, text) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.manage_free_notice_atomic(uuid, text, text, text, text, integer, text) TO authenticated;
 
 -- P0.6: Safe exact-once expiry for overdue 'reserved' claims (NEVER expires 'handed_over'!)
 DROP FUNCTION IF EXISTS public.expire_stale_free_claims_atomic(uuid);
@@ -785,7 +1206,7 @@ $$;
 REVOKE ALL ON FUNCTION public.expire_stale_free_claims_atomic(uuid) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.expire_stale_free_claims_atomic(uuid) TO service_role;
 
--- Claim request RPC (P0.1 active status + expires_at + active donor + opportunistic expiry!)
+-- Claim request RPC (P0.1 active status + expires_at + active donor; stale claims expired via standalone sweeper!)
 DROP FUNCTION IF EXISTS public.create_free_notice_claim_atomic(uuid, integer, text);
 CREATE OR REPLACE FUNCTION public.create_free_notice_claim_atomic(
   p_notice_id uuid,
@@ -807,7 +1228,7 @@ DECLARE
   v_notice public.free_notices;
   v_qty integer := COALESCE(p_quantity, 1);
   v_avail integer;
-  v_now timestamptz := clock_timestamp();
+  v_now timestamptz;
   v_code text;
   v_row public.free_notice_claims;
 BEGIN
@@ -816,10 +1237,8 @@ BEGIN
   END IF;
   IF v_qty <= 0 THEN RAISE EXCEPTION 'INVALID_QUANTITY'; END IF;
 
-  -- Release any expired reservations on this notice first
-  PERFORM public.expire_stale_free_claims_atomic(p_notice_id);
-
   SELECT fn.* INTO v_notice FROM public.free_notices fn WHERE fn.id = p_notice_id FOR UPDATE;
+  v_now := clock_timestamp();
   IF NOT FOUND OR v_notice.status <> 'active' OR v_notice.expires_at <= v_now THEN
     RAISE EXCEPTION 'FREE_ITEM_UNAVAILABLE';
   END IF;
@@ -908,14 +1327,48 @@ BEGIN
   SELECT c.notice_id INTO v_notice_id FROM public.free_notice_claims c WHERE c.id = p_claim_id;
   IF NOT FOUND THEN RAISE EXCEPTION 'CLAIM_NOT_FOUND'; END IF;
 
-  PERFORM public.expire_stale_free_claims_atomic(v_notice_id);
-
-  -- Lock free_notices FIRST -> free_notice_claims SECOND
+  -- Lock free_notices FIRST -> free_notice_claims SECOND; read authoritative DB time AFTER locks!
   SELECT fn.* INTO v_notice FROM public.free_notices fn WHERE fn.id = v_notice_id FOR UPDATE;
   SELECT c.* INTO v_claim FROM public.free_notice_claims c WHERE c.id = p_claim_id FOR UPDATE;
+  v_now := clock_timestamp();
 
   IF v_uid <> v_claim.donor_id AND v_uid <> v_claim.recipient_id THEN
     RAISE EXCEPTION 'FORBIDDEN' USING ERRCODE = '42501';
+  END IF;
+
+  -- P0.15: Revalidate reservation deadline AFTER locks before handover; commit & return 'expired' cleanly!
+  -- (Already handed_over claims are NEVER expired and remain intact for recipient collection!)
+  IF v_act = 'handover'
+     AND v_claim.status = 'reserved'
+     AND v_claim.reservation_expires_at IS NOT NULL
+     AND v_claim.reservation_expires_at <= v_now THEN
+    IF v_uid <> v_claim.donor_id THEN
+      RAISE EXCEPTION 'FORBIDDEN_DONOR_ONLY' USING ERRCODE = '42501';
+    END IF;
+    IF v_notice.reserved_quantity < v_claim.quantity THEN
+      RAISE EXCEPTION 'INVENTORY_INTEGRITY_ERROR';
+    END IF;
+    UPDATE public.free_notices
+    SET reserved_quantity = reserved_quantity - v_claim.quantity, updated_at = v_now
+    WHERE id = v_notice.id;
+
+    UPDATE public.free_notice_claims
+    SET status = 'expired', updated_at = v_now
+    WHERE id = v_claim.id
+    RETURNING * INTO v_claim;
+
+    PERFORM public.safe_insert_member_notification(
+      v_claim.recipient_id,
+      'free_claim_expired',
+      'community',
+      'Reservation expired (' || v_claim.claim_code || ')',
+      'Your 48-hour pickup reservation for "' || v_notice.title || '" expired and units were released.',
+      '/free-items',
+      'don-' || v_claim.id::text || '-expired'
+    );
+
+    RETURN QUERY SELECT v_claim.id, v_claim.status, v_claim.updated_at;
+    RETURN;
   END IF;
 
   IF v_act = 'accept' THEN
@@ -1237,32 +1690,57 @@ REVOKE ALL ON FUNCTION public.respond_to_review_atomic(uuid, text) FROM PUBLIC, 
 GRANT EXECUTE ON FUNCTION public.respond_to_review_atomic(uuid, text) TO authenticated;
 
 -- =============================================================================
--- SECTION 7: Reports, Admin Moderation, Catalog & Notifications (P0.1/P0.3/P0.7)
+-- SECTION 7: Reports, Admin Moderation, Catalog & Notifications (P0.1/P0.3/P0.7/P0.16/P0.18)
 -- =============================================================================
 ALTER TABLE public.listings
-  ADD COLUMN IF NOT EXISTS moderated_prev_status text;
+  ADD COLUMN IF NOT EXISTS moderated_prev_status text,
+  ADD COLUMN IF NOT EXISTS moderated_by uuid REFERENCES public.profiles(id),
+  ADD COLUMN IF NOT EXISTS moderated_at timestamptz,
+  ADD COLUMN IF NOT EXISTS moderation_reason text;
 
--- Prevent listing owners from directly republishing an admin-hidden listing (P0.7)
+-- P0.16: SECURITY INVOKER guard protecting listing moderation fields on INSERT & UPDATE
+-- and blocking direct client unhiding/editing of admin-hidden listings!
 CREATE OR REPLACE FUNCTION public.guard_admin_hidden_listing_trigger()
 RETURNS trigger
 LANGUAGE plpgsql
-SECURITY DEFINER
+SECURITY INVOKER
 SET search_path = public, pg_temp
 AS $$
 BEGIN
-  IF OLD.status = 'hidden'
-     AND NEW.status <> 'hidden'
-     AND auth.uid() IS NOT NULL
-     AND NOT public.is_active_admin() THEN
+  IF current_user IN ('postgres', 'service_role') OR public.is_active_admin() THEN
+    RETURN NEW;
+  END IF;
+
+  IF TG_OP = 'INSERT' THEN
+    IF NEW.moderated_prev_status IS NOT NULL
+       OR NEW.moderated_by IS NOT NULL
+       OR NEW.moderated_at IS NOT NULL
+       OR NEW.moderation_reason IS NOT NULL
+       OR NEW.status = 'hidden' THEN
+      RAISE EXCEPTION 'FORBIDDEN_MODERATION_FIELDS' USING ERRCODE = '42501';
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  -- UPDATE by non-admin owner: moderation metadata is strictly immutable & admin-hidden listings cannot be restored!
+  IF NEW.moderated_prev_status IS DISTINCT FROM OLD.moderated_prev_status
+     OR NEW.moderated_by IS DISTINCT FROM OLD.moderated_by
+     OR NEW.moderated_at IS DISTINCT FROM OLD.moderated_at
+     OR NEW.moderation_reason IS DISTINCT FROM OLD.moderation_reason THEN
+    RAISE EXCEPTION 'FORBIDDEN_MODERATION_FIELDS' USING ERRCODE = '42501';
+  END IF;
+
+  IF OLD.status = 'hidden' AND NEW.status <> 'hidden' THEN
     RAISE EXCEPTION 'LISTING_MODERATED_BY_ADMIN' USING ERRCODE = '42501';
   END IF;
+
   RETURN NEW;
 END;
 $$;
 
 DROP TRIGGER IF EXISTS trg_listings_guard_admin_hidden ON public.listings;
 CREATE TRIGGER trg_listings_guard_admin_hidden
-  BEFORE UPDATE OF status ON public.listings
+  BEFORE INSERT OR UPDATE ON public.listings
   FOR EACH ROW
   EXECUTE FUNCTION public.guard_admin_hidden_listing_trigger();
 
@@ -1501,6 +1979,10 @@ BEGIN
     -- Maps cleanly to hosted profiles_status_check ('suspended') with explicit restriction_reason
     v_next_status := 'suspended';
   ELSIF v_act = 'restore' THEN
+    -- P0.16: NEVER reactivate permanently closed accounts! Only suspended accounts may be restored.
+    IF v_prof.status = 'closed' THEN
+      RAISE EXCEPTION 'CANNOT_RESTORE_CLOSED_ACCOUNT';
+    END IF;
     v_next_status := 'active';
   ELSE
     RAISE EXCEPTION 'INVALID_USER_MODERATION_ACTION';
@@ -1570,6 +2052,9 @@ BEGIN
     UPDATE public.listings
     SET status = 'hidden',
         moderated_prev_status = CASE WHEN status <> 'hidden' THEN status ELSE moderated_prev_status END,
+        moderated_by = v_uid,
+        moderated_at = v_now,
+        moderation_reason = v_reason,
         updated_at = v_now
     WHERE id = v_listing.id;
   ELSE
@@ -1579,7 +2064,12 @@ BEGIN
       ELSE 'archived'
     END;
     UPDATE public.listings
-    SET status = v_next, moderated_prev_status = NULL, updated_at = v_now
+    SET status = v_next,
+        moderated_prev_status = NULL,
+        moderated_by = NULL,
+        moderated_at = NULL,
+        moderation_reason = NULL,
+        updated_at = v_now
     WHERE id = v_listing.id;
   END IF;
 
@@ -1771,16 +2261,67 @@ $$;
 REVOKE ALL ON FUNCTION public.mark_notifications_read_atomic(uuid) FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION public.mark_notifications_read_atomic(uuid) TO authenticated;
 
+-- P0.18: Authorized RPC for Phase 5 messaging `markConversationReadAction` (preserves unread badge clearing after revoking direct notifications UPDATE!)
+DROP FUNCTION IF EXISTS public.mark_conversation_notifications_read_atomic(uuid);
+CREATE OR REPLACE FUNCTION public.mark_conversation_notifications_read_atomic(p_conversation_id uuid)
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_uid uuid := auth.uid();
+  v_now timestamptz := clock_timestamp();
+  v_remaining integer := 0;
+BEGIN
+  IF v_uid IS NULL OR p_conversation_id IS NULL THEN
+    RAISE EXCEPTION 'UNAUTHORIZED' USING ERRCODE = '42501';
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM public.conversations c
+    WHERE c.id = p_conversation_id
+      AND (c.member_a = v_uid OR c.member_b = v_uid)
+  ) THEN
+    RAISE EXCEPTION 'FORBIDDEN_CONVERSATION' USING ERRCODE = '42501';
+  END IF;
+
+  UPDATE public.notifications
+  SET read_at = v_now
+  WHERE user_id = v_uid
+    AND read_at IS NULL
+    AND kind IN ('new_message', 'message')
+    AND href ILIKE ('%' || p_conversation_id::text || '%');
+
+  SELECT count(*)::integer INTO v_remaining
+  FROM public.notifications
+  WHERE user_id = v_uid
+    AND read_at IS NULL
+    AND kind IN ('new_message', 'message');
+
+  RETURN COALESCE(v_remaining, 0);
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.mark_conversation_notifications_read_atomic(uuid) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.mark_conversation_notifications_read_atomic(uuid) TO authenticated;
+
 -- =============================================================================
--- SECTION 8: Revoke Direct Client State-Machine Bypasses & Explicit Grants (P0.4/P0.7/P0.11)
+-- SECTION 8: Revoke Direct Client State-Machine Bypasses & Explicit Grants (P0.4/P0.7/P0.11/P0.18)
 -- =============================================================================
 -- Eliminate direct client INSERT/UPDATE/DELETE bypasses; keep required participant SELECT!
 REVOKE INSERT, UPDATE, DELETE ON TABLE public.service_requests FROM PUBLIC, anon, authenticated;
-REVOKE INSERT, UPDATE, DELETE ON TABLE public.reviews FROM PUBLIC, anon, authenticated;
 REVOKE INSERT, UPDATE, DELETE ON TABLE public.free_notices FROM PUBLIC, anon, authenticated;
 REVOKE INSERT, UPDATE, DELETE ON TABLE public.listing_views FROM PUBLIC, anon, authenticated;
 REVOKE INSERT, UPDATE, DELETE ON TABLE public.notifications FROM PUBLIC, anon, authenticated;
 REVOKE INSERT, UPDATE, DELETE ON TABLE public.member_blocks FROM PUBLIC, anon, authenticated;
+
+-- P0.18: Protect reviews.moderation_reason, moderated_by & moderated_at from non-admin members via column-level SELECT!
+REVOKE ALL ON TABLE public.reviews FROM PUBLIC, anon, authenticated;
+GRANT SELECT (
+  id, order_id, listing_id, service_request_id, buyer_id, seller_id,
+  rating, comment, seller_response, seller_responded_at, hidden, edited_at, created_at
+) ON TABLE public.reviews TO authenticated;
 
 -- Protect reports.admin_notes from reporters via column-level SELECT grants (P0.7)
 REVOKE ALL ON TABLE public.reports FROM PUBLIC, anon, authenticated;

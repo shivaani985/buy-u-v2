@@ -35,6 +35,28 @@ export interface LoadOlderMessagesResult {
   error?: string;
 }
 
+async function checkBlockedBidirectional(
+  supabase: NonNullable<Awaited<ReturnType<typeof createSupabaseServerClient>>>,
+  userA: string,
+  userB: string
+): Promise<boolean> {
+  const { data: rpcBlocked, error: rpcErr } = await supabase.rpc(
+    "is_member_blocked_between",
+    { p_user_a: userA, p_user_b: userB }
+  );
+  if (!rpcErr && typeof rpcBlocked === "boolean") {
+    return rpcBlocked;
+  }
+  const { data } = await supabase
+    .from("member_blocks")
+    .select("blocker_id,blocked_id")
+    .or(
+      `and(blocker_id.eq.${userA},blocked_id.eq.${userB}),and(blocker_id.eq.${userB},blocked_id.eq.${userA})`
+    )
+    .limit(1);
+  return Array.isArray(data) && data.length > 0;
+}
+
 export async function startConversationAction(input: {
   sellerId: string;
   listingId?: string | null;
@@ -57,21 +79,15 @@ export async function startConversationAction(input: {
   const userId = eligibility.userId;
   const peerId = (input.sellerId ?? "").trim();
 
-  const { data: blockRows } = isValidUuid(peerId)
-    ? await supabase
-        .from("member_blocks")
-        .select("blocker_id,blocked_id")
-        .or(
-          `and(blocker_id.eq.${userId},blocked_id.eq.${peerId}),and(blocker_id.eq.${peerId},blocked_id.eq.${userId})`
-        )
-        .limit(1)
-    : { data: [] };
+  const isBlocked = isValidUuid(peerId)
+    ? await checkBlockedBidirectional(supabase, userId, peerId)
+    : false;
 
   const check = validateStartConversation({
     eligibility,
     peerUserId: peerId,
     listingId: input.listingId ?? null,
-    isBlocked: Array.isArray(blockRows) && blockRows.length > 0,
+    isBlocked,
   });
 
   if (!check.ok) {
@@ -148,6 +164,7 @@ export async function sendMessageAction(input: {
   body: string;
   attachmentPaths?: string[];
   listingId?: string | null;
+  orderId?: string | null;
 }): Promise<SendMessageResult> {
   const session = await getSessionSummary();
   const eligibility = evaluateMessagingEligibility(session);
@@ -186,22 +203,21 @@ export async function sendMessageAction(input: {
   const isParticipant = conv.member_a === userId || conv.member_b === userId;
   const peerId = conv.member_a === userId ? conv.member_b : conv.member_a;
 
-  const { data: blockRows } = isParticipant
-    ? await supabase
-        .from("member_blocks")
-        .select("blocker_id,blocked_id")
-        .or(
-          `and(blocker_id.eq.${userId},blocked_id.eq.${peerId}),and(blocker_id.eq.${peerId},blocked_id.eq.${userId})`
-        )
-        .limit(1)
-    : { data: [] };
-  const isBlocked = Array.isArray(blockRows) && blockRows.length > 0;
+  const isBlocked = isParticipant
+    ? await checkBlockedBidirectional(supabase, userId, peerId)
+    : false;
 
+  const cleanOrderId =
+    input.orderId && isValidUuid(input.orderId.trim())
+      ? input.orderId.trim()
+      : null;
+
+  // If blocked, ordinary messages are denied; only verified active paid/disputed order messages proceed to DB trigger verification
   const validation = validateMessageInput({
     eligibility,
     conversationId,
     isParticipant,
-    isBlocked,
+    isBlocked: isBlocked && !cleanOrderId,
     body: input.body ?? "",
     attachmentPaths: input.attachmentPaths ?? [],
     listingId: input.listingId ?? null,
@@ -219,6 +235,7 @@ export async function sendMessageAction(input: {
       body: validation.trimmedBody,
       image_paths: validation.imagePaths,
       listing_id: validation.listingId,
+      ...(cleanOrderId ? { order_id: cleanOrderId } : {}),
     })
     .select(
       "id,conversation_id,sender_id,body,image_paths,listing_id,order_id,free_notice_id,service_request_id,edited_at,created_at"
@@ -325,6 +342,16 @@ export async function markConversationReadAction(
   const supabase = await createSupabaseServerClient();
   if (!supabase) return { ok: false };
 
+  // P0.18: Prefer authorized RPC (notifications direct UPDATE revoked in Phase 7-9)
+  const { data: rpcRemaining, error: rpcErr } = await supabase.rpc(
+    "mark_conversation_notifications_read_atomic",
+    { p_conversation_id: conversationId }
+  );
+  if (!rpcErr && typeof rpcRemaining === "number") {
+    return { ok: true, remainingUnread: Math.max(0, rpcRemaining) };
+  }
+
+  // Pre-migration fallback
   const { error } = await supabase
     .from("notifications")
     .update({ read_at: new Date().toISOString() })

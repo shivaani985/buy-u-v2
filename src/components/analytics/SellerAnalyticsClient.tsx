@@ -44,10 +44,13 @@ export interface SellerAnalyticsViewProps {
       availableStock: number;
       views: number;
       uniqueViewers: number;
+      uniquePurchasers?: number;
+      attributablePurchasers?: number;
       favourites: number;
       unitsSold: number;
       revenueSen: number;
       conversionPct: number | null;
+      ordersPerViewer?: number | null;
     }>;
     serviceSummary: {
       total: number;
@@ -211,7 +214,12 @@ export function SellerAnalyticsClient({
         </div>
         <div className="space-y-4 rounded-2xl border border-[#E6E3EE] bg-white p-5">
           <div>
-            <h2 className="mb-2 text-sm font-extrabold text-[#14121A]">Highest-Revenue Products</h2>
+            <h2 className="mb-1 text-sm font-extrabold text-[#14121A]">
+              Highest-Revenue Products (Proportional Est.)
+            </h2>
+            <p className="mb-2 text-[10.5px] text-[#6B6779]">
+              Order-level refunds allocated proportionally in integer sen.
+            </p>
             <HorizontalBarList
               items={analytics.topByRevenue.map((i) => ({ label: i.title, value: i.revenueSen, color: "#4E2A84" }))}
               valueFormatter={formatCurrencySen}
@@ -241,7 +249,8 @@ export function SellerAnalyticsClient({
               <th className="px-4 py-2.5">Views (Unique)</th>
               <th className="px-4 py-2.5">Favourites</th>
               <th className="px-4 py-2.5">Units Sold</th>
-              <th className="px-4 py-2.5">Conversion</th>
+              <th className="px-4 py-2.5">Attributed Conversion</th>
+              <th className="px-4 py-2.5">Orders / Viewer</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-[#F1EFF6]">
@@ -254,6 +263,7 @@ export function SellerAnalyticsClient({
                 <td className="px-4 py-2.5">{l.favourites}</td>
                 <td className="px-4 py-2.5 font-bold text-[#4E2A84]">{l.unitsSold}</td>
                 <td className="px-4 py-2.5">{l.conversionPct !== null ? `${l.conversionPct}%` : "N/A"}</td>
+                <td className="px-4 py-2.5">{l.ordersPerViewer != null ? l.ordersPerViewer.toFixed(2) : "N/A"}</td>
               </tr>
             ))}
           </tbody>

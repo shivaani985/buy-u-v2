@@ -188,6 +188,48 @@ export interface AnalyticsDatasetInput {
   disputes: Array<{ id: string; order_id: string; status: string; created_at: string; resolved_at?: string | null }>;
 }
 
+/**
+ * Exact integer-sen proportional allocation using largest-remainder distribution
+ * (tie-broken deterministically by ascending index). Guarantees SUM(result) === totalNetSen
+ * whenever totalWeight > 0, with zero floating-point rounding drift.
+ * Note: Used for proportional order-level refund allocation estimates across multi-item orders.
+ */
+export function allocateProportionalSen(
+  totalNetSen: number,
+  lineGrossWeights: number[]
+): number[] {
+  const n = lineGrossWeights.length;
+  if (n === 0) return [];
+  const target = Math.max(0, Math.round(totalNetSen));
+  const cleanWeights = lineGrossWeights.map((w) => Math.max(0, Math.round(w)));
+  const totalWeight = cleanWeights.reduce((s, w) => s + w, 0);
+  if (target === 0 || totalWeight === 0) {
+    return new Array<number>(n).fill(0);
+  }
+
+  const allocations: number[] = new Array<number>(n).fill(0);
+  const remainders: Array<{ index: number; rem: number }> = [];
+  let allocatedSum = 0;
+
+  for (let i = 0; i < n; i += 1) {
+    const numerator = target * cleanWeights[i]!;
+    const floorVal = Math.floor(numerator / totalWeight);
+    const rem = numerator % totalWeight;
+    allocations[i] = floorVal;
+    allocatedSum += floorVal;
+    remainders.push({ index: i, rem });
+  }
+
+  let residual = target - allocatedSum;
+  remainders.sort((a, b) => (b.rem !== a.rem ? b.rem - a.rem : a.index - b.index));
+  for (let i = 0; i < remainders.length && residual > 0; i += 1) {
+    allocations[remainders[i]!.index]! += 1;
+    residual -= 1;
+  }
+
+  return allocations;
+}
+
 const EXCLUDED_UNPAID = new Set(["pending_payment", "expired", "cancelled", "canceled", "failed"]);
 
 export function computeSellerAnalytics(
@@ -277,7 +319,7 @@ export function computeSellerAnalytics(
       unitsSold: number;
       revenueSen: number;
       orders: number;
-      purchasers: Set<string>;
+      purchaserEvents: Array<{ buyerId: string; orderTs: number }>;
     }
   >();
   let unitsSold = 0;
@@ -286,9 +328,14 @@ export function computeSellerAnalytics(
     if (!ord) continue;
     const refProd = refundByOrder.get(orderId)?.product ?? 0;
     const netOrdSen = Math.max(0, ord.subtotal_sen - refProd);
-    const grossItemsSum = items.reduce((s, it) => s + it.unit_sen * it.quantity, 0);
+    const lineAllocations = allocateProportionalSen(
+      netOrdSen,
+      items.map((it) => it.unit_sen * it.quantity)
+    );
+    const orderTs = Date.parse(ord.paid_at ?? ord.created_at);
 
-    for (const oi of items) {
+    for (let idx = 0; idx < items.length; idx += 1) {
+      const oi = items[idx]!;
       unitsSold += oi.quantity;
       const lid = oi.listing_id ?? oi.title_snapshot;
       const cur = productPerf.get(lid) ?? {
@@ -297,27 +344,31 @@ export function computeSellerAnalytics(
         unitsSold: 0,
         revenueSen: 0,
         orders: 0,
-        purchasers: new Set<string>(),
+        purchaserEvents: [],
       };
-      const lineGross = oi.unit_sen * oi.quantity;
-      const lineNet =
-        grossItemsSum > 0 ? Math.round((netOrdSen * lineGross) / grossItemsSum) : 0;
       cur.unitsSold += oi.quantity;
-      cur.revenueSen += lineNet;
+      cur.revenueSen += lineAllocations[idx] ?? 0;
       cur.orders += 1;
-      cur.purchasers.add(ord.buyer_id);
+      cur.purchaserEvents.push({ buyerId: ord.buyer_id, orderTs });
       productPerf.set(lid, cur);
     }
   }
 
   const periodViews = data.views.filter(
-    (v) => listingIds.has(v.listing_id) && inRange(v.viewed_at, window.startMs, window.endMs)
+    (v) =>
+      listingIds.has(v.listing_id) &&
+      v.viewer_id !== sellerId &&
+      inRange(v.viewed_at, window.startMs, window.endMs)
   );
-  const viewsByListing = new Map<string, Set<string>>();
+  // Earliest qualifying view timestamp per (listing, viewer) for true pre-purchase cohort attribution
+  const firstViewByListingViewer = new Map<string, Map<string, number>>();
   for (const v of periodViews) {
-    const s = viewsByListing.get(v.listing_id) ?? new Set<string>();
-    s.add(v.viewer_id);
-    viewsByListing.set(v.listing_id, s);
+    const ts = Date.parse(v.viewed_at);
+    if (Number.isNaN(ts)) continue;
+    const m = firstViewByListingViewer.get(v.listing_id) ?? new Map<string, number>();
+    const prev = m.get(v.viewer_id);
+    if (prev === undefined || ts < prev) m.set(v.viewer_id, ts);
+    firstViewByListingViewer.set(v.listing_id, m);
   }
   const favCountByListing = new Map<string, number>();
   for (const f of data.favourites) {
@@ -327,17 +378,31 @@ export function computeSellerAnalytics(
   }
 
   const listingPerformance = sellerListings.map((l) => {
-    const uniqueViewers = viewsByListing.get(l.id)?.size ?? 0;
+    const viewerMap = firstViewByListingViewer.get(l.id);
+    const uniqueViewers = viewerMap?.size ?? 0;
     const perf = productPerf.get(l.id);
     const ordCount = perf?.orders ?? 0;
-    const uniquePurchasers = perf?.purchasers.size ?? 0;
-    // Viewer-to-purchaser conversion is bounded [0, 100]% and N/A when uniqueViewers === 0
+    const uniquePurchasers = new Set((perf?.purchaserEvents ?? []).map((e) => e.buyerId)).size;
+
+    // P0.17: True attributable viewer-to-purchaser cohort (purchase timestamp >= qualifying view in window).
+    // Strictly a subset of uniqueViewers — NEVER relies on clamping! Returns null (N/A) if unattributable.
+    const attributablePurchasers = new Set<string>();
+    if (viewerMap && perf) {
+      for (const ev of perf.purchaserEvents) {
+        const firstViewTs = viewerMap.get(ev.buyerId);
+        if (firstViewTs !== undefined && !Number.isNaN(ev.orderTs) && ev.orderTs >= firstViewTs) {
+          attributablePurchasers.add(ev.buyerId);
+        }
+      }
+    }
+
     const conversionPct =
-      uniqueViewers > 0
-        ? Math.min(100, Number(((uniquePurchasers / uniqueViewers) * 100).toFixed(1)))
+      uniqueViewers > 0 && (ordCount === 0 || attributablePurchasers.size > 0)
+        ? Number(((attributablePurchasers.size / uniqueViewers) * 100).toFixed(1))
         : null;
     const ordersPerViewer =
       uniqueViewers > 0 ? Number((ordCount / uniqueViewers).toFixed(2)) : null;
+
     return {
       id: l.id,
       title: l.title,
@@ -347,6 +412,7 @@ export function computeSellerAnalytics(
       views: periodViews.filter((v) => v.listing_id === l.id).length,
       uniqueViewers,
       uniquePurchasers,
+      attributablePurchasers: attributablePurchasers.size,
       favourites: favCountByListing.get(l.id) ?? 0,
       unitsSold: perf?.unitsSold ?? 0,
       revenueSen: perf?.revenueSen ?? 0,
@@ -473,34 +539,14 @@ export function computeAdminPlatformAnalytics(
     recordDatedActivity(fc.created_at, fc.recipient_id);
   }
 
-  // First-time successful sellers: sellers whose earliest-ever verified completed order falls in window
-  const earliestCompletedBySeller = new Map<string, number>();
-  for (const o of verifiedOrdersAll) {
-    if (o.status !== "completed") continue;
-    const ts = Date.parse(o.completed_at ?? o.paid_at ?? o.created_at);
-    if (Number.isNaN(ts)) continue;
-    const prev = earliestCompletedBySeller.get(o.seller_id);
-    if (prev === undefined || ts < prev) {
-      earliestCompletedBySeller.set(o.seller_id, ts);
-    }
-  }
-  let firstTimeSuccessfulSellers = 0;
-  for (const firstTs of earliestCompletedBySeller.values()) {
-    if ((window.startMs === null || firstTs >= window.startMs) && firstTs <= window.endMs) {
-      firstTimeSuccessfulSellers += 1;
-    }
+  const orderItemsByOrder = new Map<string, typeof data.orderItems>();
+  for (const oi of data.orderItems) {
+    const arr = orderItemsByOrder.get(oi.order_id) ?? [];
+    arr.push(oi);
+    orderItemsByOrder.set(oi.order_id, arr);
   }
 
-  let grossSalesSen = 0;
-  let executedRefundsSen = 0;
-  let netCommissionSen = 0;
-  let completedOrders = 0;
-  const salesByDay = new Map<string, number>();
-  const salesByCat = new Map<string, number>();
-  const sellerSales = new Map<string, number>();
-  const buyerOrderCounts = new Map<string, number>();
-
-  // Student Entrepreneurship distinct cohorts (P0.9: strictly kind === 'business', never mixing via is_food)
+  // Student Entrepreneurship distinct cohorts (P0.9 & P0.17: strictly kind === 'business', never mixing via is_food)
   const studentBusinessListingIds = new Set(
     data.listings.filter((l) => l.kind === "business").map((l) => l.id)
   );
@@ -515,18 +561,56 @@ export function computeAdminPlatformAnalytics(
   const serviceProviders = new Set(
     data.listings.filter((l) => l.kind === "service" && l.status === "published").map((l) => l.seller_id)
   );
+
+  // P0.17: Distinguish first-ever marketplace completed sale vs first-ever qualifying Student Business completed sale!
+  // An earlier pre-loved sale NEVER disqualifies a seller's first Student Business sale.
+  const earliestCompletedAnyBySeller = new Map<string, number>();
+  const earliestCompletedBusinessBySeller = new Map<string, number>();
+  for (const o of verifiedOrdersAll) {
+    if (o.status !== "completed") continue;
+    const ts = Date.parse(o.completed_at ?? o.paid_at ?? o.created_at);
+    if (Number.isNaN(ts)) continue;
+    const prevAny = earliestCompletedAnyBySeller.get(o.seller_id);
+    if (prevAny === undefined || ts < prevAny) {
+      earliestCompletedAnyBySeller.set(o.seller_id, ts);
+    }
+    const items = orderItemsByOrder.get(o.id) ?? [];
+    const hasBizItem = items.some(
+      (oi) => oi.listing_id !== null && studentBusinessListingIds.has(oi.listing_id)
+    );
+    if (hasBizItem) {
+      const prevBiz = earliestCompletedBusinessBySeller.get(o.seller_id);
+      if (prevBiz === undefined || ts < prevBiz) {
+        earliestCompletedBusinessBySeller.set(o.seller_id, ts);
+      }
+    }
+  }
+  let firstTimeSuccessfulSellers = 0;
+  for (const firstTs of earliestCompletedAnyBySeller.values()) {
+    if ((window.startMs === null || firstTs >= window.startMs) && firstTs <= window.endMs) {
+      firstTimeSuccessfulSellers += 1;
+    }
+  }
+  let firstTimeSuccessfulBusinessSellers = 0;
+  for (const firstTs of earliestCompletedBusinessBySeller.values()) {
+    if ((window.startMs === null || firstTs >= window.startMs) && firstTs <= window.endMs) {
+      firstTimeSuccessfulBusinessSellers += 1;
+    }
+  }
+
+  let grossSalesSen = 0;
+  let executedRefundsSen = 0;
+  let netCommissionSen = 0;
+  let completedOrders = 0;
+  const salesByDay = new Map<string, number>();
+  const salesByCat = new Map<string, number>();
+  const sellerSales = new Map<string, number>();
+  const buyerOrderCounts = new Map<string, number>();
   const activeBusinessSellersInPeriod = new Set<string>();
   let studentBusinessSalesSen = 0;
   let studentBusinessEarningsSen = 0;
   let studentBusinessOrders = 0;
   let preLovedCompletedTransactions = 0;
-
-  const orderItemsByOrder = new Map<string, typeof data.orderItems>();
-  for (const oi of data.orderItems) {
-    const arr = orderItemsByOrder.get(oi.order_id) ?? [];
-    arr.push(oi);
-    orderItemsByOrder.set(oi.order_id, arr);
-  }
 
   for (const o of periodOrders) {
     const adj = refundByOrder.get(o.id);
@@ -544,23 +628,27 @@ export function computeAdminPlatformAnalytics(
     buyerOrderCounts.set(o.buyer_id, (buyerOrderCounts.get(o.buyer_id) ?? 0) + 1);
 
     const items = orderItemsByOrder.get(o.id) ?? [];
-    const grossItemsSum = items.reduce((s, it) => s + it.unit_sen * it.quantity, 0);
+    const lineWeights = items.map((it) => it.unit_sen * it.quantity);
+    // Exact integer-sen largest-remainder allocation: sum(lineNetSales) === netOrd & sum(lineNetEarns) === netEarns!
+    const lineNetSales = allocateProportionalSen(netOrd, lineWeights);
+    const lineNetEarns = allocateProportionalSen(netEarns, lineWeights);
     let hasBusinessItem = false;
     let hasPreLovedItem = false;
-    let businessGrossSum = 0;
+    let bizSales = 0;
+    let bizEarns = 0;
 
-    for (const oi of items) {
+    for (let idx = 0; idx < items.length; idx += 1) {
+      const oi = items[idx]!;
       const listing = oi.listing_id ? listingById.get(oi.listing_id) : null;
       const cat = listing?.category_id ?? "other-goods";
-      const lineGross = oi.unit_sen * oi.quantity;
-      // Proportional net revenue attribution across multi-item orders & refunds
-      const lineNet =
-        grossItemsSum > 0 ? Math.round((netOrd * lineGross) / grossItemsSum) : 0;
-      salesByCat.set(cat, (salesByCat.get(cat) ?? 0) + lineNet);
+      const allocSales = lineNetSales[idx] ?? 0;
+      const allocEarns = lineNetEarns[idx] ?? 0;
+      salesByCat.set(cat, (salesByCat.get(cat) ?? 0) + allocSales);
 
       if (oi.listing_id && studentBusinessListingIds.has(oi.listing_id)) {
         hasBusinessItem = true;
-        businessGrossSum += lineGross;
+        bizSales += allocSales;
+        bizEarns += allocEarns;
       } else if (listing && listing.kind === "pre_loved") {
         hasPreLovedItem = true;
       }
@@ -568,10 +656,6 @@ export function computeAdminPlatformAnalytics(
 
     if (hasBusinessItem) {
       activeBusinessSellersInPeriod.add(o.seller_id);
-      const bizSales =
-        grossItemsSum > 0 ? Math.round((netOrd * businessGrossSum) / grossItemsSum) : netOrd;
-      const bizEarns =
-        grossItemsSum > 0 ? Math.round((netEarns * businessGrossSum) / grossItemsSum) : netEarns;
       studentBusinessSalesSen += bizSales;
       studentBusinessEarningsSen += bizEarns;
       studentBusinessOrders += 1;
@@ -663,6 +747,7 @@ export function computeAdminPlatformAnalytics(
       publishedStudentBusinessSellers: studentBusinessSellersPublished.size,
       activeStudentBusinessSellers: activeBusinessSellersInPeriod.size,
       firstTimeSuccessfulSellers,
+      firstTimeSuccessfulBusinessSellers,
       preLovedSellersCount: preLovedSellers.size,
       activeServiceProviders: serviceProviders.size,
       completedStudentBusinessOrders: studentBusinessOrders,

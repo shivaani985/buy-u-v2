@@ -4,6 +4,7 @@ import path from "node:path";
 import test from "node:test";
 import { formatCurrencySen, formatSenToRm } from "../src/lib/format.ts";
 import {
+  FREE_NOTICE_CONDITIONS,
   FREE_NOTICE_STATUSES,
   REPORT_REASONS,
   SERVICE_REQUEST_MODES,
@@ -19,6 +20,7 @@ import {
   validateServiceRequestInput,
 } from "../src/lib/marketplace/phase8.ts";
 import {
+  allocateProportionalSen,
   buildAnalyticsCsv,
   computeAdminPlatformAnalytics,
   computeGrowthPct,
@@ -101,16 +103,17 @@ test("P0.2: service request validation enforces remote/in_person mode, valid tim
   assert.deepEqual(getAllowedServiceActions("expired", "buyer"), []);
 });
 
-// 3. P0.1 & P0.6 — Hosted free_notices status model (active/closed/hidden), 1-5 images & draft support
-test("P0.1/P0.6: free item hosted constraints (active/closed/hidden, 1-5 images, relaxed drafts, completed-only impact)", () => {
+// 3. P0.1, P0.6 & P0.15 — Hosted free_notices status model (active/closed/hidden), exact condition vocabulary, 1-5 distinct safe images & draft support
+test("P0.1/P0.6/P0.15: free item hosted constraints (active/closed/hidden, exact condition, distinct safe images, drafts, completed-only impact)", () => {
   assert.deepEqual([...FREE_NOTICE_STATUSES], ["active", "closed", "hidden"]);
+  assert.deepEqual([...FREE_NOTICE_CONDITIONS], ["New/Unused", "Like New", "Good", "Fair"]);
 
-  // Publishing REQUIRES 1-5 images and title 5-100 + desc 10-2000
+  // Publishing REQUIRES 1-5 images, exact hosted condition, no duplicates, no traversal
   assert.equal(
     validateFreeNoticeInput({
       title: "Calculus 2 Textbook",
       description: "Clean textbook with highlighted notes for UMSKAL students.",
-      condition: "Good / Usable",
+      condition: "Good",
       quantity: 2,
       spotId: "blok-alpha",
       imagePaths: [],
@@ -123,7 +126,46 @@ test("P0.1/P0.6: free item hosted constraints (active/closed/hidden, 1-5 images,
     validateFreeNoticeInput({
       title: "Calculus 2 Textbook",
       description: "Clean textbook with highlighted notes for UMSKAL students.",
-      condition: "Good / Usable",
+      condition: "Good / Usable", // NOT in hosted free_notices_condition_check!
+      quantity: 2,
+      spotId: "blok-alpha",
+      imagePaths: ["u1/photo1.jpg"],
+      mode: "published",
+    }).ok,
+    false,
+    "Condition outside hosted vocabulary must be rejected"
+  );
+  assert.equal(
+    validateFreeNoticeInput({
+      title: "Calculus 2 Textbook",
+      description: "Clean textbook with highlighted notes for UMSKAL students.",
+      condition: "Good",
+      quantity: 2,
+      spotId: "blok-alpha",
+      imagePaths: ["u1/photo1.jpg", "u1/photo1.jpg"],
+      mode: "published",
+    }).ok,
+    false,
+    "Duplicate image paths must be rejected"
+  );
+  assert.equal(
+    validateFreeNoticeInput({
+      title: "Calculus 2 Textbook",
+      description: "Clean textbook with highlighted notes for UMSKAL students.",
+      condition: "Good",
+      quantity: 2,
+      spotId: "blok-alpha",
+      imagePaths: ["../other/photo1.jpg"],
+      mode: "published",
+    }).ok,
+    false,
+    "Path traversal must be rejected"
+  );
+  assert.equal(
+    validateFreeNoticeInput({
+      title: "Calculus 2 Textbook",
+      description: "Clean textbook with highlighted notes for UMSKAL students.",
+      condition: "Good",
       quantity: 2,
       spotId: "blok-alpha",
       imagePaths: ["u1/photo1.jpg"],
@@ -137,7 +179,7 @@ test("P0.1/P0.6: free item hosted constraints (active/closed/hidden, 1-5 images,
     validateFreeNoticeInput({
       title: "Calc",
       description: "",
-      condition: "Good / Usable",
+      condition: "Good",
       quantity: 1,
       spotId: "",
       imagePaths: [],
@@ -310,6 +352,117 @@ test("P0.9: fetchAllPaginated loops across multiple pages without truncating", a
   assert.equal(calls, 3);
 });
 
+// 8. P0.17 — True Viewer-Cohort Conversion (No Clamping), Exact Integer-Sen Remainder Allocation & First Business Sale vs First Marketplace Sale
+test("P0.17: exact largest-remainder sen allocation, true pre-purchase conversion attribution & first business vs marketplace seller distinction", () => {
+  // Exact integer-sen largest-remainder allocation: 1000 sen split across 3 equal items -> [334, 333, 333], sum === 1000!
+  const split3 = allocateProportionalSen(1000, [500, 500, 500]);
+  assert.deepEqual(split3, [334, 333, 333]);
+  assert.equal(split3.reduce((s, v) => s + v, 0), 1000);
+
+  // Unequal weights with odd partial refund: 1470 sen across [700, 300, 500] -> exact sum === 1470!
+  const splitOdd = allocateProportionalSen(1470, [700, 300, 500]);
+  assert.equal(splitOdd.reduce((s, v) => s + v, 0), 1470);
+  assert.deepEqual(allocateProportionalSen(0, [100, 200]), [0, 0]);
+
+  const nowMs = Date.parse("2026-11-24T12:00:00Z");
+  const win30 = resolveAnalyticsWindow("30d", nowMs);
+
+  // Seller 'stu-switch' had an OLD pre-loved sale (Sept) and their FIRST Student Business sale in Nov!
+  // Buyer 'b-unattr' purchased l-biz-2 WITHOUT viewing it first (or viewed AFTER purchase) -> conversion = N/A, ordersPerViewer = 1.00!
+  const dataset = {
+    profiles: [
+      { id: "stu-switch", university_role: "student", status: "active", created_at: "2026-08-01T00:00:00Z" },
+      { id: "b-1", university_role: "staff", status: "active", created_at: "2026-08-01T00:00:00Z" },
+      { id: "b-2", university_role: "staff", status: "active", created_at: "2026-08-01T00:00:00Z" },
+    ],
+    listings: [
+      { id: "l-old-pre", seller_id: "stu-switch", title: "Old Textbook", kind: "pre_loved", category_id: "books", is_food: false, quantity: 1, reserved_quantity: 0, status: "published", created_at: "2026-08-10T00:00:00Z" },
+      { id: "l-new-biz", seller_id: "stu-switch", title: "Matcha Cookies", kind: "business", category_id: "food", is_food: true, quantity: 10, reserved_quantity: 0, status: "published", created_at: "2026-11-01T00:00:00Z" },
+      { id: "l-unattr", seller_id: "stu-switch", title: "Direct Cart Item", kind: "business", category_id: "food", is_food: true, quantity: 10, reserved_quantity: 0, status: "published", created_at: "2026-11-01T00:00:00Z" },
+    ],
+    orders: [
+      { id: "o-sept", buyer_id: "b-1", seller_id: "stu-switch", checkout_session_id: "cs-ok", subtotal_sen: 1000, commission_sen: 20, seller_net_sen: 980, status: "completed", paid_at: "2026-09-05T00:00:00Z", completed_at: "2026-09-06T00:00:00Z", created_at: "2026-09-05T00:00:00Z" },
+      { id: "o-nov-biz", buyer_id: "b-1", seller_id: "stu-switch", checkout_session_id: "cs-ok", subtotal_sen: 1500, commission_sen: 30, seller_net_sen: 1470, status: "completed", paid_at: "2026-11-20T10:00:00Z", completed_at: "2026-11-21T10:00:00Z", created_at: "2026-11-20T10:00:00Z" },
+      { id: "o-nov-unattr", buyer_id: "b-2", seller_id: "stu-switch", checkout_session_id: "cs-ok-2", subtotal_sen: 1000, commission_sen: 20, seller_net_sen: 980, status: "completed", paid_at: "2026-11-20T10:00:00Z", completed_at: "2026-11-21T10:00:00Z", created_at: "2026-11-20T10:00:00Z" },
+    ],
+    orderItems: [
+      { order_id: "o-sept", listing_id: "l-old-pre", title_snapshot: "Old Textbook", unit_sen: 1000, quantity: 1 },
+      { order_id: "o-nov-biz", listing_id: "l-new-biz", title_snapshot: "Matcha Cookies", unit_sen: 1500, quantity: 1 },
+      { order_id: "o-nov-unattr", listing_id: "l-unattr", title_snapshot: "Direct Cart Item", unit_sen: 1000, quantity: 1 },
+    ],
+    checkoutSessions: [
+      { id: "cs-ok", buyer_id: "b-1", status: "paid", payment_status: "paid", paid_at: "2026-11-20T10:00:00Z" },
+      { id: "cs-ok-2", buyer_id: "b-2", status: "paid", payment_status: "paid", paid_at: "2026-11-20T10:00:00Z" },
+    ],
+    legacyPayments: [],
+    refunds: [],
+    views: [
+      // Qualifying view BEFORE purchase on l-new-biz (plus a second non-buying viewer b-2 -> 1/2 = 50%)
+      { viewer_id: "b-1", listing_id: "l-new-biz", viewed_at: "2026-11-19T08:00:00Z" },
+      { viewer_id: "b-2", listing_id: "l-new-biz", viewed_at: "2026-11-19T09:00:00Z" },
+      // Seller self-view MUST be excluded even if present in dataset!
+      { viewer_id: "stu-switch", listing_id: "l-new-biz", viewed_at: "2026-11-19T07:00:00Z" },
+      // View AFTER purchase on l-unattr -> NOT attributable -> conversionPct = null (N/A), ordersPerViewer = 1.0!
+      { viewer_id: "b-2", listing_id: "l-unattr", viewed_at: "2026-11-22T09:00:00Z" },
+    ],
+    favourites: [],
+    serviceRequests: [],
+    freeNotices: [],
+    freeClaims: [],
+    reviews: [],
+    reports: [],
+    disputes: [],
+  };
+
+  const sellerAn = computeSellerAnalytics("stu-switch", dataset, win30);
+  const bizRow = sellerAn.listingPerformance.find((l) => l.id === "l-new-biz");
+  assert.equal(bizRow?.uniqueViewers, 2, "Seller self-view excluded");
+  assert.equal(bizRow?.attributablePurchasers, 1);
+  assert.equal(bizRow?.conversionPct, 50);
+
+  const unattrRow = sellerAn.listingPerformance.find((l) => l.id === "l-unattr");
+  assert.equal(unattrRow?.attributablePurchasers, 0);
+  assert.equal(unattrRow?.conversionPct, null, "Unattributable purchase returns N/A instead of clamped %");
+  assert.equal(unattrRow?.ordersPerViewer, 1);
+
+  const adminAn = computeAdminPlatformAnalytics(dataset, win30);
+  assert.equal(adminAn.entrepreneurship.firstTimeSuccessfulSellers, 0, "Sept pre-loved sale already counted as first marketplace sale");
+  assert.equal(adminAn.entrepreneurship.firstTimeSuccessfulBusinessSellers, 1, "Earlier pre-loved sale MUST NOT disqualify first qualifying Student Business sale!");
+});
+
+// 9. P0.13–P0.18 — Final Hardened SQL Invariants
+test("P0.13-P0.18 SQL: SECURITY INVOKER profile/listing guards, committed service/claim expiry, storage/draft checks, offer update block, review privacy & convo notif RPC", () => {
+  // P0.13: SECURITY INVOKER profile system field guard + validated preferences RPC + JSON CHECK
+  assert.match(SQL, /FUNCTION public\.guard_profile_system_fields_trigger\(\)[\s\S]*SECURITY INVOKER[\s\S]*current_user IN \('postgres', 'service_role'\)/);
+  assert.match(SQL, /profiles_notification_prefs_valid_check/);
+  assert.match(SQL, /FUNCTION public\.update_notification_preferences_atomic/);
+
+  // P0.14: Standalone service expiry sweeper + committed return (NO rollback RAISE EXCEPTION after status='expired'!)
+  assert.match(SQL, /FUNCTION public\.expire_stale_service_requests_atomic/);
+  assert.doesNotMatch(SQL, /RAISE EXCEPTION 'SERVICE_REQUEST_EXPIRED'/);
+
+  // P0.15: free-items bucket MIME/size/ownership policies, storage.objects existence check, draft FOR UPDATE lock, manage_free_notice_atomic
+  assert.match(SQL, /UPDATE storage\.buckets[\s\S]*file_size_limit = 5242880[\s\S]*WHERE id = 'free-items'/);
+  assert.match(SQL, /FROM storage\.objects so[\s\S]*so\.bucket_id = 'free-items'/);
+  assert.match(SQL, /DRAFT_NOT_FOUND_OR_ALREADY_PUBLISHED/);
+  assert.match(SQL, /INVALID_FREE_CONDITION/);
+  assert.match(SQL, /FUNCTION public\.manage_free_notice_atomic/);
+  assert.match(SQL, /QUANTITY_BELOW_RESERVED/);
+
+  // P0.16: Immutable conversation/message/offer links, verified paid-order message exception, pending->accepted offer block guard, closed account restore guard
+  assert.match(SQL, /trg_conversations_immutable_guard/);
+  assert.match(SQL, /trg_messages_immutable_guard/);
+  assert.match(SQL, /INVALID_ORDER_ATTACHMENT/);
+  assert.match(SQL, /trg_offers_update_block_guard/);
+  assert.match(SQL, /CANNOT_RESTORE_CLOSED_ACCOUNT/);
+  assert.match(SQL, /FORBIDDEN_MODERATION_FIELDS/);
+
+  // P0.18: Phase 5 mark_conversation_notifications_read_atomic + column-level reviews SELECT hiding moderation_reason/moderated_by
+  assert.match(SQL, /FUNCTION public\.mark_conversation_notifications_read_atomic/);
+  assert.match(SQL, /REVOKE ALL ON TABLE public\.reviews FROM PUBLIC, anon, authenticated;/);
+  assert.doesNotMatch(SQL, /GRANT SELECT \([^)]*moderation_reason[^)]*\) ON TABLE public\.reviews TO authenticated;/);
+});
+
 // 7. P0.1–P0.11 — Consolidated Hardened SQL Invariants
 test("P0.1-P0.11 SQL: hosted schema compatibility, revoked direct writes, block triggers, bigint audit, report privacy & free-item expiry", () => {
   // P0.1: Hosted statuses preserved (free_notices active/closed/hidden + free_notice_drafts, reports submitted, listings hidden never removed, profiles suspended)
@@ -331,7 +484,7 @@ test("P0.1-P0.11 SQL: hosted schema compatibility, revoked direct writes, block 
 
   // P0.4: Direct client writes revoked + profile last_active_at tamper guard + atomic free publish & review edit
   assert.match(SQL, /REVOKE INSERT, UPDATE, DELETE ON TABLE public\.service_requests FROM PUBLIC, anon, authenticated;/);
-  assert.match(SQL, /REVOKE INSERT, UPDATE, DELETE ON TABLE public\.reviews FROM PUBLIC, anon, authenticated;/);
+  assert.match(SQL, /REVOKE ALL ON TABLE public\.reviews FROM PUBLIC, anon, authenticated;/);
   assert.match(SQL, /REVOKE INSERT, UPDATE, DELETE ON TABLE public\.free_notices FROM PUBLIC, anon, authenticated;/);
   assert.match(SQL, /REVOKE INSERT, UPDATE, DELETE ON TABLE public\.listing_views FROM PUBLIC, anon, authenticated;/);
   assert.match(SQL, /REVOKE INSERT, UPDATE, DELETE ON TABLE public\.notifications FROM PUBLIC, anon, authenticated;/);

@@ -14,6 +14,7 @@ import {
   createSupabaseServerClient,
   getSessionSummary,
 } from "@/lib/supabase/server";
+import { getServerServiceClient } from "@/lib/supabase/service";
 
 export interface MarketplaceActionResult {
   ok: boolean;
@@ -110,7 +111,7 @@ export async function updateServiceRequestAction(input: {
   const supabase = await createSupabaseServerClient();
   if (!supabase) return { ok: false, message: "Database unavailable." };
 
-  const { error } = await supabase.rpc("update_service_request_status_atomic", {
+  const { data, error } = await supabase.rpc("update_service_request_status_atomic", {
     p_request_id: input.requestId,
     p_action: input.action,
     p_note: input.note?.trim() || null,
@@ -120,9 +121,19 @@ export async function updateServiceRequestAction(input: {
     return { ok: false, message: "Could not update service request status." };
   }
 
+  const row = (Array.isArray(data) ? data[0] : data) as { out_status?: string } | undefined;
   revalidatePath("/requests");
   revalidatePath("/seller/services");
   revalidatePath("/seller/analytics");
+
+  if (row?.out_status === "expired") {
+    return {
+      ok: false,
+      message:
+        "This service request expired after the 48-hour response deadline and has been marked expired.",
+    };
+  }
+
   return { ok: true, message: `Service request updated (${input.action}).` };
 }
 
@@ -176,7 +187,7 @@ export async function saveOrPublishFreeNoticeAction(input: {
       contributor_id: uid,
       title: input.title.trim(),
       description: input.description.trim(),
-      condition: input.condition?.trim() || "Good / Usable",
+      condition: input.condition?.trim() || "Good",
       quantity: Math.max(1, Math.min(99, Math.round(Number(input.quantity) || 1))),
       spot_id: input.spotId?.trim() || null,
       category_id: input.categoryId?.trim() || null,
@@ -220,8 +231,23 @@ export async function saveOrPublishFreeNoticeAction(input: {
     if (error.message.includes("IMAGES_REQUIRED")) {
       return { ok: false, message: "Upload 1 to 5 photos before publishing a free item." };
     }
+    if (error.message.includes("INVALID_FREE_CONDITION")) {
+      return { ok: false, message: "Select a valid condition (New/Unused, Like New, Good, or Fair)." };
+    }
+    if (error.message.includes("DUPLICATE_IMAGE_PATHS")) {
+      return { ok: false, message: "Duplicate photo paths are not allowed." };
+    }
+    if (error.message.includes("INVALID_FREE_IMAGE_PATH") || error.message.includes("FREE_IMAGE_OBJECT_NOT_FOUND")) {
+      return { ok: false, message: "Uploaded photo could not be verified in storage. Please re-upload." };
+    }
+    if (error.message.includes("DRAFT_NOT_FOUND_OR_ALREADY_PUBLISHED")) {
+      return { ok: false, message: "This draft was already published or is no longer available." };
+    }
     if (error.message.includes("INVALID_DONATION_SPOT")) {
       return { ok: false, message: "Select an active campus donation spot." };
+    }
+    if (error.message.includes("INVALID_CATEGORY")) {
+      return { ok: false, message: "Select an active product category." };
     }
     return { ok: false, message: "Could not publish free item right now." };
   }
@@ -230,6 +256,57 @@ export async function saveOrPublishFreeNoticeAction(input: {
   return {
     ok: true,
     message: "Free item published to the community board.",
+  };
+}
+
+export async function manageFreeNoticeAction(input: {
+  noticeId: string;
+  action: "edit" | "close";
+  title?: string;
+  description?: string;
+  condition?: string;
+  quantity?: number;
+  collectionInstructions?: string | null;
+}): Promise<MarketplaceActionResult> {
+  if (!isValidUuid(input.noticeId)) {
+    return { ok: false, message: "Invalid free item reference." };
+  }
+  const session = await getSessionSummary();
+  const elig = evaluateSellerEligibility(session);
+  if (!elig.eligible) {
+    return { ok: false, message: elig.message || "Active student access required." };
+  }
+
+  const supabase = await createSupabaseServerClient();
+  if (!supabase) return { ok: false, message: "Database unavailable." };
+
+  const { error } = await supabase.rpc("manage_free_notice_atomic", {
+    p_notice_id: input.noticeId,
+    p_action: input.action,
+    p_title: input.title?.trim() || null,
+    p_description: input.description?.trim() || null,
+    p_condition: input.condition?.trim() || null,
+    p_quantity: typeof input.quantity === "number" ? Math.round(input.quantity) : null,
+    p_collection_instructions: input.collectionInstructions ?? null,
+  });
+
+  if (error) {
+    if (error.message.includes("QUANTITY_BELOW_RESERVED")) {
+      return { ok: false, message: "Cannot reduce quantity below currently reserved units." };
+    }
+    if (error.message.includes("CANNOT_CLOSE_WITH_ACTIVE_RESERVATIONS")) {
+      return { ok: false, message: "Complete or cancel active reservations before closing this notice." };
+    }
+    if (error.message.includes("FREE_NOTICE_MODERATED_HIDDEN")) {
+      return { ok: false, message: "Moderated free items cannot be edited directly." };
+    }
+    return { ok: false, message: "Could not update free item right now." };
+  }
+
+  revalidatePath("/free-items");
+  return {
+    ok: true,
+    message: input.action === "close" ? "Free item closed." : "Free item updated.",
   };
 }
 
@@ -249,6 +326,12 @@ export async function createFreeClaimAction(input: {
 
   const supabase = await createSupabaseServerClient();
   if (!supabase) return { ok: false, message: "Database unavailable." };
+
+  // P0.15: Commit stale reservation release independently before claiming so a claim error cannot roll it back
+  const service = getServerServiceClient();
+  if (service) {
+    await service.rpc("expire_stale_free_claims_atomic", { p_notice_id: input.noticeId });
+  }
 
   const { data, error } = await supabase.rpc("create_free_notice_claim_atomic", {
     p_notice_id: input.noticeId,
@@ -292,7 +375,7 @@ export async function updateFreeClaimAction(input: {
   const supabase = await createSupabaseServerClient();
   if (!supabase) return { ok: false, message: "Database unavailable." };
 
-  const { error } = await supabase.rpc("update_free_notice_claim_atomic", {
+  const { data, error } = await supabase.rpc("update_free_notice_claim_atomic", {
     p_claim_id: input.claimId,
     p_action: input.action,
     p_reason: input.reason?.trim() || null,
@@ -305,7 +388,14 @@ export async function updateFreeClaimAction(input: {
     return { ok: false, message: "Could not update free item claim." };
   }
 
+  const row = (Array.isArray(data) ? data[0] : data) as { out_status?: string } | undefined;
   revalidatePath("/free-items");
+  if (row?.out_status === "expired") {
+    return {
+      ok: false,
+      message: "This reservation expired after 48 hours and reserved units were released.",
+    };
+  }
   return { ok: true, message: `Claim updated (${input.action}).` };
 }
 
@@ -521,7 +611,8 @@ export async function updateAccountProfileAction(input: {
   const supabase = await createSupabaseServerClient();
   if (!supabase) return { ok: false, message: "Database unavailable." };
 
-  // Strictly update safe user-editable fields ONLY (never university_role, status, email, or admin flags!)
+  // P0.13: Strictly update hosted column-level editable profile fields ONLY,
+  // and persist notification_prefs through the dedicated validated RPC!
   const { error } = await supabase
     .from("profiles")
     .update({
@@ -529,12 +620,21 @@ export async function updateAccountProfileAction(input: {
       bio: input.bio.trim().slice(0, 400),
       faculty: input.faculty.trim().slice(0, 120) || null,
       phone: input.phone.trim().slice(0, 30) || null,
-      notification_prefs: input.notificationPrefs,
       updated_at: new Date().toISOString(),
     })
     .eq("id", uid);
 
   if (error) return { ok: false, message: "Could not update profile settings." };
+
+  const { error: prefErr } = await supabase.rpc("update_notification_preferences_atomic", {
+    p_inquiries: Boolean(input.notificationPrefs.inquiries),
+    p_reviews: Boolean(input.notificationPrefs.reviews),
+    p_community: Boolean(input.notificationPrefs.community),
+  });
+  if (prefErr && !/PGRST202|42883|update_notification_preferences_atomic/i.test(prefErr.message)) {
+    return { ok: false, message: "Profile saved, but notification preferences could not be updated." };
+  }
+
   revalidatePath("/account");
   return { ok: true, message: "Account settings saved." };
 }

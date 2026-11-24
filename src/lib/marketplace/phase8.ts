@@ -28,6 +28,15 @@ export type ServiceRequestStatus = (typeof SERVICE_REQUEST_STATUSES)[number];
 export const FREE_NOTICE_STATUSES = ["active", "closed", "hidden"] as const;
 export type FreeNoticeStatus = (typeof FREE_NOTICE_STATUSES)[number];
 
+/** Exact hosted free_notices_condition_check vocabulary. */
+export const FREE_NOTICE_CONDITIONS = [
+  "New/Unused",
+  "Like New",
+  "Good",
+  "Fair",
+] as const;
+export type FreeNoticeCondition = (typeof FREE_NOTICE_CONDITIONS)[number];
+
 export const FREE_CLAIM_STATUSES = [
   "requested",
   "reserved",
@@ -163,15 +172,18 @@ export function validateFreeNoticeInput(input: {
     return { ok: true };
   }
 
-  // Hosted free_notices constraints: title 5–100, description 10–2000, 1–5 images, NOT NULL condition & spot_id
+  // Hosted free_notices constraints: title 5–100, description 10–2000, exact condition vocabulary, 1–5 distinct safe images
   if (title.length < 5 || title.length > 100) {
     return { ok: false, error: "Title must be 5 to 100 characters." };
   }
   if (desc.length < 10 || desc.length > 2000) {
     return { ok: false, error: "Description must be 10 to 2,000 characters." };
   }
-  if (!input.condition?.trim()) {
-    return { ok: false, error: "Select an item condition." };
+  if (!(FREE_NOTICE_CONDITIONS as readonly string[]).includes(input.condition?.trim() ?? "")) {
+    return {
+      ok: false,
+      error: "Select a valid condition (New/Unused, Like New, Good, or Fair).",
+    };
   }
   if (!Number.isInteger(input.quantity) || input.quantity < 1 || input.quantity > 99) {
     return { ok: false, error: "Available quantity must be between 1 and 99." };
@@ -181,6 +193,15 @@ export function validateFreeNoticeInput(input: {
   }
   if (images.length < 1 || images.length > 5) {
     return { ok: false, error: "Upload 1 to 5 photos before publishing a free item." };
+  }
+  const normalizedImages = images.map((p) => p.trim());
+  if (new Set(normalizedImages).size !== normalizedImages.length) {
+    return { ok: false, error: "Duplicate image paths are not allowed." };
+  }
+  for (const img of normalizedImages) {
+    if (img.includes("..") || img.includes("\\") || img.startsWith("/")) {
+      return { ok: false, error: "Invalid image storage path." };
+    }
   }
   return { ok: true };
 }

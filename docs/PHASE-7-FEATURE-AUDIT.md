@@ -1,7 +1,7 @@
 # Buy-U v2 — Phase 7 Comprehensive Feature Audit & Requirement Traceability Matrix
 
 - **Audit Date:** 2026-11-24
-- **Codebase Baseline:** Commit `975d670` (`main`, 22 compiled routes, 85/85 local regression tests, Phase 6 closed) → Hardened Phases 7–9 implementation (P0.1–P0.12 aligned against live hosted schema)
+- **Codebase Baseline:** Commit `975d670` (`main`, 22 compiled routes, 85/85 local regression tests, Phase 6 closed) → Hardened Phases 7–9 implementation (P0.1–P0.18 aligned against live hosted schema & storage buckets)
 - **Hosted DB Inspected (Read-Only):** `duwwlcpdidrxkixvflag` (OpenAPI schema & RPC inventory preflight verified)
 - **Confirmed Policy Decisions:**
   - **Services (8A):** Off-platform campus agreement (`requested → accepted → in_progress → delivered → completed` / `declined` / `cancelled` / `expired`); individual request `mode` is strictly `remote` or `in_person` and `preferred_date` is typed `timestamptz`; excluded from paid sales & commission; eligible for **Verified Service** reviews upon completion.

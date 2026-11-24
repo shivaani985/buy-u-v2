@@ -307,7 +307,12 @@ export function AdminPlatformPortalClient({
 
           <div className="grid gap-5 lg:grid-cols-2">
             <div className="rounded-2xl border border-[#E6E3EE] bg-white p-5">
-              <h3 className="mb-3 text-sm font-extrabold text-[#14121A]">Sales by Category</h3>
+              <h3 className="mb-1 text-sm font-extrabold text-[#14121A]">
+                Sales by Category (Proportional Est.)
+              </h3>
+              <p className="mb-3 text-[11px] text-[#6B6779]">
+                Order-level refunds allocated proportionally across items via exact integer-sen distribution.
+              </p>
               <HorizontalBarList
                 items={stats.categorySales.slice(0, 6).map((c) => ({
                   label: c.categoryId,
@@ -348,7 +353,8 @@ export function AdminPlatformPortalClient({
             {[
               { l: "Published Student Business Sellers", v: String(ent.publishedStudentBusinessSellers) },
               { l: "Active Business Sellers (Period)", v: String(ent.activeStudentBusinessSellers) },
-              { l: "First-Time Successful Sellers", v: String(ent.firstTimeSuccessfulSellers) },
+              { l: "First-Time Business Sellers (Qualifying)", v: String(ent.firstTimeSuccessfulBusinessSellers) },
+              { l: "First-Time Marketplace Sellers (Any)", v: String(ent.firstTimeSuccessfulSellers) },
               { l: "Student Business Net Sales", v: formatCurrencySen(ent.studentBusinessSalesSen) },
               { l: "Business Seller Earnings (Pre-Exp)", v: formatCurrencySen(ent.studentBusinessEarningsSen) },
               { l: "Avg Earnings / Active Business Seller", v: formatCurrencySen(ent.avgEarningsPerBusinessSellerSen) },

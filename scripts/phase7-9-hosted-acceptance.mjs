@@ -136,17 +136,64 @@ async function run() {
         }
       });
 
-      await check("4. Profile last_active_at client tamper guard (P0.4)", async () => {
+      await check("4. Profile last_active_at client tamper blocked + validated notification_prefs RPC works (P0.13)", async () => {
         const fakeTs = "2099-01-01T00:00:00.000Z";
-        await buyer.client.from("profiles").update({ last_active_at: fakeTs }).eq("id", buyer.userId);
-        const { data } = await service.from("profiles").select("last_active_at").eq("id", buyer.userId).single();
-        assert.notEqual(data?.last_active_at, fakeTs, "Client must not forge profiles.last_active_at");
+        const { error: tamperErr } = await buyer.client.from("profiles").update({ last_active_at: fakeTs }).eq("id", buyer.userId);
+        assert.ok(tamperErr, "Direct authenticated client UPDATE to last_active_at must fail");
+
+        const { data: prefs, error: prefErr } = await buyer.client.rpc("update_notification_preferences_atomic", {
+          p_inquiries: true,
+          p_reviews: false,
+          p_community: true,
+        });
+        assert.equal(prefErr, null, `update_notification_preferences_atomic failed: ${prefErr?.message}`);
+        assert.equal(prefs?.reviews, false);
+
+        // Restore default true prefs
+        await buyer.client.rpc("update_notification_preferences_atomic", {
+          p_inquiries: true,
+          p_reviews: true,
+          p_community: true,
+        });
       });
 
-      await check("5. Free-item draft -> publish_free_notice_atomic -> claim -> expire_stale_free_claims_atomic (P0.1/P0.6)", async () => {
+      await check("5. Reviews moderation_reason & moderated_by hidden from non-admin members (P0.18)", async () => {
+        const { error: colErr } = await buyer.client.from("reviews").select("moderation_reason").limit(1);
+        assert.ok(colErr, "Non-admin member must NOT be able to SELECT reviews.moderation_reason");
+      });
+
+      await check("6. Free-item storage validation, draft concurrency lock, manage_free_notice_atomic & reservation expiry (P0.15)", async () => {
+        // Reject fake storage path that doesn't exist in storage.objects
+        const { error: fakeImgErr } = await seller.client.rpc("publish_free_notice_atomic", {
+          p_title: "QA Fake Photo Notice",
+          p_description: "Should fail because referenced storage object does not exist.",
+          p_condition: "Good",
+          p_quantity: 1,
+          p_spot_id: "blok-alpha",
+          p_category_id: "books",
+          p_collection_instructions: null,
+          p_image_paths: [`${seller.userId}/nonexistent-file.png`],
+          p_draft_id: null,
+        });
+        assert.ok(fakeImgErr && fakeImgErr.message.includes("FREE_IMAGE_OBJECT_NOT_FOUND"));
+
+        // Upload tiny valid 1x1 PNG to free-items under seller's folder
+        const pngBytes = Buffer.from(
+          "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+          "base64"
+        );
+        const objPath = `${seller.userId}/qa-free-${Date.now()}.png`;
+        const { error: upErr } = await seller.client.storage
+          .from("free-items")
+          .upload(objPath, pngBytes, { contentType: "image/png", upsert: true });
+        assert.equal(upErr, null, `free-items upload failed: ${upErr?.message}`);
+        cleanup.push(async () => {
+          await service.storage.from("free-items").remove([objPath]);
+        });
+
         const { data: draft, error: dErr } = await seller.client
           .from("free_notice_drafts")
-          .insert({ contributor_id: seller.userId, title: "QA Draft", description: "", quantity: 1 })
+          .insert({ contributor_id: seller.userId, title: "QA Draft", description: "", condition: "Good", quantity: 1 })
           .select("id")
           .single();
         assert.equal(dErr, null, `Draft insert failed: ${dErr?.message}`);
@@ -155,11 +202,11 @@ async function run() {
           p_title: "QA Hosted Free Notebook",
           p_description: "Clean unused campus notebook for hosted acceptance verification.",
           p_condition: "Like New",
-          p_quantity: 1,
+          p_quantity: 2,
           p_spot_id: "blok-alpha",
           p_category_id: "books",
           p_collection_instructions: "Meet at Blok Alpha lobby",
-          p_image_paths: ["qa/synthetic-notebook.png"],
+          p_image_paths: [objPath],
           p_draft_id: draft.id,
         });
         assert.equal(pErr, null, `publish_free_notice_atomic failed: ${pErr?.message}`);
@@ -167,6 +214,20 @@ async function run() {
           await service.from("free_notice_claims").delete().eq("notice_id", pubId);
           await service.from("free_notices").delete().eq("id", pubId);
         });
+
+        // Replaying same draft_id MUST be rejected (duplicate publication prevented!)
+        const { error: replayErr } = await seller.client.rpc("publish_free_notice_atomic", {
+          p_title: "QA Replay Duplicate",
+          p_description: "Replay must fail because draft was locked and deleted.",
+          p_condition: "Good",
+          p_quantity: 1,
+          p_spot_id: "blok-alpha",
+          p_category_id: "books",
+          p_collection_instructions: null,
+          p_image_paths: [objPath],
+          p_draft_id: draft.id,
+        });
+        assert.ok(replayErr && replayErr.message.includes("DRAFT_NOT_FOUND_OR_ALREADY_PUBLISHED"));
 
         const { data: claimRows, error: cErr } = await buyer.client.rpc("create_free_notice_claim_atomic", {
           p_notice_id: pubId,
@@ -183,16 +244,26 @@ async function run() {
         });
         assert.equal(accErr, null);
 
-        // Force past reservation_expires_at and verify expire_stale_free_claims_atomic releases reservation
+        // Donor cannot reduce quantity below reserved_quantity via manage_free_notice_atomic
+        const { error: belowResErr } = await seller.client.rpc("manage_free_notice_atomic", {
+          p_notice_id: pubId,
+          p_action: "edit",
+          p_quantity: 0,
+        });
+        assert.ok(belowResErr);
+
+        // Force past reservation_expires_at and verify handover commits 'expired' cleanly!
         await service
           .from("free_notice_claims")
           .update({ reservation_expires_at: "2020-01-01T00:00:00Z" })
           .eq("id", claimId);
-        const { data: expCount, error: expErr } = await service.rpc("expire_stale_free_claims_atomic", {
-          p_notice_id: pubId,
+        const { data: hoRows, error: hoErr } = await seller.client.rpc("update_free_notice_claim_atomic", {
+          p_claim_id: claimId,
+          p_action: "handover",
         });
-        assert.equal(expErr, null);
-        assert.equal(expCount, 1);
+        assert.equal(hoErr, null);
+        const hoStatus = Array.isArray(hoRows) ? hoRows[0]?.out_status : hoRows?.out_status;
+        assert.equal(hoStatus, "expired", "Overdue handover must persist expired status instead of rolling back");
 
         const { data: nAfter } = await service
           .from("free_notices")
@@ -201,6 +272,14 @@ async function run() {
           .single();
         assert.equal(nAfter?.status, "active");
         assert.equal(nAfter?.reserved_quantity, 0);
+
+        // Donor can close own notice once no reservations remain
+        const { data: closedSt, error: closeErr } = await seller.client.rpc("manage_free_notice_atomic", {
+          p_notice_id: pubId,
+          p_action: "close",
+        });
+        assert.equal(closeErr, null);
+        assert.equal(closedSt, "closed");
       });
 
       await check("6. Report target validation & admin_notes hidden from reporter (P0.7)", async () => {

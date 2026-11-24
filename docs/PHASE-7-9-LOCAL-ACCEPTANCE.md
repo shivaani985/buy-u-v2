@@ -6,14 +6,14 @@
 
 ---
 
-## 1. Local Verification Breakdown (P0.1–P0.12 Hardened)
+## 1. Local Verification Breakdown (P0.1–P0.18 Hardened)
 - **Unit & Integration Tests (`node --test scripts/*.test.mjs`):** Preserves all 85 Phase 1–6 baseline tests + expanded Phase 7–9 test suite (`scripts/phase7-9-marketplace.test.mjs`) verifying:
   - Currency formatting (`formatCurrencySen(0) === "RM 0.00"` vs `formatSenToRm(0) === "FREE"`).
-  - P0.2 service request `remote`/`in_person`-only mode, MYT-to-UTC `timestamptz` parsing, malformed date rejection, and `expired` status.
-  - P0.1/P0.6 hosted `free_notices` statuses (`active`/`closed`/`hidden`), 1–5 image requirement on publish vs relaxed `free_notice_drafts`, atomic claim transitions, and completed-only community impact.
-  - P0.8 rating aggregation excluding hidden reviews and never defaulting empty ratings to `5.0`.
-  - P0.9 bounded unique-purchaser conversion (`<= 100%`, `N/A` on 0 views), strict `kind='business'` entrepreneurship classification, `firstTimeSuccessfulSellers`, proportional multi-item refund attribution, custom MYT date ranges, hosted `submitted` open reports, dated active user trends, full pagination (`fetchAllPaginated`), and CSV formula sanitization.
-  - P0.1–P0.11 SQL invariants (revoked direct writes, block DB triggers, `bigint` audit log, column-level `reports` SELECT hiding `admin_notes`, `expire_stale_free_claims_atomic`, and explicit `service_role` table + sequence grants).
+  - P0.2/P0.14 service request `remote`/`in_person`-only mode, MYT-to-UTC `timestamptz` parsing, malformed date rejection, `expired` status, committed expiry return, and `expire_stale_service_requests_atomic` worker integration.
+  - P0.1/P0.6/P0.15 hosted `free_notices` statuses (`active`/`closed`/`hidden`), exact condition vocabulary (`New/Unused`, `Like New`, `Good`, `Fair`), 1–5 distinct student-owned storage objects verified in `storage.objects`, `free-items` bucket MIME/size policies, `FOR UPDATE` draft concurrency lock, donor `manage_free_notice_atomic` edit/close, committed handover expiry, and completed-only community impact.
+  - P0.8/P0.18 rating aggregation excluding hidden reviews, never defaulting empty ratings to `5.0`, and column-level `reviews` SELECT hiding `moderation_reason` & `moderated_by` + `mark_conversation_notifications_read_atomic` preserving Phase 5 messaging badge clearing.
+  - P0.9/P0.17 unclamped pre-purchase viewer-cohort conversion (`N/A` when unattributable + separate `ordersPerViewer`), exact largest-remainder integer-sen proportional refund allocation (`allocateProportionalSen`), strict `kind='business'` entrepreneurship classification, distinct `firstTimeSuccessfulBusinessSellers` vs `firstTimeSuccessfulSellers`, custom MYT date ranges, hosted `submitted` open reports, dated active user trends, deterministic pagination (`fetchAllPaginated`), and CSV formula sanitization.
+  - P0.13/P0.16 `SECURITY INVOKER` profile & listing moderation guards, `update_notification_preferences_atomic` + JSONB CHECK constraint, immutable conversation/message/offer link guards, verified paid-order message block exception, `pending -> accepted` offer block guard, and closed-account restore rejection.
 - **TypeScript (`tsc --noEmit`), ESLint (`npm run lint`), Production Build (`next build`):** Verified cleanly (see final turn summary).
 - **Hosted PostgreSQL Acceptance:** **NOT RUN** (prepared in `scripts/phase7-9-hosted-acceptance.mjs`, guarded by `ALLOW_PHASE7_9_HOSTED_QA=1`, covering all P0.12 hosted checks, awaiting owner SQL approval).
 - **Hosted Automated Browser Acceptance:** **NOT RUN** (prepared Scenarios A–U below, awaiting owner SQL approval).

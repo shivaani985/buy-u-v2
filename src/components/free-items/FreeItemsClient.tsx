@@ -5,11 +5,13 @@ import { useRouter } from "next/navigation";
 import { Gift, MapPin, CheckCircle2, AlertCircle, Search, ImagePlus, X } from "lucide-react";
 import {
   createFreeClaimAction,
+  manageFreeNoticeAction,
   saveOrPublishFreeNoticeAction,
   updateFreeClaimAction,
 } from "@/app/marketplace-actions";
 import { resolvePublicStorageUrl } from "@/lib/format";
 import {
+  FREE_NOTICE_CONDITIONS,
   computeFreeAvailableQuantity,
   getAllowedFreeClaimActions,
   type CommunityImpactSummary,
@@ -81,12 +83,58 @@ export function FreeItemsClient({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
-  const [condition, setCondition] = useState("Good / Usable");
+  const [condition, setCondition] = useState<string>("Good");
   const [quantity, setQuantity] = useState(1);
   const [spotId, setSpotId] = useState(spots[0]?.id ?? "blok-alpha");
   const [categoryId, setCategoryId] = useState(categories[0]?.id ?? "");
   const [instructions, setInstructions] = useState("");
   const [imagePaths, setImagePaths] = useState<string[]>([]);
+  const [managingNotice, setManagingNotice] = useState<FreeNoticeCard | null>(null);
+  const [editTitle, setEditTitle] = useState("");
+  const [editDesc, setEditDesc] = useState("");
+  const [editCond, setEditCond] = useState("Good");
+  const [editQty, setEditQty] = useState(1);
+  const [editInstr, setEditInstr] = useState("");
+
+  function openManageNotice(n: FreeNoticeCard) {
+    setManagingNotice(n);
+    setEditTitle(n.title);
+    setEditDesc(n.description);
+    setEditCond((FREE_NOTICE_CONDITIONS as readonly string[]).includes(n.condition) ? n.condition : "Good");
+    setEditQty(Math.max(1, n.quantity));
+    setEditInstr(n.collectionInstructions ?? "");
+  }
+
+  async function saveNoticeEdit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!managingNotice) return;
+    setBusy(`edit:${managingNotice.id}`);
+    setFeedback(null);
+    const res = await manageFreeNoticeAction({
+      noticeId: managingNotice.id,
+      action: "edit",
+      title: editTitle,
+      description: editDesc,
+      condition: editCond,
+      quantity: editQty,
+      collectionInstructions: editInstr,
+    });
+    setBusy(null);
+    setFeedback({ ok: res.ok, text: res.message });
+    if (res.ok) {
+      setManagingNotice(null);
+      router.refresh();
+    }
+  }
+
+  async function closeNotice(noticeId: string) {
+    setBusy(`close:${noticeId}`);
+    setFeedback(null);
+    const res = await manageFreeNoticeAction({ noticeId, action: "close" });
+    setBusy(null);
+    setFeedback({ ok: res.ok, text: res.message });
+    if (res.ok) router.refresh();
+  }
 
   const filtered = notices.filter((n) => {
     if (spotFilter !== "all" && n.spotId !== spotFilter) return false;
@@ -101,7 +149,11 @@ export function FreeItemsClient({
     setEditingId(d.id);
     setTitle(d.title === "Untitled Draft" ? "" : d.title);
     setDescription(d.description);
-    setCondition(d.condition || "Good / Usable");
+    setCondition(
+      (FREE_NOTICE_CONDITIONS as readonly string[]).includes(d.condition)
+        ? d.condition
+        : "Good"
+    );
     setQuantity(Math.max(1, d.quantity));
     setSpotId(d.spotId || spots[0]?.id || "blok-alpha");
     setCategoryId(d.categoryId || "");
@@ -331,7 +383,27 @@ export function FreeItemsClient({
                     </div>
                     <div className="mt-4 border-t border-[#F1EFF6] pt-3">
                       {currentUserId === n.contributorId ? (
-                        <span className="text-xs font-bold text-[#6B6779]">Your donation listing</span>
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="text-[11px] font-bold text-[#6B6779]">Your donation</span>
+                          <div className="flex gap-1.5">
+                            <button
+                              type="button"
+                              disabled={busy !== null}
+                              onClick={() => openManageNotice(n)}
+                              className="rounded-lg border border-[#4E2A84] px-2.5 py-1 text-[11px] font-bold text-[#4E2A84]"
+                            >
+                              Edit
+                            </button>
+                            <button
+                              type="button"
+                              disabled={busy !== null || n.reservedQuantity > 0}
+                              onClick={() => closeNotice(n.id)}
+                              className="rounded-lg border border-[#F9C6C2] px-2.5 py-1 text-[11px] font-bold text-[#B42318] disabled:opacity-40"
+                            >
+                              Close
+                            </button>
+                          </div>
+                        </div>
                       ) : (
                         <button
                           type="button"
@@ -388,9 +460,11 @@ export function FreeItemsClient({
                   onChange={(e) => setCondition(e.target.value)}
                   className="w-full rounded-xl border border-[#DFDCE8] px-3 py-2 text-xs"
                 >
-                  <option value="Like New">Like New</option>
-                  <option value="Good / Usable">Good / Usable</option>
-                  <option value="Well Used">Well Used</option>
+                  {FREE_NOTICE_CONDITIONS.map((cond) => (
+                    <option key={cond} value={cond}>
+                      {cond}
+                    </option>
+                  ))}
                 </select>
               </div>
               <div className="space-y-1">
@@ -604,6 +678,93 @@ export function FreeItemsClient({
               </p>
             </div>
           ))}
+        </div>
+      ) : null}
+      {/* P0.15: Donor Edit Published Free Notice Modal */}
+      {managingNotice ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <form
+            onSubmit={saveNoticeEdit}
+            className="w-full max-w-md space-y-3 rounded-2xl border border-[#E6E3EE] bg-white p-5 text-xs shadow-xl"
+          >
+            <h3 className="text-sm font-extrabold text-[#14121A]">
+              Edit Published Free Item
+            </h3>
+            <div className="space-y-1">
+              <label className="font-bold text-[#4A4656]">Title (5–100 chars)</label>
+              <input
+                required
+                minLength={5}
+                maxLength={100}
+                value={editTitle}
+                onChange={(e) => setEditTitle(e.target.value)}
+                className="w-full rounded-xl border border-[#DFDCE8] px-3 py-2"
+              />
+            </div>
+            <div className="space-y-1">
+              <label className="font-bold text-[#4A4656]">Description (10–2000 chars)</label>
+              <textarea
+                required
+                minLength={10}
+                maxLength={2000}
+                rows={3}
+                value={editDesc}
+                onChange={(e) => setEditDesc(e.target.value)}
+                className="w-full rounded-xl border border-[#DFDCE8] px-3 py-2"
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <div className="space-y-1">
+                <label className="font-bold text-[#4A4656]">Condition</label>
+                <select
+                  value={editCond}
+                  onChange={(e) => setEditCond(e.target.value)}
+                  className="w-full rounded-xl border border-[#DFDCE8] px-3 py-2"
+                >
+                  {FREE_NOTICE_CONDITIONS.map((c) => (
+                    <option key={c} value={c}>{c}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="space-y-1">
+                <label className="font-bold text-[#4A4656]">
+                  Quantity (min {Math.max(1, managingNotice.reservedQuantity)})
+                </label>
+                <input
+                  type="number"
+                  min={Math.max(1, managingNotice.reservedQuantity)}
+                  max={99}
+                  value={editQty}
+                  onChange={(e) => setEditQty(Number(e.target.value))}
+                  className="w-full rounded-xl border border-[#DFDCE8] px-3 py-2"
+                />
+              </div>
+            </div>
+            <div className="space-y-1">
+              <label className="font-bold text-[#4A4656]">Collection Instructions</label>
+              <input
+                value={editInstr}
+                onChange={(e) => setEditInstr(e.target.value)}
+                className="w-full rounded-xl border border-[#DFDCE8] px-3 py-2"
+              />
+            </div>
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setManagingNotice(null)}
+                className="rounded-xl border border-[#E6E3EE] px-4 py-2 font-bold text-[#4A4656]"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={busy !== null}
+                className="rounded-xl bg-[#4E2A84] px-4 py-2 font-bold text-white disabled:opacity-50"
+              >
+                Save Changes
+              </button>
+            </div>
+          </form>
         </div>
       ) : null}
     </div>

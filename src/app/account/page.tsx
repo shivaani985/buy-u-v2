@@ -1,7 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import {
-  Lock,
   LogIn,
   LogOut,
   ShieldCheck,
@@ -133,7 +132,19 @@ export default async function AccountPage() {
   const service = getServerServiceClient();
   if (service && profile?.id) {
     const [pRes, bRes] = await Promise.all([
-      service.from("profiles").select("bio,faculty,phone").eq("id", profile.id).maybeSingle(),
+      service
+        .from("profiles")
+        .select("bio,faculty,phone,notification_prefs")
+        .eq("id", profile.id)
+        .maybeSingle()
+        .then(async (res) => {
+          if (!res.error) return res;
+          return service
+            .from("profiles")
+            .select("bio,faculty,phone")
+            .eq("id", profile.id)
+            .maybeSingle();
+        }),
       service.from("member_blocks").select("blocked_id,created_at").eq("blocker_id", profile.id).order("created_at", { ascending: false }),
     ]);
     rawExtra = (pRes.data as AccountExtraRow | null) ?? null;
@@ -192,28 +203,6 @@ export default async function AccountPage() {
             <span>Sign out</span>
           </button>
         </form>
-      </div>
-
-      {/* Security Lock Notice: Profile Editing Intentionally Read-Only */}
-      <div
-        role="status"
-        className="mt-6 flex items-start gap-3 border-2 border-[#1D70B8] bg-[#F3F8FC] p-4 text-sm text-[#14121A]"
-      >
-        <Lock
-          className="mt-0.5 h-4 w-4 shrink-0 text-[#1D70B8]"
-          aria-hidden="true"
-        />
-        <div>
-          <span className="font-bold text-[#14538A]">
-            Profile Editing Temporarily Read-Only:{" "}
-          </span>
-          <span>
-            Profile updates are intentionally disabled until the database
-            column-level privilege remediation for{" "}
-            <code className="font-mono">profiles_update_own</code> is reviewed
-            and approved.
-          </span>
-        </div>
       </div>
 
       {/* Profile Overview */}
