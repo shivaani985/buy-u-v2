@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   computeOfferExpiresAt,
+  isOfferHoldPayable,
   mergeChatTimeline,
   OFFER_PENDING_TTL_MS,
   OFFER_RESERVATION_TTL_MS,
@@ -334,5 +335,52 @@ test("mergeChatTimeline interleaves messages and offers chronologically without 
   assert.deepEqual(
     timeline.map((e) => `${e.kind}:${e.id}`),
     ["message:m1", "offer:o1", "message:m2"]
+  );
+});
+
+test("isOfferHoldPayable enforces 30-minute hold expiry and order status regardless of sweep timing", () => {
+  const tAccept = new Date("2026-11-24T01:00:00.000Z").getTime();
+  const acceptedOffer = makeOffer({
+    status: "accepted",
+    respondedAt: new Date(tAccept).toISOString(),
+    reservationExpiresAt: new Date(tAccept + OFFER_RESERVATION_TTL_MS).toISOString(),
+    reservationReleasedAt: null,
+  });
+
+  // 1 second before 30m: payable
+  assert.equal(
+    isOfferHoldPayable(acceptedOffer, {
+      nowMs: tAccept + OFFER_RESERVATION_TTL_MS - 1000,
+    }).payable,
+    true
+  );
+
+  // At exact 30m: NOT payable even though DB status is still 'accepted' (unswept)
+  assert.equal(
+    isOfferHoldPayable(acceptedOffer, {
+      nowMs: tAccept + OFFER_RESERVATION_TTL_MS,
+    }).payable,
+    false
+  );
+
+  // Released hold: NOT payable
+  assert.equal(
+    isOfferHoldPayable(
+      {
+        ...acceptedOffer,
+        reservationReleasedAt: new Date(tAccept + OFFER_RESERVATION_TTL_MS).toISOString(),
+      },
+      { nowMs: tAccept + 1000 }
+    ).payable,
+    false
+  );
+
+  // Expired linked order: NOT payable
+  assert.equal(
+    isOfferHoldPayable(acceptedOffer, {
+      nowMs: tAccept + 1000,
+      linkedOrderStatus: "expired",
+    }).payable,
+    false
   );
 });

@@ -45,3 +45,15 @@
 
 1. Review and approve applying `docs/sql/phase-5b-atomic-bargaining.sql` to hosted Supabase (`duwwlcpdidrxkixvflag`) so `accept_offer_atomic`, `release_expired_offer_reservations`, and Realtime `offers` publication are live.
 2. Live two-account bargaining acceptance (submitting, cancelling, declining, accepting, 30m reservation hold, and Realtime offer sync on a Pre-Loved `allow_offers=true` listing) after migration approval.
+
+---
+
+## Phase 5B.2 — Final Migration Safety Review
+
+### Verified Hosted Findings Incorporated
+- `offers.status` already permits `'expired'` and `'cancelled'`.
+- `trg_guard_offer_updates` exists; updated `guard_offer_updates()` in `docs/sql/phase-5b-atomic-bargaining.sql` to **block direct seller `UPDATE` to `status = 'accepted'`** (must call `accept_offer_atomic`), protect `expires_at` / `reservation_expires_at` / `reservation_released_at`, and enforce 24h expiry while preserving direct buyer cancel/withdraw and seller decline/reject.
+- Removed redundant `idx_offers_unique_order_id` (`UNIQUE` on `offers.order_id` already exists on hosted DB).
+- `pg_cron` is available but NOT installed; moved `CREATE EXTENSION pg_cron` + `cron.schedule('*/2 * * * *', ...)` into an explicit owner-approval scheduler section (with external cron Option B documented). Page-visit opportunistic reconciliation is documented as best-effort fallback only, not the sole expiry mechanism.
+- Added `isOfferHoldPayable` (`src/lib/messages/offers.ts`) so 30-minute hold expiry and order status are enforced server-side regardless of sweep timing.
+- Documented Phase 6 late ToyyibPay payment reconciliation contract: if a payment webhook confirms after an order expired and stock was released, Phase 6 must NOT oversell or re-deduct stock — it logs the payment for refund/admin reconciliation and notifies buyer & admin.

@@ -1,24 +1,28 @@
 -- =============================================================================
--- Buy-U Phase 5B.1 — Safety-Reviewed Minimal Migration for Atomic Bargaining
--- STATUS: PROPOSAL ONLY — DO NOT APPLY WITHOUT EXPLICIT OWNER APPROVAL
+-- Buy-U Phase 5B.2 — Final Safety-Reviewed Migration for Atomic Bargaining
+-- STATUS: PROPOSAL ONLY — DO NOT EXECUTE WITHOUT EXPLICIT OWNER APPROVAL
 -- TARGET PROJECT: duwwlcpdidrxkixvflag
 --
--- PRE-FLIGHT READ-ONLY CHECKS (run separately before BEGIN to verify live DB):
---   1. Check existing offers triggers & constraints (ensure no legacy 5-offer cap
---      and verify status CHECK constraint allows 'pending','accepted','declined',
---      'cancelled','expired'):
---      SELECT conname, pg_get_constraintdef(oid)
---      FROM pg_constraint WHERE conrelid = 'public.offers'::regclass;
---      SELECT tgname, pg_get_triggerdef(oid)
---      FROM pg_trigger WHERE tgrelid = 'public.offers'::regclass AND NOT tgisinternal;
---   2. Check whether pg_cron is installed:
---      SELECT extname FROM pg_extension WHERE extname = 'pg_cron';
+-- Verified against live hosted schema:
+-- - `offers.status` already permits 'pending','accepted','declined','cancelled','expired'.
+-- - `trg_guard_offer_updates` exists on `public.offers`.
+-- - UNIQUE constraint on `offers.order_id` already exists (no duplicate index added).
+-- - `pg_cron` is available on this project but NOT yet installed.
+-- - Unlimited proposals preserved (no legacy 5-proposal cap).
+-- - All existing listings, orders, reservations, and offers remain untouched.
+--
+-- Phase 6 Late-Payment Reconciliation Contract:
+-- - Checkout/bill creation MUST reject any offer where `now() >= reservation_expires_at`
+--   or any order where `status <> 'pending_payment'` or `now() >= payment_deadline`,
+--   even if the background sweeper has not run yet.
+-- - If a ToyyibPay webhook confirms payment AFTER an order was marked 'expired'
+--   and its reserved unit released, Phase 6 MUST NOT re-deduct stock or oversell;
+--   it must log the payment for refund/admin reconciliation and notify buyer/admin.
 -- =============================================================================
 
 BEGIN;
 
 -- 1. Extend `public.offers` with authoritative 24h expiry & 30m reservation columns
---    Add nullable first so existing rows backfill from `created_at + 24h` accurately.
 ALTER TABLE public.offers
   ADD COLUMN IF NOT EXISTS expires_at timestamptz,
   ADD COLUMN IF NOT EXISTS reservation_expires_at timestamptz,
@@ -42,12 +46,77 @@ CREATE INDEX IF NOT EXISTS idx_offers_pending_expiry
   ON public.offers (expires_at)
   WHERE status = 'pending';
 
--- Guarantee 1-to-1 offer -> order mapping (prevents duplicate offer-linked orders in Phase 6)
-CREATE UNIQUE INDEX IF NOT EXISTS idx_offers_unique_order_id
-  ON public.offers (order_id)
-  WHERE order_id IS NOT NULL;
+-- 2. Harden existing `guard_offer_updates()` trigger:
+--    - Blocks direct seller UPDATE to `status = 'accepted'` (must use `accept_offer_atomic`)
+--    - Protects new expiry/reservation columns from direct authenticated mutation
+--    - Preserves authorized buyer cancel/withdraw and seller decline/reject on unexpired pending offers
+CREATE OR REPLACE FUNCTION public.guard_offer_updates()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_uid uuid := auth.uid();
+BEGIN
+  IF current_user IN ('postgres', 'service_role') OR public.is_active_admin() THEN
+    RETURN NEW;
+  END IF;
 
--- 2. Publish `public.offers` to Supabase Realtime idempotently
+  -- Immutable identity, pricing, order-link, and server-managed expiry/reservation fields
+  IF NEW.id IS DISTINCT FROM OLD.id
+     OR NEW.conversation_id IS DISTINCT FROM OLD.conversation_id
+     OR NEW.listing_id IS DISTINCT FROM OLD.listing_id
+     OR NEW.buyer_id IS DISTINCT FROM OLD.buyer_id
+     OR NEW.seller_id IS DISTINCT FROM OLD.seller_id
+     OR NEW.offer_price_sen IS DISTINCT FROM OLD.offer_price_sen
+     OR NEW.order_id IS DISTINCT FROM OLD.order_id
+     OR NEW.created_at IS DISTINCT FROM OLD.created_at
+     OR NEW.expires_at IS DISTINCT FROM OLD.expires_at
+     OR NEW.reservation_expires_at IS DISTINCT FROM OLD.reservation_expires_at
+     OR NEW.reservation_released_at IS DISTINCT FROM OLD.reservation_released_at
+  THEN
+    RAISE EXCEPTION 'Offer core and reservation fields cannot be modified directly'
+      USING ERRCODE = '42501';
+  END IF;
+
+  -- Only pending offers may transition
+  IF OLD.status <> 'pending' THEN
+    RAISE EXCEPTION 'Only pending offers can be updated'
+      USING ERRCODE = '42501';
+  END IF;
+
+  -- Enforce 24-hour expiry even before background sweep runs
+  IF now() >= COALESCE(OLD.expires_at, OLD.created_at + interval '24 hours') THEN
+    RAISE EXCEPTION 'Expired offers cannot be updated'
+      USING ERRCODE = '42501';
+  END IF;
+
+  -- Enforce participant role transitions
+  IF v_uid = OLD.buyer_id THEN
+    IF NEW.status NOT IN ('withdrawn', 'cancelled') THEN
+      RAISE EXCEPTION 'Buyers may only cancel or withdraw their own pending offer'
+        USING ERRCODE = '42501';
+    END IF;
+  ELSIF v_uid = OLD.seller_id THEN
+    IF NEW.status = 'accepted' THEN
+      RAISE EXCEPTION 'Offers must be accepted via accept_offer_atomic to reserve stock atomically'
+        USING ERRCODE = '42501';
+    END IF;
+    IF NEW.status NOT IN ('declined', 'rejected') THEN
+      RAISE EXCEPTION 'Sellers may only decline a pending offer directly'
+        USING ERRCODE = '42501';
+    END IF;
+  ELSE
+    RAISE EXCEPTION 'Only offer participants may update an offer'
+      USING ERRCODE = '42501';
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+-- 3. Publish `public.offers` to Supabase Realtime idempotently
 DO $$
 BEGIN
   IF NOT EXISTS (
@@ -61,7 +130,7 @@ BEGIN
   END IF;
 END $$;
 
--- 3. Release expired unpaid 30-minute offer reservations safely & exactly once,
+-- 4. Release expired unpaid 30-minute offer reservations safely & exactly once,
 --    and sweep expired 24-hour pending offers.
 CREATE OR REPLACE FUNCTION public.release_expired_offer_reservations()
 RETURNS integer
@@ -74,14 +143,14 @@ DECLARE
   v_now timestamptz := now();
   v_released_count integer := 0;
 BEGIN
-  -- 3a. Sweep expired 24-hour pending offers (no stock held)
+  -- 4a. Sweep expired 24-hour pending offers (no stock held)
   UPDATE public.offers
   SET status = 'expired',
       responded_at = COALESCE(responded_at, v_now)
   WHERE status = 'pending'
     AND COALESCE(expires_at, created_at + interval '24 hours') <= v_now;
 
-  -- 3b. Release expired 30-minute accepted holds that remain unpaid
+  -- 4b. Release expired 30-minute accepted holds that remain unpaid
   FOR v_offer IN
     SELECT o.id, o.listing_id, o.order_id
     FROM public.offers o
@@ -100,14 +169,14 @@ BEGIN
       )
     FOR UPDATE OF o SKIP LOCKED
   LOOP
-    -- Lock listing row before updating stock to keep lock ordering consistent
+    -- Consistent lock order: offers -> listings
     PERFORM 1
     FROM public.listings
     WHERE id = v_offer.listing_id
     FOR UPDATE;
 
-    -- Mark any linked unpaid pending_payment order expired in the same transaction
-    -- so ToyyibPay checkout/webhook cannot later pay an already-released hold.
+    -- Mark linked unpaid pending_payment order expired in the same transaction
+    -- so Phase 6 checkout cannot treat it as payable.
     IF v_offer.order_id IS NOT NULL THEN
       UPDATE public.orders
       SET status = 'expired',
@@ -135,7 +204,7 @@ BEGIN
 END;
 $$;
 
--- 4. Atomically accept a pending offer and reserve exactly 1 unit for 30 minutes
+-- 5. Atomically accept a pending offer and reserve exactly 1 unit for 30 minutes
 --    Supports UNLIMITED proposals (no legacy 5-proposal cap).
 CREATE OR REPLACE FUNCTION public.accept_offer_atomic(p_offer_id uuid)
 RETURNS public.offers
@@ -188,7 +257,7 @@ BEGIN
     RAISE EXCEPTION 'OFFER_ALREADY_LINKED';
   END IF;
 
-  -- Reject strictly after 24h server expiry (no dead UPDATE before RAISE)
+  -- Reject strictly after 24h server expiry
   IF v_now >= COALESCE(v_offer.expires_at, v_offer.created_at + interval '24 hours') THEN
     RAISE EXCEPTION 'OFFER_EXPIRED';
   END IF;
@@ -254,48 +323,34 @@ GRANT EXECUTE ON FUNCTION public.accept_offer_atomic(uuid) TO authenticated;
 REVOKE ALL ON FUNCTION public.release_expired_offer_reservations() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.release_expired_offer_reservations() TO service_role;
 
--- 5. Automatic scheduled release if pg_cron is enabled on this Supabase project
---    (App server also calls `reconcileExpiredOfferReservations()` opportunistically
---    via service_role on listing/cart/messages reads as a guaranteed fallback.)
-DO $$
-DECLARE
-  v_job_id bigint;
-BEGIN
-  IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron') THEN
-    SELECT jobid INTO v_job_id
-    FROM cron.job
-    WHERE jobname = 'buyu_release_expired_offer_reservations'
-    LIMIT 1;
-
-    IF v_job_id IS NOT NULL THEN
-      PERFORM cron.unschedule(v_job_id);
-    END IF;
-
-    PERFORM cron.schedule(
-      'buyu_release_expired_offer_reservations',
-      '*/2 * * * *',
-      'SELECT public.release_expired_offer_reservations();'
-    );
-  END IF;
-END $$;
-
 COMMIT;
+
+-- =============================================================================
+-- REQUIRED SCHEDULER SETUP (REQUIRES EXPLICIT OWNER APPROVAL)
+-- Note: Page-visit opportunistic reconciliation is best-effort only and MUST NOT
+-- be relied on as the sole expiry mechanism. Choose ONE scheduler below:
+--
+-- OPTION A (Recommended — Native Supabase pg_cron, every 2 minutes):
+--   CREATE EXTENSION IF NOT EXISTS pg_cron;
+--   SELECT cron.schedule(
+--     'buyu_release_expired_offer_reservations',
+--     '*/2 * * * *',
+--     $$SELECT public.release_expired_offer_reservations();$$
+--   );
+--
+-- OPTION B (Alternative — External Cron / Vercel Cron):
+--   Configure a 2-minute scheduled POST to a CRON_SECRET-protected route that
+--   calls `service.rpc('release_expired_offer_reservations')`.
+-- =============================================================================
 
 -- =============================================================================
 -- ROLLBACK PLAN (if ever needed after approval; preserves existing rows):
 --   BEGIN;
---   DO $$
---   DECLARE v_job_id bigint;
---   BEGIN
---     IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron') THEN
---       SELECT jobid INTO v_job_id FROM cron.job
---       WHERE jobname = 'buyu_release_expired_offer_reservations' LIMIT 1;
---       IF v_job_id IS NOT NULL THEN PERFORM cron.unschedule(v_job_id); END IF;
---     END IF;
---   END $$;
+--   -- If Option A pg_cron was enabled:
+--   -- SELECT cron.unschedule(jobid) FROM cron.job
+--   --   WHERE jobname = 'buyu_release_expired_offer_reservations';
 --   DROP FUNCTION IF EXISTS public.accept_offer_atomic(uuid);
 --   DROP FUNCTION IF EXISTS public.release_expired_offer_reservations();
---   DROP INDEX IF EXISTS public.idx_offers_unique_order_id;
 --   DROP INDEX IF EXISTS public.idx_offers_pending_expiry;
 --   DROP INDEX IF EXISTS public.idx_offers_active_reservation;
 --   ALTER TABLE public.offers

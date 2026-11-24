@@ -125,6 +125,72 @@ export function resolveEffectiveOfferStatus(
   return offer.status;
 }
 
+/**
+ * Authoritative server-side payability check enforced REGARDLESS of whether
+ * the background expiry sweeper has run yet.
+ * Used by Phase 6 checkout/ToyyibPay bill creation to prevent paying expired
+ * 30-minute holds or expired orders.
+ */
+export function isOfferHoldPayable(
+  offer: Pick<
+    OfferCardItem,
+    | "status"
+    | "respondedAt"
+    | "reservationExpiresAt"
+    | "reservationReleasedAt"
+    | "orderId"
+  >,
+  options: {
+    nowMs?: number;
+    linkedOrderStatus?: string | null;
+    linkedOrderPaymentDeadline?: string | null;
+  } = {}
+): { payable: boolean; reason?: string } {
+  const nowMs = options.nowMs ?? Date.now();
+
+  if (offer.status !== "accepted") {
+    return { payable: false, reason: "Offer is not in an accepted state." };
+  }
+
+  if (offer.reservationReleasedAt) {
+    return {
+      payable: false,
+      reason: "This offer's 30-minute reservation has already been released.",
+    };
+  }
+
+  const holdIso = computeReservationExpiresAt(
+    offer.respondedAt,
+    offer.reservationExpiresAt
+  );
+  if (!holdIso || nowMs >= new Date(holdIso).getTime()) {
+    return {
+      payable: false,
+      reason: "This offer's 30-minute reservation hold has expired.",
+    };
+  }
+
+  if (options.linkedOrderStatus) {
+    if (options.linkedOrderStatus !== "pending_payment") {
+      return {
+        payable: false,
+        reason: `Linked order is ${options.linkedOrderStatus} and cannot be paid.`,
+      };
+    }
+    if (options.linkedOrderPaymentDeadline) {
+      const deadlineMs = new Date(options.linkedOrderPaymentDeadline).getTime();
+      if (!Number.isNaN(deadlineMs) && nowMs >= deadlineMs) {
+        return {
+          payable: false,
+          reason: "Linked order payment deadline has expired.",
+        };
+      }
+    }
+  }
+
+  return { payable: true };
+}
+
 export function formatRemainingDuration(
   targetIso: string | null,
   nowMs = Date.now()
