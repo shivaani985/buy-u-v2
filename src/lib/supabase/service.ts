@@ -86,3 +86,27 @@ export async function createParticipantSignedAttachmentUrl(
   }
   return data.signedUrl;
 }
+
+let lastOfferReconcileMs = 0;
+const RECONCILE_THROTTLE_MS = 60_000;
+
+/**
+ * Opportunistic, throttled server-side trigger for
+ * `release_expired_offer_reservations()` so expired 30-minute offer holds are
+ * automatically released even on Supabase tiers without `pg_cron`.
+ * Fail-safe no-op before the Phase 5B SQL migration is applied.
+ */
+export async function reconcileExpiredOfferReservations(): Promise<void> {
+  const now = Date.now();
+  if (now - lastOfferReconcileMs < RECONCILE_THROTTLE_MS) return;
+  lastOfferReconcileMs = now;
+
+  const service = getServerServiceClient();
+  if (!service) return;
+
+  try {
+    await service.rpc("release_expired_offer_reservations");
+  } catch {
+    // Migration not yet applied or transient error — never block page loads.
+  }
+}

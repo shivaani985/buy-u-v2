@@ -2,6 +2,7 @@ import { getListingById } from "@/lib/catalog";
 import { resolvePublicStorageUrl } from "@/lib/format";
 import { getPublicSupabaseEnv } from "@/lib/supabase/env";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { reconcileExpiredOfferReservations } from "@/lib/supabase/service";
 import type {
   AuthSessionSummary,
   CatalogDataSource,
@@ -265,6 +266,9 @@ export async function getProductDetailData(
       buyerEligibility,
     };
   }
+
+  // Release any expired 30m offer holds before reading live stock (throttled, no-op pre-migration)
+  await reconcileExpiredOfferReservations();
 
   const { data: rawListing, error: listingErr } = await supabase
     .from("listings")

@@ -1,6 +1,7 @@
 import { resolvePublicStorageUrl } from "@/lib/format";
 import { getPublicSupabaseEnv } from "@/lib/supabase/env";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { reconcileExpiredOfferReservations } from "@/lib/supabase/service";
 import type { AuthSessionSummary } from "@/types/marketplace";
 import {
   computeOfferExpiresAt,
@@ -199,6 +200,9 @@ export async function getMessagesPageData(
   }
 
   const userId = eligibility.userId;
+
+  // Automatically release any expired 30m offer holds (throttled, fail-safe no-op pre-migration)
+  await reconcileExpiredOfferReservations();
 
   const [convRes, notifRes, blocksRes] = await Promise.all([
     supabase
