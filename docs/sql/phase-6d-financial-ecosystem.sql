@@ -479,6 +479,12 @@ REVOKE ALL ON public.financial_adjustments FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON public.payout_allocations FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON public.financial_execution_attempts FROM PUBLIC, anon, authenticated;
 
+GRANT ALL ON TABLE public.order_refunds TO service_role;
+GRANT ALL ON TABLE public.order_restock_logs TO service_role;
+GRANT ALL ON TABLE public.financial_adjustments TO service_role;
+GRANT ALL ON TABLE public.payout_allocations TO service_role;
+GRANT ALL ON TABLE public.financial_execution_attempts TO service_role;
+
 ALTER TABLE public.order_refunds ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.order_restock_logs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.financial_adjustments ENABLE ROW LEVEL SECURITY;
