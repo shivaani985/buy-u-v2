@@ -18,6 +18,7 @@ import {
   evaluateToyyibPayVerification,
   formatToyyibPayExpiryMyt,
   parseToyyibPayAmountToSen,
+  parseToyyibPayWebhookEnvelope,
 } from "../src/lib/payments/toyyibpay.ts";
 
 const BUYER_ID = "17d414ce-8349-4dc2-bccd-94d9bd0ebc52";
@@ -195,6 +196,8 @@ test("ToyyibPay contracts format MYT expiry, reject browser redirects, verify ex
     categoryCode: "cat-123",
     orderCode: "BU-2611-0DB3",
     itemCount: 1,
+    subtotalSen: 1500,
+    fpxFeeSen: 100,
     totalPaidSen: 1600,
     buyerName: "Demo Student Buyer",
     buyerEmail: "examiner.buyer@iluv.ums.edu.my",
@@ -203,8 +206,44 @@ test("ToyyibPay contracts format MYT expiry, reject browser redirects, verify ex
     paymentDeadlineIso: "2026-11-24T01:30:00.000Z",
   });
   assert.equal(payload.billAmount, 1600);
-  assert.equal(payload.billChargeToCustomer, 0);
+  // Official ToyyibPay API: 1 = charge FPX to bill owner ("Amount"), preventing RM 1.00 double-charge
+  assert.equal(payload.billChargeToCustomer, 1);
   assert.equal(payload.billExternalReferenceNo, "BU-2611-0DB3");
+
+  // Mismatched subtotal + FPX fee throws immediately
+  assert.throws(() =>
+    buildToyyibPayCreateBillPayload({
+      secretKey: "sandbox-secret",
+      categoryCode: "cat-123",
+      orderCode: "BU-2611-0DB3",
+      itemCount: 1,
+      subtotalSen: 1500,
+      fpxFeeSen: 100,
+      totalPaidSen: 1700,
+      buyerName: "Buyer",
+      buyerEmail: "buyer@iluv.ums.edu.my",
+      returnUrl: "http://localhost:3000/orders/return",
+      callbackUrl: "http://localhost:3000/api/payments/toyyibpay/callback",
+      paymentDeadlineIso: "2026-11-24T01:30:00.000Z",
+    })
+  );
+
+  // Webhook envelope parser + raw webhook NEVER marks paid directly
+  assert.deepEqual(
+    parseToyyibPayWebhookEnvelope({
+      billcode: "u4jq05z9",
+      order_id: "BU-2611-0DB3",
+      status: "1",
+      refno: "TP2611233721702887",
+    }),
+    {
+      billCode: "u4jq05z9",
+      orderCode: "BU-2611-0DB3",
+      status: "1",
+      refNo: "TP2611233721702887",
+    }
+  );
+  assert.equal(parseToyyibPayWebhookEnvelope({ billcode: "" }), null);
 
   const order = {
     orderCode: "BU-2611-0DB3",
@@ -223,10 +262,20 @@ test("ToyyibPay contracts format MYT expiry, reject browser redirects, verify ex
   const beforeDeadline = new Date("2026-11-24T01:20:00.000Z").getTime();
   const afterDeadline = new Date("2026-11-24T01:35:00.000Z").getTime();
 
-  // Browser redirect NEVER confirms paid
+  // Browser redirect and raw unverified webhook NEVER confirm paid
   assert.equal(
     evaluateToyyibPayVerification({
       source: "browser_redirect",
+      order,
+      expectedBillCode: "u4jq05z9",
+      transaction: validTx,
+      nowMs: beforeDeadline,
+    }).action,
+    "await_verification"
+  );
+  assert.equal(
+    evaluateToyyibPayVerification({
+      source: "raw_webhook",
       order,
       expectedBillCode: "u4jq05z9",
       transaction: validTx,

@@ -28,8 +28,14 @@ export interface ToyyibPayCreateBillRequest {
   billTo: string;
   billEmail: string;
   billPhone: string;
-  /** 0 = amount already includes FPX fee (`orders.total_paid_sen`). */
-  billChargeToCustomer: 0;
+  /**
+   * Official ToyyibPay API:
+   * - 0 = charge FPX fee to customer ON TOP of billAmount (WOULD DOUBLE-CHARGE!)
+   * - 1 = charge FPX fee to bill owner ("chargeOn": "Amount"), matching hosted
+   *       #BU-2611-0DB3 where billAmount = total_paid_sen (subtotal + RM 1.00)
+   *       and buyer pays exactly total_paid_sen once.
+   */
+  billChargeToCustomer: 1;
   /** ToyyibPay format: "DD-MM-YYYY HH:mm:ss" (MYT / UTC+8). */
   billExpiryDate: string;
 }
@@ -53,6 +59,8 @@ export function buildToyyibPayCreateBillPayload(input: {
   categoryCode: string;
   orderCode: string;
   itemCount: number;
+  subtotalSen: number;
+  fpxFeeSen: number;
   totalPaidSen: number;
   buyerName: string;
   buyerEmail: string;
@@ -61,6 +69,13 @@ export function buildToyyibPayCreateBillPayload(input: {
   callbackUrl: string;
   paymentDeadlineIso: string;
 }): ToyyibPayCreateBillRequest {
+  const expectedTotal = Math.floor(input.subtotalSen) + Math.floor(input.fpxFeeSen);
+  if (Math.floor(input.totalPaidSen) !== expectedTotal) {
+    throw new Error(
+      `Total payable (${input.totalPaidSen}) must equal subtotal (${input.subtotalSen}) + FPX fee (${input.fpxFeeSen}).`
+    );
+  }
+
   const safeName = `Buy-U ${input.orderCode}`.slice(0, 30);
   const safeDesc =
     `Buy-U Order ${input.orderCode} (${input.itemCount} ${input.itemCount === 1 ? "item" : "items"})`.slice(
@@ -82,9 +97,33 @@ export function buildToyyibPayCreateBillPayload(input: {
     billTo: input.buyerName.trim().slice(0, 80) || "UMS Member",
     billEmail: input.buyerEmail.trim(),
     billPhone: (input.buyerPhone ?? "").trim() || "0100000000",
-    billChargeToCustomer: 0,
+    // Charge FPX to bill owner ("Amount") since billAmount already includes fpxFeeSen.
+    billChargeToCustomer: 1,
     billExpiryDate: formatToyyibPayExpiryMyt(input.paymentDeadlineIso),
   };
+}
+
+export interface ToyyibPayWebhookEnvelope {
+  billCode: string;
+  orderCode: string;
+  status: string;
+  refNo: string;
+}
+
+/**
+ * Validates incoming unauthenticated ToyyibPay webhook POST fields before
+ * performing an authoritative server-to-server `getBillTransactions` lookup.
+ * Raw webhook fields are NEVER trusted to mark an order Paid directly.
+ */
+export function parseToyyibPayWebhookEnvelope(
+  raw: Record<string, unknown>
+): ToyyibPayWebhookEnvelope | null {
+  const billCode = String(raw.billcode ?? "").trim();
+  const orderCode = String(raw.order_id ?? "").trim();
+  const status = String(raw.status ?? "").trim();
+  const refNo = String(raw.refno ?? "").trim();
+  if (!billCode || !orderCode || !status) return null;
+  return { billCode, orderCode, status, refNo };
 }
 
 export interface ToyyibPayTransactionRecord {
@@ -122,7 +161,10 @@ export type PaymentVerificationDecision =
  * to manual refund reconciliation without overselling.
  */
 export function evaluateToyyibPayVerification(input: {
-  source: "browser_redirect" | "verified_server_transaction";
+  source:
+    | "browser_redirect"
+    | "raw_webhook"
+    | "verified_server_transaction";
   order: {
     orderCode: string;
     status: string;
@@ -134,12 +176,15 @@ export function evaluateToyyibPayVerification(input: {
   transaction?: ToyyibPayTransactionRecord | null;
   nowMs?: number;
 }): PaymentVerificationDecision {
-  // Rule 1: NEVER mark Paid from browser redirect alone
-  if (input.source === "browser_redirect") {
+  // Rule 1: NEVER mark Paid from browser redirect or unverified raw webhook POST
+  if (
+    input.source === "browser_redirect" ||
+    input.source === "raw_webhook"
+  ) {
     return {
       action: "await_verification",
       reason:
-        "Browser redirect cannot confirm payment. Waiting for verified ToyyibPay server callback.",
+        "Unverified redirect or raw webhook cannot confirm payment. Must verify via server-to-server ToyyibPay getBillTransactions.",
     };
   }
 
