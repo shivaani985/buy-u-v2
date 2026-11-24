@@ -46,6 +46,46 @@ CREATE INDEX IF NOT EXISTS idx_offers_pending_expiry
   ON public.offers (expires_at)
   WHERE status = 'pending';
 
+-- 1b. Narrowly scoped bidirectional block helper:
+--     `member_blocks` RLS only exposes rows where `auth.uid() = blocker_id`,
+--     so SECURITY INVOKER triggers cannot see `seller -> buyer` blocks directly.
+--     This helper returns ONLY a boolean and restricts authenticated callers
+--     strictly to pairs involving their own `auth.uid()`.
+CREATE OR REPLACE FUNCTION public.is_member_blocked_between(
+  p_user_a uuid,
+  p_user_b uuid
+)
+RETURNS boolean
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_uid uuid := auth.uid();
+BEGIN
+  IF p_user_a IS NULL OR p_user_b IS NULL THEN
+    RETURN false;
+  END IF;
+
+  IF current_user NOT IN ('postgres', 'service_role')
+     AND (v_uid IS NULL OR (v_uid <> p_user_a AND v_uid <> p_user_b)) THEN
+    RAISE EXCEPTION 'Forbidden block status lookup'
+      USING ERRCODE = '42501';
+  END IF;
+
+  RETURN EXISTS (
+    SELECT 1
+    FROM public.member_blocks
+    WHERE (blocker_id = p_user_a AND blocked_id = p_user_b)
+       OR (blocker_id = p_user_b AND blocked_id = p_user_a)
+  );
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.is_member_blocked_between(uuid, uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.is_member_blocked_between(uuid, uuid) TO authenticated, service_role;
+
 -- 2a. Add `BEFORE INSERT` guard trigger on `public.offers`:
 --     - Blocks forged status != 'pending', pre-linked order_id, responded_at,
 --       or reservation fields so NO authenticated/admin user can bypass atomic acceptance
@@ -65,7 +105,6 @@ DECLARE
   v_now timestamptz := now();
   v_conv public.conversations;
   v_listing public.listings;
-  v_blocked boolean := false;
 BEGIN
   -- Strictly restrict bypass to postgres and service_role (never authenticated/admin)
   IF current_user IN ('postgres', 'service_role') THEN
@@ -122,15 +161,8 @@ BEGIN
       USING ERRCODE = '42501';
   END IF;
 
-  -- Enforce bidirectional member_blocks
-  SELECT EXISTS (
-    SELECT 1
-    FROM public.member_blocks
-    WHERE (blocker_id = NEW.buyer_id AND blocked_id = NEW.seller_id)
-       OR (blocker_id = NEW.seller_id AND blocked_id = NEW.buyer_id)
-  ) INTO v_blocked;
-
-  IF v_blocked THEN
+  -- Enforce bidirectional member_blocks (buyer->seller AND seller->buyer)
+  IF public.is_member_blocked_between(NEW.buyer_id, NEW.seller_id) THEN
     RAISE EXCEPTION 'Offers are unavailable for blocked members'
       USING ERRCODE = '42501';
   END IF;
@@ -353,7 +385,6 @@ DECLARE
   v_listing public.listings;
   v_buyer_status text;
   v_now timestamptz := now();
-  v_blocked boolean := false;
 BEGIN
   IF v_uid IS NULL THEN
     RAISE EXCEPTION 'UNAUTHORIZED';
@@ -419,15 +450,8 @@ BEGIN
     RAISE EXCEPTION 'CONVERSATION_MISMATCH';
   END IF;
 
-  -- Enforce bidirectional member_blocks
-  SELECT EXISTS (
-    SELECT 1
-    FROM public.member_blocks
-    WHERE (blocker_id = v_offer.buyer_id AND blocked_id = v_offer.seller_id)
-       OR (blocker_id = v_offer.seller_id AND blocked_id = v_offer.buyer_id)
-  ) INTO v_blocked;
-
-  IF v_blocked THEN
+  -- Enforce bidirectional member_blocks (buyer->seller AND seller->buyer)
+  IF public.is_member_blocked_between(v_offer.buyer_id, v_offer.seller_id) THEN
     RAISE EXCEPTION 'MEMBER_BLOCKED';
   END IF;
 
@@ -510,6 +534,7 @@ COMMIT;
 --   --   WHERE jobname = 'buyu_release_expired_offer_reservations';
 --   DROP TRIGGER IF EXISTS trg_guard_offer_inserts ON public.offers;
 --   DROP FUNCTION IF EXISTS public.guard_offer_inserts();
+--   DROP FUNCTION IF EXISTS public.is_member_blocked_between(uuid, uuid);
 --   DROP FUNCTION IF EXISTS public.accept_offer_atomic(uuid);
 --   DROP FUNCTION IF EXISTS public.release_expired_offer_reservations();
 --   DROP INDEX IF EXISTS public.idx_offers_pending_expiry;

@@ -587,4 +587,29 @@ test("offer INSERT guard blocks forged status/server fields, overrides future ti
     simulateOfferInsertGuard({ ...base, offerPriceSen: 1600 }).ok,
     false
   );
+
+  // Bidirectional block check: both buyer->seller and seller->buyer block offer INSERT
+  const blocksBuyerToSeller = [{ blockerId: BUYER_ID, blockedId: SELLER_ID }];
+  const blocksSellerToBuyer = [{ blockerId: SELLER_ID, blockedId: BUYER_ID }];
+  const hasBlock = (blocks, a, b) =>
+    blocks.some(
+      (r) =>
+        (r.blockerId === a && r.blockedId === b) ||
+        (r.blockerId === b && r.blockedId === a)
+    );
+
+  assert.equal(
+    simulateOfferInsertGuard({
+      ...base,
+      isBlocked: hasBlock(blocksBuyerToSeller, BUYER_ID, SELLER_ID),
+    }).ok,
+    false
+  );
+  assert.equal(
+    simulateOfferInsertGuard({
+      ...base,
+      isBlocked: hasBlock(blocksSellerToBuyer, BUYER_ID, SELLER_ID),
+    }).ok,
+    false
+  );
 });

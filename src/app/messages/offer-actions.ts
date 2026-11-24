@@ -34,6 +34,17 @@ async function checkMemberBlocked(
   userA: string,
   userB: string
 ): Promise<boolean> {
+  // Prefer narrow SECURITY DEFINER RPC so seller -> buyer blocks are detected
+  // without weakening member_blocks RLS.
+  const { data: rpcBlocked, error: rpcErr } = await supabase.rpc(
+    "is_member_blocked_between",
+    { p_user_a: userA, p_user_b: userB }
+  );
+  if (!rpcErr && typeof rpcBlocked === "boolean") {
+    return rpcBlocked;
+  }
+
+  // Fallback pre-migration (sees blocker_id = auth.uid() rows)
   const { data } = await supabase
     .from("member_blocks")
     .select("blocker_id,blocked_id")
