@@ -14,7 +14,8 @@ export const dynamic = "force-dynamic";
 
 export default async function OrdersPage() {
   const session = await getSessionSummary();
-  const { eligibility, orders, error } = await getBuyerOrdersData(session);
+  const { eligibility, pendingCheckouts, orders, error } =
+    await getBuyerOrdersData(session);
 
   return (
     <div className="mx-auto w-full max-w-[1200px] px-4 py-6 sm:px-6 lg:px-10">
@@ -74,7 +75,7 @@ export default async function OrdersPage() {
           />
           <p className="text-sm text-[#3E3A4A]">{error}</p>
         </section>
-      ) : orders.length === 0 ? (
+      ) : pendingCheckouts.length === 0 && orders.length === 0 ? (
         <section className="rounded-2xl border border-[#E6E3EE] bg-white px-6 py-14 text-center">
           <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl border border-[#E6E3EE] bg-[#FAF9FC] text-[#4E2A84]">
             <Package className="h-6 w-6" aria-hidden="true" />
@@ -96,7 +97,7 @@ export default async function OrdersPage() {
           </div>
         </section>
       ) : (
-        <OrdersClient orders={orders} />
+        <OrdersClient pendingCheckouts={pendingCheckouts} orders={orders} />
       )}
     </div>
   );

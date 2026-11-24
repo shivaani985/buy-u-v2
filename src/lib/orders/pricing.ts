@@ -75,7 +75,9 @@ export interface CartOrderPreparationResult {
 
 /**
  * Prepares per-seller order plans from a validated Phase 4C cart checkout summary.
- * Each seller receives a separate order and separate RM 1.00 FPX fee (1 bill per order).
+ * Phase 6B.4 Unified Checkout: ONE RM 1.00 FPX fee per checkout (regardless of seller
+ * count); each seller receives an independent internal order with 2% commission and
+ * `fpxFeeSen = 0` so per-seller refunds never duplicate the checkout FPX fee.
  */
 export function prepareCartOrderPlans(
   eligibility: BuyerEligibilityResult,
@@ -109,7 +111,7 @@ export function prepareCartOrderPlans(
   }
 
   const orders: PreparedSellerOrderPlan[] = checkout.sellerOrders.map((so) => {
-    const financials = calculateOrderFinancials(so.subtotalSen);
+    const financials = calculateOrderFinancials(so.subtotalSen, 0);
     return {
       source: "cart",
       sellerId: so.sellerId,
@@ -117,7 +119,7 @@ export function prepareCartOrderPlans(
       collectionAreaName: so.collectionAreas.join(", ") || "UMSKAL Campus",
       itemCount: so.validQuantity,
       financials,
-      paymentWindowLabel: "15 minutes after order creation",
+      paymentWindowLabel: "15 minutes after checkout creation",
       paymentDeadlineIso: null,
     };
   });
@@ -126,10 +128,8 @@ export function prepareCartOrderPlans(
     (sum, o) => sum + o.financials.subtotalSen,
     0
   );
-  const combinedFpxFeeSen = orders.reduce(
-    (sum, o) => sum + o.financials.fpxFeeSen,
-    0
-  );
+  const combinedFpxFeeSen =
+    combinedSubtotalSen > 0 ? TOYYIBPAY_FPX_FEE_SEN : 0;
 
   return {
     ok: true,

@@ -64,7 +64,7 @@ test("calculateOrderFinancials matches hosted 2% commission and RM 1.00 FPX fee 
   assert.equal(zero.commissionSen, 0);
 });
 
-test("prepareCartOrderPlans splits multi-seller cart into separate seller orders with per-order FPX fees", () => {
+test("prepareCartOrderPlans splits multi-seller cart into separate seller orders with ONE consolidated RM 1.00 FPX fee", () => {
   const cart = buildCartSummary([
     {
       id: "r1",
@@ -121,10 +121,14 @@ test("prepareCartOrderPlans splits multi-seller cart into separate seller orders
   assert.equal(result.ok, true);
   assert.equal(result.orders.length, 2);
   assert.equal(result.combinedSubtotalSen, 9000);
-  assert.equal(result.combinedFpxFeeSen, 200); // 2 separate seller orders * RM 1.00
-  assert.equal(result.combinedTotalPayableSen, 9200);
+  assert.equal(result.combinedFpxFeeSen, 100); // Phase 6B.4: ONE RM 1.00 FPX fee per checkout
+  assert.equal(result.combinedTotalPayableSen, 9100);
+  assert.equal(result.orders[0]?.financials.fpxFeeSen, 0);
+  assert.equal(result.orders[1]?.financials.fpxFeeSen, 0);
   assert.equal(result.orders[0]?.financials.commissionSen, 80); // 2% of 4000
+  assert.equal(result.orders[0]?.financials.sellerNetSen, 3920);
   assert.equal(result.orders[1]?.financials.commissionSen, 100); // 2% of 5000
+  assert.equal(result.orders[1]?.financials.sellerNetSen, 4900);
 });
 
 test("prepareOfferOrderPlan enforces locked negotiated price, buyer ownership, and strict 30m hold deadline", () => {
@@ -996,4 +1000,126 @@ test("Phase 6B.3 bill-lifecycle state machine: preserves valid bills on failed p
   payment.status = "late_payment_review";
   assert.equal(markFailed("billReal123"), "ignored_terminal");
   assert.equal(payment.status, "late_payment_review");
+});
+
+test("Phase 6B.4 unified checkout pricing, SQL guards, cross-table tx_ref uniqueness, cron isolation, and single-button UI invariants", () => {
+  const root = process.cwd();
+
+  // Worked business example: Seller A RM15 + Seller B RM20 -> Combined RM35 + ONE RM1 FPX = RM36
+  const makeLine = (id, sellerId, title, unitPriceSen, quantity) => ({
+    id,
+    listingId: `00000000-0000-4000-8000-00000000000${id.slice(-1)}`,
+    variantId: null,
+    variantLabel: null,
+    title,
+    imageUrl: null,
+    campusArea: "Cafe UMSKAL",
+    condition: "New",
+    sellerId,
+    sellerDisplayName: sellerId === SELLER_A ? "Seller A" : "Seller B",
+    storefrontName: null,
+    sellerLogoUrl: null,
+    sellerBadge: "Verified UMS Student",
+    unitPriceSen,
+    quantity,
+    availableStock: 10,
+    reservedQuantity: 0,
+    lineSubtotalSen: unitPriceSen * quantity,
+    isValid: true,
+    issueCode: null,
+    issueMessage: null,
+    canAdjustToMax: false,
+  });
+
+  // Scenario 1: 1 seller, 1 item (RM15 + RM1 = RM16)
+  const s1 = prepareCartOrderPlans(
+    makeEligibility(),
+    buildCheckoutPreparation(buildCartSummary([makeLine("i1", SELLER_A, "Item 1", 1500, 1)]))
+  );
+  assert.equal(s1.combinedSubtotalSen, 1500);
+  assert.equal(s1.combinedFpxFeeSen, 100);
+  assert.equal(s1.combinedTotalPayableSen, 1600);
+  assert.equal(s1.orders[0]?.financials.commissionSen, 30);
+  assert.equal(s1.orders[0]?.financials.sellerNetSen, 1470);
+
+  // Scenario 2: 1 seller, multiple product types (RM10 + RM15 + RM1 = RM26)
+  const s2 = prepareCartOrderPlans(
+    makeEligibility(),
+    buildCheckoutPreparation(
+      buildCartSummary([
+        makeLine("i1", SELLER_A, "Notebook", 1000, 1),
+        makeLine("i2", SELLER_A, "Pen Set", 1500, 1),
+      ])
+    )
+  );
+  assert.equal(s2.orders.length, 1);
+  assert.equal(s2.combinedSubtotalSen, 2500);
+  assert.equal(s2.combinedFpxFeeSen, 100);
+  assert.equal(s2.combinedTotalPayableSen, 2600);
+  assert.equal(s2.orders[0]?.financials.commissionSen, 50);
+
+  // Scenario 3: Multiple quantities of one product (3 x RM10 + RM1 = RM31)
+  const s3 = prepareCartOrderPlans(
+    makeEligibility(),
+    buildCheckoutPreparation(buildCartSummary([makeLine("i1", SELLER_A, "Snack", 1000, 3)]))
+  );
+  assert.equal(s3.combinedSubtotalSen, 3000);
+  assert.equal(s3.combinedFpxFeeSen, 100);
+  assert.equal(s3.combinedTotalPayableSen, 3100);
+  assert.equal(s3.orders[0]?.financials.commissionSen, 60);
+
+  // Scenario 4: Multiple sellers (Seller A RM15 + Seller B RM20 + ONE RM1 FPX = RM36)
+  const s4 = prepareCartOrderPlans(
+    makeEligibility(),
+    buildCheckoutPreparation(
+      buildCartSummary([
+        makeLine("i1", SELLER_A, "Notebook RM15", 1500, 1),
+        makeLine("i2", SELLER_B, "Lamp RM20", 2000, 1),
+      ])
+    )
+  );
+  assert.equal(s4.orders.length, 2);
+  assert.equal(s4.combinedSubtotalSen, 3500);
+  assert.equal(s4.combinedFpxFeeSen, 100);
+  assert.equal(s4.combinedTotalPayableSen, 3600);
+  const ordA = s4.orders.find((o) => o.sellerId === SELLER_A);
+  const ordB = s4.orders.find((o) => o.sellerId === SELLER_B);
+  assert.equal(ordA?.financials.fpxFeeSen, 0);
+  assert.equal(ordA?.financials.commissionSen, 30);
+  assert.equal(ordA?.financials.sellerNetSen, 1470);
+  assert.equal(ordB?.financials.fpxFeeSen, 0);
+  assert.equal(ordB?.financials.commissionSen, 40);
+  assert.equal(ordB?.financials.sellerNetSen, 1960);
+  assert.equal((ordA?.financials.commissionSen ?? 0) + (ordB?.financials.commissionSen ?? 0), 70);
+
+  // SQL architecture, legacy-RPC guards, cross-table tx_ref uniqueness, cron isolation, and RLS privacy
+  const sql = fs.readFileSync(
+    path.resolve(root, "docs/sql/phase-6b4-unified-checkout.sql"),
+    "utf8"
+  );
+  assert.ok(sql.includes("CREATE TABLE IF NOT EXISTS public.checkout_sessions"));
+  assert.ok(sql.includes("ALTER TABLE public.checkout_sessions ENABLE ROW LEVEL SECURITY"));
+  assert.ok(sql.includes("GRANT SELECT (checkout_session_id) ON public.orders TO authenticated"));
+  assert.ok(sql.includes("CREATE OR REPLACE FUNCTION public.create_cart_checkout_atomic"));
+  assert.ok(sql.includes("CREATE OR REPLACE FUNCTION public.create_offer_checkout_atomic"));
+  assert.ok(sql.includes("CREATE OR REPLACE FUNCTION public.claim_checkout_bill_slot"));
+  assert.ok(sql.includes("CREATE OR REPLACE FUNCTION public.finalize_checkout_bill_slot"));
+  assert.ok(sql.includes("CREATE OR REPLACE FUNCTION public.confirm_checkout_payment_atomic"));
+  assert.ok(sql.includes("CREATE OR REPLACE FUNCTION public.mark_checkout_payment_failed_atomic"));
+  // Legacy RPC guards block unified child orders
+  assert.ok(sql.includes("RETURN QUERY SELECT 'use_checkout_session'"));
+  assert.ok(sql.includes("RAISE EXCEPTION 'UNIFIED_CHECKOUT_USE_SESSION_RPC'"));
+  // Cross-table transaction_ref uniqueness in BOTH directions
+  assert.ok(sql.includes("FROM public.payments\n    WHERE transaction_ref = p_transaction_ref"));
+  assert.ok(sql.includes("FROM public.checkout_sessions\n    WHERE transaction_ref = p_transaction_ref"));
+  // Cron Job 2 Part A excludes unified child orders (`checkout_session_id IS NULL`)
+  assert.ok(sql.includes("AND checkout_session_id IS NULL"));
+
+  // UI invariant: CheckoutClient has NO separate "Pay Seller Bill" button and shows RM1 once
+  const checkoutUi = fs.readFileSync(
+    path.resolve(root, "src/components/checkout/CheckoutClient.tsx"),
+    "utf8"
+  );
+  assert.equal(checkoutUi.includes("Pay Seller Bill"), false);
+  assert.ok(checkoutUi.includes("once per checkout"));
 });
