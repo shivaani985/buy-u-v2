@@ -9,6 +9,7 @@ import {
   parseOfferPriceRmToSen,
   resolveEffectiveOfferStatus,
   simulateAtomicOfferAccept,
+  simulateOfferInsertGuard,
   simulateReleaseExpiredReservation,
   validateCreateOffer,
   validateOfferTransition,
@@ -502,4 +503,88 @@ test("30m hold expiry releases stock and expires linked unpaid order even when o
   assert.equal(paidResult.released, false);
   assert.equal(paidResult.nextState.listingReservedQuantity, 1);
   assert.equal(paidResult.nextState.linkedOrderStatus, "paid");
+});
+
+test("offer INSERT guard blocks forged status/server fields, overrides future timestamps, and validates seller/listing/price", () => {
+  const serverNowMs = new Date("2026-11-24T08:00:00.000Z").getTime();
+  const otherUid = "99999999-9103-4bc2-84d3-6e0101b7659a";
+  const base = {
+    actorUserId: BUYER_ID,
+    isActiveMember: true,
+    buyerId: BUYER_ID,
+    sellerId: SELLER_ID,
+    status: "pending",
+    conversationMembers: [BUYER_ID, SELLER_ID],
+    listingSellerId: SELLER_ID,
+    listingStatus: "published",
+    listingKind: "pre_loved",
+    allowOffers: true,
+    listingPriceSen: 1500,
+    availableStock: 1,
+    offerPriceSen: 1200,
+    serverNowMs,
+  };
+
+  // Forged status = 'accepted' rejected
+  assert.equal(
+    simulateOfferInsertGuard({ ...base, status: "accepted" }).ok,
+    false
+  );
+  // Forged order_id, responded_at, reservation_expires_at rejected
+  assert.equal(
+    simulateOfferInsertGuard({ ...base, orderId: "order-1" }).ok,
+    false
+  );
+  assert.equal(
+    simulateOfferInsertGuard({
+      ...base,
+      reservationExpiresAt: "2099-01-01T00:00:00.000Z",
+    }).ok,
+    false
+  );
+
+  // Forged future client timestamps overridden authoritatively to serverNow + 24h
+  const forgedTs = simulateOfferInsertGuard({
+    ...base,
+    clientCreatedAt: "2099-01-01T00:00:00.000Z",
+    clientExpiresAt: "2099-12-31T00:00:00.000Z",
+  });
+  assert.equal(forgedTs.ok, true);
+  if (forgedTs.ok) {
+    assert.equal(forgedTs.status, "pending");
+    assert.equal(forgedTs.createdAt, new Date(serverNowMs).toISOString());
+    assert.equal(
+      forgedTs.expiresAt,
+      new Date(serverNowMs + OFFER_PENDING_TTL_MS).toISOString()
+    );
+  }
+
+  // Wrong seller, wrong conversation, non-pre_loved, allow_offers=false, and invalid price rejected
+  assert.equal(
+    simulateOfferInsertGuard({ ...base, listingSellerId: otherUid }).ok,
+    false
+  );
+  assert.equal(
+    simulateOfferInsertGuard({
+      ...base,
+      conversationMembers: [otherUid, SELLER_ID],
+    }).ok,
+    false
+  );
+  assert.equal(
+    simulateOfferInsertGuard({ ...base, listingKind: "business" }).ok,
+    false
+  );
+  assert.equal(
+    simulateOfferInsertGuard({ ...base, allowOffers: false }).ok,
+    false
+  );
+  assert.equal(
+    simulateOfferInsertGuard({ ...base, offerPriceSen: 199 }).ok,
+    false
+  );
+  assert.equal(
+    simulateOfferInsertGuard({ ...base, offerPriceSen: 1600 }).ok,
+    false
+  );
 });

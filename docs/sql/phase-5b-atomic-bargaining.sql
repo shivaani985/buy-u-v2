@@ -46,7 +46,135 @@ CREATE INDEX IF NOT EXISTS idx_offers_pending_expiry
   ON public.offers (expires_at)
   WHERE status = 'pending';
 
--- 2. Harden existing `guard_offer_updates()` trigger:
+-- 2a. Add `BEFORE INSERT` guard trigger on `public.offers`:
+--     - Blocks forged status != 'pending', pre-linked order_id, responded_at,
+--       or reservation fields so NO authenticated/admin user can bypass atomic acceptance
+--     - Authoritatively stamps `created_at = now()` and `expires_at = created_at + 24h`
+--       (overriding any forged client timestamps)
+--     - Enforces conversation participants, listing ownership, published Pre-Loved
+--       `allow_offers = true`, stock >= 1, member_blocks, and RM 2.00..listing price
+--     - Preserves UNLIMITED proposals (zero 5-proposal cap)
+CREATE OR REPLACE FUNCTION public.guard_offer_inserts()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_uid uuid := auth.uid();
+  v_now timestamptz := now();
+  v_conv public.conversations;
+  v_listing public.listings;
+  v_blocked boolean := false;
+BEGIN
+  -- Strictly restrict bypass to postgres and service_role (never authenticated/admin)
+  IF current_user IN ('postgres', 'service_role') THEN
+    NEW.created_at := COALESCE(NEW.created_at, v_now);
+    NEW.expires_at := COALESCE(NEW.expires_at, NEW.created_at + interval '24 hours');
+    RETURN NEW;
+  END IF;
+
+  IF v_uid IS NULL OR NOT public.is_active_member() THEN
+    RAISE EXCEPTION 'Only active verified members can create offers'
+      USING ERRCODE = '42501';
+  END IF;
+
+  IF NEW.buyer_id IS DISTINCT FROM v_uid THEN
+    RAISE EXCEPTION 'Offer buyer_id must match the authenticated user'
+      USING ERRCODE = '42501';
+  END IF;
+
+  IF NEW.seller_id IS NULL OR NEW.seller_id = v_uid THEN
+    RAISE EXCEPTION 'You cannot make an offer on your own listing'
+      USING ERRCODE = '42501';
+  END IF;
+
+  -- Block forged non-pending status and all server-managed lifecycle columns
+  IF COALESCE(NEW.status, 'pending') <> 'pending' THEN
+    RAISE EXCEPTION 'New offers must start with pending status'
+      USING ERRCODE = '42501';
+  END IF;
+
+  IF NEW.order_id IS NOT NULL
+     OR NEW.responded_at IS NOT NULL
+     OR NEW.reservation_expires_at IS NOT NULL
+     OR NEW.reservation_released_at IS NOT NULL THEN
+    RAISE EXCEPTION 'Server-managed offer fields cannot be set on insert'
+      USING ERRCODE = '42501';
+  END IF;
+
+  -- Authoritatively override client timestamps so 24h expiry cannot be forged
+  NEW.status := 'pending';
+  NEW.created_at := v_now;
+  NEW.expires_at := v_now + interval '24 hours';
+
+  -- Verify buyer & seller match the linked conversation participants
+  SELECT * INTO v_conv
+  FROM public.conversations
+  WHERE id = NEW.conversation_id;
+
+  IF NOT FOUND
+     OR NOT (
+       (v_conv.member_a = NEW.buyer_id AND v_conv.member_b = NEW.seller_id)
+       OR (v_conv.member_a = NEW.seller_id AND v_conv.member_b = NEW.buyer_id)
+     ) THEN
+    RAISE EXCEPTION 'Offer participants must match the conversation'
+      USING ERRCODE = '42501';
+  END IF;
+
+  -- Enforce bidirectional member_blocks
+  SELECT EXISTS (
+    SELECT 1
+    FROM public.member_blocks
+    WHERE (blocker_id = NEW.buyer_id AND blocked_id = NEW.seller_id)
+       OR (blocker_id = NEW.seller_id AND blocked_id = NEW.buyer_id)
+  ) INTO v_blocked;
+
+  IF v_blocked THEN
+    RAISE EXCEPTION 'Offers are unavailable for blocked members'
+      USING ERRCODE = '42501';
+  END IF;
+
+  -- Verify listing ownership, Pre-Loved allow_offers eligibility, stock, and price bounds
+  SELECT * INTO v_listing
+  FROM public.listings
+  WHERE id = NEW.listing_id;
+
+  IF NOT FOUND OR v_listing.seller_id <> NEW.seller_id THEN
+    RAISE EXCEPTION 'Offer seller does not match listing owner'
+      USING ERRCODE = '42501';
+  END IF;
+
+  IF v_listing.status <> 'published'
+     OR v_listing.kind <> 'pre_loved'
+     OR v_listing.allow_offers IS NOT TRUE THEN
+    RAISE EXCEPTION 'Offers are only allowed on published Pre-Loved listings with offers enabled'
+      USING ERRCODE = '42501';
+  END IF;
+
+  IF (v_listing.quantity - GREATEST(0, v_listing.reserved_quantity)) < 1 THEN
+    RAISE EXCEPTION 'This listing is currently out of stock'
+      USING ERRCODE = '42501';
+  END IF;
+
+  IF NEW.offer_price_sen IS NULL
+     OR NEW.offer_price_sen < 200
+     OR NEW.offer_price_sen > v_listing.price_sen THEN
+    RAISE EXCEPTION 'Offer price must be between RM 2.00 and the listing price'
+      USING ERRCODE = '22023';
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_guard_offer_inserts ON public.offers;
+CREATE TRIGGER trg_guard_offer_inserts
+  BEFORE INSERT ON public.offers
+  FOR EACH ROW
+  EXECUTE FUNCTION public.guard_offer_inserts();
+
+-- 2b. Harden existing `guard_offer_updates()` trigger:
 --    - Blocks ALL direct authenticated AND admin UPDATE to `status = 'accepted'`
 --      (only `postgres` / `service_role`, i.e. `accept_offer_atomic`, can accept)
 --    - Protects new expiry/reservation columns from direct mutation
@@ -380,6 +508,8 @@ COMMIT;
 --   -- If Option A pg_cron was enabled:
 --   -- SELECT cron.unschedule(jobid) FROM cron.job
 --   --   WHERE jobname = 'buyu_release_expired_offer_reservations';
+--   DROP TRIGGER IF EXISTS trg_guard_offer_inserts ON public.offers;
+--   DROP FUNCTION IF EXISTS public.guard_offer_inserts();
 --   DROP FUNCTION IF EXISTS public.accept_offer_atomic(uuid);
 --   DROP FUNCTION IF EXISTS public.release_expired_offer_reservations();
 --   DROP INDEX IF EXISTS public.idx_offers_pending_expiry;

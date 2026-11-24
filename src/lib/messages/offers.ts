@@ -539,6 +539,111 @@ export function simulateReleaseExpiredReservation(
   };
 }
 
+/**
+ * Pure reference model of `guard_offer_inserts()` BEFORE INSERT trigger.
+ * Verifies forged status/server fields are rejected, forged client timestamps
+ * are overridden server-side to `now` / `now + 24h`, and listing/conversation/
+ * price boundaries are enforced with zero proposal-count cap.
+ */
+export function simulateOfferInsertGuard(input: {
+  actorUserId: string;
+  isActiveMember: boolean;
+  buyerId: string;
+  sellerId: string;
+  status?: string;
+  orderId?: string | null;
+  respondedAt?: string | null;
+  reservationExpiresAt?: string | null;
+  reservationReleasedAt?: string | null;
+  clientCreatedAt?: string | null;
+  clientExpiresAt?: string | null;
+  conversationMembers: [string, string];
+  listingSellerId: string;
+  listingStatus: string;
+  listingKind: string;
+  allowOffers: boolean;
+  listingPriceSen: number;
+  availableStock: number;
+  offerPriceSen: number;
+  isBlocked?: boolean;
+  serverNowMs: number;
+}):
+  | { ok: true; createdAt: string; expiresAt: string; status: "pending" }
+  | { ok: false; error: string } {
+  if (!input.isActiveMember) {
+    return { ok: false, error: "Only active verified members can create offers." };
+  }
+  if (input.buyerId.toLowerCase() !== input.actorUserId.toLowerCase()) {
+    return { ok: false, error: "Offer buyer_id must match authenticated user." };
+  }
+  if (input.sellerId.toLowerCase() === input.actorUserId.toLowerCase()) {
+    return { ok: false, error: "You cannot make an offer on your own listing." };
+  }
+  if ((input.status ?? "pending") !== "pending") {
+    return { ok: false, error: "New offers must start with pending status." };
+  }
+  if (
+    input.orderId ||
+    input.respondedAt ||
+    input.reservationExpiresAt ||
+    input.reservationReleasedAt
+  ) {
+    return {
+      ok: false,
+      error: "Server-managed offer fields cannot be set on insert.",
+    };
+  }
+
+  const [a, b] = input.conversationMembers.map((x) => x.toLowerCase());
+  const buyer = input.buyerId.toLowerCase();
+  const seller = input.sellerId.toLowerCase();
+  if (!((a === buyer && b === seller) || (a === seller && b === buyer))) {
+    return { ok: false, error: "Offer participants must match the conversation." };
+  }
+
+  if (input.isBlocked) {
+    return { ok: false, error: "Offers are unavailable for blocked members." };
+  }
+
+  if (input.listingSellerId.toLowerCase() !== seller) {
+    return { ok: false, error: "Offer seller does not match listing owner." };
+  }
+
+  if (
+    input.listingStatus !== "published" ||
+    input.listingKind !== "pre_loved" ||
+    !input.allowOffers
+  ) {
+    return {
+      ok: false,
+      error: "Offers are only allowed on published Pre-Loved listings with offers enabled.",
+    };
+  }
+
+  if (input.availableStock < 1) {
+    return { ok: false, error: "This listing is currently out of stock." };
+  }
+
+  if (
+    !Number.isInteger(input.offerPriceSen) ||
+    input.offerPriceSen < MIN_OFFER_SEN ||
+    input.offerPriceSen > input.listingPriceSen
+  ) {
+    return {
+      ok: false,
+      error: "Offer price must be between RM 2.00 and the listing price.",
+    };
+  }
+
+  // Authoritatively override any forged client created_at / expires_at
+  return {
+    ok: true,
+    status: "pending",
+    createdAt: new Date(input.serverNowMs).toISOString(),
+    expiresAt: new Date(input.serverNowMs + OFFER_PENDING_TTL_MS).toISOString(),
+  };
+}
+
 export type ChatTimelineEntry<TMessage, TOffer> =
   | { kind: "message"; id: string; createdAt: string; message: TMessage }
   | { kind: "offer"; id: string; createdAt: string; offer: TOffer };
