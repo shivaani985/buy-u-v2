@@ -482,7 +482,7 @@ export async function editVerifiedReviewAction(input: {
   });
 
   if (error) {
-    if (error.message.includes("REVIEW_HIDDEN_LOCKED")) {
+    if (error.message.includes("REVIEW_MODERATED") || error.message.includes("REVIEW_HIDDEN_LOCKED")) {
       return { ok: false, message: "Moderated reviews cannot be edited." };
     }
     return { ok: false, message: "Could not update review right now." };

@@ -92,7 +92,9 @@ export async function loadAnalyticsDataset(): Promise<AnalyticsDatasetInput | nu
       service
         .from("listing_views")
         .select("viewer_id,listing_id,viewed_at")
-        .order("id", { ascending: true })
+        .order("viewed_at", { ascending: true })
+        .order("viewer_id", { ascending: true })
+        .order("listing_id", { ascending: true })
         .range(from, to)
     ),
     fetchAllPaginated<AnalyticsDatasetInput["favourites"][number]>((from, to) =>

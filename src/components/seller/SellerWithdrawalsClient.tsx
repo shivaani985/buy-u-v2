@@ -104,8 +104,8 @@ export function SellerWithdrawalsClient({
       });
       if (res.ok) {
         setAmountInput("");
-        router.refresh();
       }
+      router.refresh();
     } finally {
       setBusy(false);
     }

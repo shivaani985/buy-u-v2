@@ -679,6 +679,10 @@ export function computeAdminPlatformAnalytics(
   const periodReports = data.reports.filter((r) => inRange(r.created_at, window.startMs, window.endMs));
   const periodDisputes = data.disputes.filter((d) => inRange(d.created_at, window.startMs, window.endMs));
   const repeatBuyers = Array.from(buyerOrderCounts.values()).filter((c) => c >= 2).length;
+  // Count unified multi-seller checkout_session_id ONCE; standalone legacy orders count once each
+  const verifiedCheckoutKeys = new Set(
+    periodOrders.map((o) => (o.checkout_session_id ? `cs:${o.checkout_session_id}` : `ord:${o.id}`))
+  );
 
   return {
     overview: {
@@ -691,6 +695,7 @@ export function computeAdminPlatformAnalytics(
       newRegistrations: data.profiles.filter((p) => inRange(p.created_at, window.startMs, window.endMs)).length,
       activeSellers: new Set(data.listings.filter((l) => l.status === "published").map((l) => l.seller_id)).size,
       activeListings: data.listings.filter((l) => l.status === "published").length,
+      verifiedCheckouts: verifiedCheckoutKeys.size,
       verifiedTransactions: periodOrders.length,
       completedOrders,
       grossProductSalesSen: grossSalesSen,

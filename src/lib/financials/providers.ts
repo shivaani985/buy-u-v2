@@ -147,7 +147,8 @@ export class SimulatedBankPayoutProvider implements BankPayoutProvider {
       };
     }
 
-    const mode = req.qaOutcome ?? "success";
+    // Sandbox convention: synthetic account ending in 0009 deterministically simulates a bank transfer failure
+    const mode = req.qaOutcome ?? (req.accountLast4 === "0009" ? "fail" : "success");
     if (mode === "fail") {
       return {
         provider: "simulated_bank",

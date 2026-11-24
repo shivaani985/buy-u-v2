@@ -40,6 +40,8 @@ export async function GET(request: NextRequest) {
     { period: periodLabel, section: "Overview", metric: "Total Registered Members", value: String(stats.overview.totalMembers) },
     { period: periodLabel, section: "Overview", metric: "Students / Staff", value: `${stats.overview.studentsCount} / ${stats.overview.staffCount}` },
     { period: periodLabel, section: "Overview", metric: "Measured Active Users", value: String(stats.overview.measuredActiveUsers) },
+    { period: periodLabel, section: "Sales", metric: "Verified Unified Checkouts", value: String(stats.overview.verifiedCheckouts) },
+    { period: periodLabel, section: "Sales", metric: "Verified Child Orders", value: String(stats.overview.verifiedTransactions) },
     { period: periodLabel, section: "Sales", metric: "Gross Verified Product Sales", value: formatCurrencySen(stats.overview.grossProductSalesSen) },
     { period: periodLabel, section: "Sales", metric: "Executed Refunds", value: formatCurrencySen(stats.overview.executedRefundsSen) },
     { period: periodLabel, section: "Sales", metric: "Net Product Sales", value: formatCurrencySen(stats.overview.netProductSalesSen) },

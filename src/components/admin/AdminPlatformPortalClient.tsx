@@ -265,7 +265,7 @@ export function AdminPlatformPortalClient({
               { l: "Registered Members", v: `${ov.totalMembers} (${ov.studentsCount} stu / ${ov.staffCount} staff)` },
               { l: "Measured Active Users", v: String(ov.measuredActiveUsers) },
               { l: "Active Sellers / Listings", v: `${ov.activeSellers} / ${ov.activeListings}` },
-              { l: "Verified / Completed Orders", v: `${ov.verifiedTransactions} / ${ov.completedOrders}` },
+              { l: "Unified Checkouts / Orders", v: `${ov.verifiedCheckouts} / ${ov.verifiedTransactions} (${ov.completedOrders} done)` },
               { l: "Gross Verified Sales", v: formatCurrencySen(ov.grossProductSalesSen) },
               { l: "Net Product Sales", v: formatCurrencySen(ov.netProductSalesSen) },
               { l: "Net Commission (2%)", v: formatCurrencySen(ov.netPlatformCommissionSen) },

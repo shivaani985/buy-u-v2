@@ -321,6 +321,8 @@ test("P0.9: analytics conversion <=100%, strict business cohort, first-time sell
   // Admin platform analytics
   const adminAn = computeAdminPlatformAnalytics(dataset, win30);
   assert.equal(adminAn.overview.measuredActiveUsers, 3, "Idle active-status account excluded");
+  assert.equal(adminAn.overview.verifiedCheckouts, 1, "Shared checkout_session_id across multi-order checkout counted ONCE");
+  assert.equal(adminAn.overview.verifiedTransactions, 3, "All 3 verified child orders counted individually");
   assert.equal(adminAn.overview.grossProductSalesSen, 4500);
   assert.equal(adminAn.overview.netProductSalesSen, 4000);
   assert.equal(adminAn.entrepreneurship.activeStudentBusinessSellers, 1, "Pre-loved seller never counted as business even if is_food=true");

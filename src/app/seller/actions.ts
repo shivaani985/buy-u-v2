@@ -136,7 +136,7 @@ export async function saveStorefrontAction(
       return { status: "error", message: fileCheck.error };
     }
 
-    const storagePath = `storefronts/${auth.userId}/logo-${Date.now()}.${fileCheck.ext}`;
+    const storagePath = `${auth.userId}/storefront-logo-${Date.now()}.${fileCheck.ext}`;
     const bytes = new Uint8Array(await logoFile.arrayBuffer());
     const { error: uploadErr } = await auth.supabase.storage
       .from("listings")
@@ -170,7 +170,7 @@ export async function saveStorefrontAction(
       return { status: "error", message: fileCheck.error };
     }
 
-    const storagePath = `storefronts/${auth.userId}/banner-${Date.now()}.${fileCheck.ext}`;
+    const storagePath = `${auth.userId}/storefront-banner-${Date.now()}.${fileCheck.ext}`;
     const bytes = new Uint8Array(await bannerFile.arrayBuffer());
     const { error: uploadErr } = await auth.supabase.storage
       .from("listings")

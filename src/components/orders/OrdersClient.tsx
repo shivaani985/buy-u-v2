@@ -881,6 +881,12 @@ export function OrdersClient({ pendingCheckouts, orders }: OrdersClientProps) {
                   </p>
                   <p className="mt-0.5 text-[11px]">
                     Status: <strong>{order.refund.status.replace(/_/g, " ")}</strong>
+                    {order.refund.returnRequired ? (
+                      <>
+                        {" "}· Return:{" "}
+                        <strong>{order.refund.returnStatus.replace(/_/g, " ")}</strong>
+                      </>
+                    ) : null}
                     {order.refund.refundRef
                       ? ` · Simulated Ref ${order.refund.refundRef} (FYP simulation — no real bank transfer)`
                       : " · Pending simulated execution"}
@@ -904,7 +910,7 @@ export function OrdersClient({ pendingCheckouts, orders }: OrdersClientProps) {
                         const res = await buyerReportReturnAction(rid);
                         setFeedbackByKey((prev) => ({
                           ...prev,
-                          [`ord:${order.id}`]: {
+                          [key]: {
                             type: res.ok ? "info" : "error",
                             text: res.message,
                           },
