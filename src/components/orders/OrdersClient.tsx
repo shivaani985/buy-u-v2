@@ -44,11 +44,9 @@ function formatOrderStatus(
   }
   switch (status.toLowerCase()) {
     case "completed":
-    case "settled":
       return { label: "Completed", color: "text-[#008285]" };
     case "paid":
-    case "ready_for_pickup":
-      return { label: "Paid · Ready for Pickup", color: "text-[#008285]" };
+      return { label: "Paid — Awaiting Handover", color: "text-[#008285]" };
     case "pending_payment":
       return { label: "Awaiting FPX Payment", color: "text-[#4E2A84]" };
     case "expired":
@@ -515,15 +513,12 @@ export function OrdersClient({ pendingCheckouts, orders }: OrdersClientProps) {
         );
         const statusLower = order.status.toLowerCase();
         const isEligibleForPin =
-          Boolean(order.pickupPin) &&
-          (statusLower === "paid" || statusLower === "ready_for_pickup");
+          Boolean(order.pickupPin) && statusLower === "paid";
         const canConfirmReceipt = statusLower === "handed_over";
         const canContactOrReport =
           statusLower === "paid" ||
-          statusLower === "ready_for_pickup" ||
           statusLower === "handed_over" ||
           statusLower === "completed" ||
-          statusLower === "settled" ||
           statusLower === "disputed";
         const deadlineMs = order.paymentDeadline
           ? new Date(order.paymentDeadline).getTime()
@@ -696,10 +691,10 @@ export function OrdersClient({ pendingCheckouts, orders }: OrdersClientProps) {
                 <button
                   type="button"
                   onClick={() => setReportingOrder(order)}
-                  className="inline-flex items-center gap-1 rounded-xl px-2.5 py-1.5 font-semibold text-[#6B6779] transition hover:bg-[#FAF9FC] hover:text-[#B42318]"
+                  className="inline-flex items-center gap-1 rounded-xl px-2.5 py-1.5 font-semibold text-[#6B6779] transition hover:bg-[#FAF9FC] hover:text-[#4E2A84]"
                 >
                   <Flag className="h-3.5 w-3.5" aria-hidden="true" />
-                  <span>Report a Problem</span>
+                  <span>Report a Problem (Not Yet Available)</span>
                 </button>
               </div>
             ) : null}

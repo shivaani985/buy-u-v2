@@ -71,13 +71,11 @@ export interface SellerFinancialSummary {
 
 const IN_PROGRESS_SETTLEMENT_STATUSES = new Set([
   "paid",
-  "ready_for_pickup",
   "handed_over",
   "disputed",
-  "in_progress",
 ]);
 
-const COMPLETED_STATUSES = new Set(["completed", "settled"]);
+const COMPLETED_STATUSES = new Set(["completed"]);
 
 const EXCLUDED_CANCELLED_STATUSES = new Set([
   "cancelled",
@@ -120,7 +118,7 @@ function mapTransactionStatus(
   if (s === "handed_over") {
     return { label: "Awaiting Receipt Confirmation", tone: "pending" };
   }
-  if (s === "paid" || s === "ready_for_pickup") {
+  if (s === "paid") {
     return { label: "Paid — Awaiting Handover", tone: "pending" };
   }
   if (s === "disputed") {
@@ -187,12 +185,7 @@ export function computeSellerFinancials(input: {
 
   const refundByOrder = new Map<string, number>();
   const openDisputeOrders = new Set<string>();
-  const CLOSED_DISPUTE_STATUSES = new Set([
-    "resolved",
-    "cancelled",
-    "dismissed",
-    "closed_rejected",
-  ]);
+  const ACTIVE_DISPUTE_STATUSES = new Set(["open", "under_review"]);
   for (const d of input.disputes) {
     const ds = (d.status ?? "").toLowerCase();
     if (ds === "resolved" && (d.refund_amount_sen ?? 0) > 0) {
@@ -200,7 +193,7 @@ export function computeSellerFinancials(input: {
         d.order_id,
         (refundByOrder.get(d.order_id) ?? 0) + (d.refund_amount_sen ?? 0)
       );
-    } else if (ds && !CLOSED_DISPUTE_STATUSES.has(ds)) {
+    } else if (ACTIVE_DISPUTE_STATUSES.has(ds)) {
       openDisputeOrders.add(d.order_id);
     }
   }

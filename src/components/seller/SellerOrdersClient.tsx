@@ -261,8 +261,7 @@ export function SellerOrdersClient({ orders }: SellerOrdersClientProps) {
             );
             const statusLower = order.status.toLowerCase();
             const canVerifyPin =
-              (statusLower === "paid" || statusLower === "ready_for_pickup") &&
-              !order.hasActiveDispute;
+              statusLower === "paid" && !order.hasActiveDispute;
             const effectiveLockUntil =
               order.id in lockOverrides
                 ? lockOverrides[order.id]

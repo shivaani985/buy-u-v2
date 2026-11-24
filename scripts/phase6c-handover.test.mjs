@@ -244,8 +244,15 @@ test("5. Phase 6C SQL migration safety & security invariants", () => {
   assert.match(sql, /FROM public\.payments p/);
   // No auto-complete cron job added
   assert.doesNotMatch(sql, /cron\.schedule/i);
-  // Column-level pickup_pin privacy preserved
+  // Column-level pickup_pin privacy preserved & direct client order_disputes writes closed
   assert.match(sql, /REVOKE SELECT \(pickup_pin\) ON public\.orders FROM authenticated, anon/);
+  assert.match(sql, /REVOKE INSERT, UPDATE, DELETE ON public\.order_disputes FROM authenticated, anon/);
+  // Exact hosted order_disputes active statuses (open, under_review ONLY)
+  assert.match(sql, /IN \('open', 'under_review'\)/);
+  assert.doesNotMatch(sql, /closed_rejected/);
+  // No unsupported ready_for_pickup or settled status references
+  assert.doesNotMatch(sql, /ready_for_pickup/);
+  assert.doesNotMatch(sql, /'settled'/);
 });
 
 test("6. Zero Pickup PIN leakage in seller queries, components, or actions", () => {

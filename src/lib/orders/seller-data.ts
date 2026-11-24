@@ -45,12 +45,7 @@ export interface SellerOrdersPageData {
   error?: string;
 }
 
-const CLOSED_DISPUTE_STATUSES = new Set([
-  "resolved",
-  "cancelled",
-  "dismissed",
-  "closed_rejected",
-]);
+const ACTIVE_DISPUTE_STATUSES = new Set(["open", "under_review"]);
 
 /**
  * Fetches seller-owned orders strictly WITHOUT `pickup_pin` or `raw_callback`.
@@ -169,7 +164,7 @@ export async function getSellerOrdersData(
     status: string | null;
   }>) {
     const ds = (d.status ?? "").toLowerCase();
-    if (ds && !CLOSED_DISPUTE_STATUSES.has(ds)) {
+    if (ACTIVE_DISPUTE_STATUSES.has(ds)) {
       activeDisputeOrders.add(d.order_id);
     }
   }

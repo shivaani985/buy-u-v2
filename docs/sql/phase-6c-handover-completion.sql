@@ -9,7 +9,7 @@
 --      Updates `confirm_checkout_payment_atomic` and `confirm_order_payment_atomic`
 --      for future orders while preserving all existing valid PINs on paid QA orders.
 --   2. Atomic Seller PIN Verification (`verify_order_pickup_pin_atomic`):
---      `paid` / `ready_for_pickup` -> `handed_over`.
+--      `paid` -> `handed_over`.
 --      - Verifies authenticated active seller ownership, verified payment proof
 --        (parent `checkout_sessions` OR legacy `payments`), no active dispute,
 --        and eligible status.
@@ -86,7 +86,7 @@ BEGIN
     WHERE o.id = ANY(p_order_ids)
       AND o.buyer_id = v_uid
       AND o.paid_at IS NOT NULL
-      AND o.status IN ('paid', 'ready_for_pickup')
+      AND o.status = 'paid'
       AND o.pickup_pin IS NOT NULL;
 END;
 $$;
@@ -167,7 +167,7 @@ BEGIN
     RETURN;
   END IF;
 
-  IF v_order.status IN ('completed', 'settled') THEN
+  IF v_order.status = 'completed' THEN
     RETURN QUERY SELECT
       'already_completed'::text,
       v_order.id,
@@ -179,12 +179,12 @@ BEGIN
     RETURN;
   END IF;
 
-  -- Block disputed orders (status or open dispute record)
+  -- Block disputed orders (status or active open/under_review dispute record)
   SELECT EXISTS (
     SELECT 1
     FROM public.order_disputes d
     WHERE d.order_id = v_order.id
-      AND lower(COALESCE(d.status, '')) NOT IN ('cancelled', 'dismissed', 'closed_rejected')
+      AND lower(COALESCE(d.status, '')) IN ('open', 'under_review')
   ) INTO v_has_active_dispute;
 
   IF v_order.status = 'disputed' OR v_has_active_dispute THEN
@@ -200,7 +200,7 @@ BEGIN
   END IF;
 
   -- Only eligible paid orders may transition to handed_over
-  IF v_order.status NOT IN ('paid', 'ready_for_pickup') THEN
+  IF v_order.status <> 'paid' THEN
     RETURN QUERY SELECT
       'invalid_status'::text,
       v_order.id,
@@ -390,7 +390,7 @@ BEGIN
     RAISE EXCEPTION 'FORBIDDEN_BUYER_ONLY' USING ERRCODE = '42501';
   END IF;
 
-  IF v_order.status IN ('completed', 'settled') THEN
+  IF v_order.status = 'completed' THEN
     RETURN QUERY SELECT
       'already_completed'::text,
       v_order.id,
@@ -399,12 +399,12 @@ BEGIN
     RETURN;
   END IF;
 
-  -- Block disputed orders (status or open dispute record)
+  -- Block disputed orders (status or active open/under_review dispute record)
   SELECT EXISTS (
     SELECT 1
     FROM public.order_disputes d
     WHERE d.order_id = v_order.id
-      AND lower(COALESCE(d.status, '')) NOT IN ('cancelled', 'dismissed', 'closed_rejected')
+      AND lower(COALESCE(d.status, '')) IN ('open', 'under_review')
   ) INTO v_has_active_dispute;
 
   IF v_order.status = 'disputed' OR v_has_active_dispute THEN
@@ -882,7 +882,7 @@ BEGIN
   END IF;
 
   IF v_order.paid_at IS NOT NULL
-     OR v_order.status IN ('paid', 'ready_for_pickup', 'handed_over', 'completed') THEN
+     OR v_order.status IN ('paid', 'handed_over', 'completed') THEN
     IF v_payment.transaction_ref IS NULL OR v_payment.transaction_ref <> p_transaction_ref THEN
       RAISE EXCEPTION 'TRANSACTION_REF_CONFLICT';
     END IF;
@@ -1002,9 +1002,12 @@ REVOKE ALL ON FUNCTION public.confirm_order_payment_atomic(uuid, text, text, int
 GRANT EXECUTE ON FUNCTION public.confirm_order_payment_atomic(uuid, text, text, integer, jsonb) TO service_role;
 
 -- -----------------------------------------------------------------------------
--- 6. Re-affirm DB-level Pickup PIN privacy (never exposed via SELECT or Realtime)
+-- 6. Re-affirm DB-level Pickup PIN privacy & close direct client dispute writes
+--    (Preserves existing order_disputes records and legitimate SELECT access;
+--     Phase 6D will introduce authorized SECURITY DEFINER dispute creation.)
 -- -----------------------------------------------------------------------------
 REVOKE SELECT (pickup_pin) ON public.orders FROM authenticated, anon;
+REVOKE INSERT, UPDATE, DELETE ON public.order_disputes FROM authenticated, anon;
 
 COMMIT;
 

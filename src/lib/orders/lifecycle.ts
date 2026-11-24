@@ -51,7 +51,6 @@ export function getOrderStatusBadge(
   }
   switch (status.toLowerCase()) {
     case "completed":
-    case "settled":
       return {
         label: "Completed",
         toneClass: "bg-[#E6F6F6] text-[#006A6D] border-[#B8E3E4]",
@@ -62,7 +61,6 @@ export function getOrderStatusBadge(
         toneClass: "bg-[#F3EEFA] text-[#4E2A84] border-[#DCD0F0]",
       };
     case "paid":
-    case "ready_for_pickup":
       return {
         label: "Paid — Awaiting Handover",
         toneClass: "bg-[#E6F6F6] text-[#008285] border-[#B8E3E4]",
@@ -109,12 +107,11 @@ export function getOrderTimelineSteps(input: {
   completedAt: string | null;
 }): OrderTimelineStep[] {
   const s = input.status.toLowerCase();
-  const isCompleted = s === "completed" || s === "settled";
+  const isCompleted = s === "completed";
   const isHandedOver = isCompleted || s === "handed_over";
   const isPaid =
     isHandedOver ||
     s === "paid" ||
-    s === "ready_for_pickup" ||
     s === "disputed" ||
     Boolean(input.paidAt);
 
@@ -130,7 +127,7 @@ export function getOrderTimelineSteps(input: {
       key: "paid",
       label: "Paid",
       done: isPaid,
-      active: s === "paid" || s === "ready_for_pickup",
+      active: s === "paid",
       timestamp: input.paidAt,
     },
     {
@@ -161,11 +158,11 @@ export function matchesSellerOrderFilter(
     case "awaiting_payment":
       return s === "pending_payment";
     case "awaiting_handover":
-      return s === "paid" || s === "ready_for_pickup";
+      return s === "paid";
     case "awaiting_receipt":
       return s === "handed_over";
     case "completed":
-      return s === "completed" || s === "settled";
+      return s === "completed";
     case "disputed_refunded":
       return s === "disputed" || s === "refunded";
   }
@@ -199,10 +196,10 @@ export function getSellerEarningsLedgerState(
   if (s === "disputed" || hasActiveDispute) {
     return { state: "frozen", label: "Frozen (Dispute)" };
   }
-  if (s === "completed" || s === "settled") {
+  if (s === "completed") {
     return { state: "available_for_payout", label: "Available for Payout" };
   }
-  if (s === "paid" || s === "ready_for_pickup" || s === "handed_over") {
+  if (s === "paid" || s === "handed_over") {
     return { state: "pending_settlement", label: "Pending Settlement" };
   }
   return { state: "none", label: "Not Settled" };

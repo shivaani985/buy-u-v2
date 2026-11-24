@@ -134,7 +134,7 @@ export async function getBuyerOrdersData(
     )
   );
   const paidOrderIds = orderRows
-    .filter((o) => o.status === "paid" || o.status === "ready_for_pickup")
+    .filter((o) => o.status === "paid")
     .map((o) => o.id);
   const sellerIds = Array.from(new Set(orderRows.map((o) => o.seller_id)));
   const service = getServerServiceClient();
