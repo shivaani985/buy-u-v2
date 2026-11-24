@@ -172,6 +172,264 @@ BEGIN
 END;
 $$;
 
+-- 3b. Atomic multi-seller cart -> separate seller orders creation
+--     Locks cart_items -> listings/variants in deterministic ID order, validates
+--     live status/prices/variants/blocks/stock, reserves stock for 15 minutes,
+--     creates 1 pending_payment order per seller, snapshots order_items, and
+--     clears purchased cart_items in ONE transaction.
+CREATE OR REPLACE FUNCTION public.create_cart_orders_atomic(
+  p_idempotency_key text
+)
+RETURNS SETOF public.orders
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_uid uuid := auth.uid();
+  v_now timestamptz := now();
+  v_key text := trim(COALESCE(p_idempotency_key, ''));
+  v_cart_count integer := 0;
+  v_seller RECORD;
+  v_ci RECORD;
+  v_listing public.listings;
+  v_variant public.listing_variants;
+  v_unit_sen integer;
+  v_subtotal integer;
+  v_fpx integer := 100;
+  v_commission integer;
+  v_seller_net integer;
+  v_order_code text;
+  v_area_name text;
+  v_is_food_order boolean;
+  v_order public.orders;
+BEGIN
+  IF v_uid IS NULL OR NOT public.is_active_member() THEN
+    RAISE EXCEPTION 'UNAUTHORIZED';
+  END IF;
+
+  IF length(v_key) < 8 OR length(v_key) > 128 THEN
+    RAISE EXCEPTION 'INVALID_IDEMPOTENCY_KEY';
+  END IF;
+
+  -- Idempotent return if this checkout submission already created orders
+  IF EXISTS (
+    SELECT 1
+    FROM public.orders
+    WHERE buyer_id = v_uid
+      AND source = 'cart'
+      AND idempotency_key = v_key
+  ) THEN
+    RETURN QUERY
+      SELECT *
+      FROM public.orders
+      WHERE buyer_id = v_uid
+        AND source = 'cart'
+        AND idempotency_key = v_key
+      ORDER BY created_at ASC, id ASC;
+    RETURN;
+  END IF;
+
+  -- Opportunistically release expired holds before locking stock
+  PERFORM public.release_expired_offer_reservations();
+  PERFORM public.release_expired_cart_orders();
+
+  -- Lock buyer's cart rows deterministically
+  PERFORM 1
+  FROM public.cart_items
+  WHERE user_id = v_uid
+  ORDER BY listing_id, variant_id NULLS FIRST, id
+  FOR UPDATE;
+
+  SELECT count(*) INTO v_cart_count
+  FROM public.cart_items
+  WHERE user_id = v_uid;
+
+  IF v_cart_count = 0 THEN
+    RAISE EXCEPTION 'CART_EMPTY';
+  END IF;
+
+  -- Pre-lock all referenced listings and variants in deterministic ID order (deadlock-free)
+  PERFORM 1
+  FROM public.listings l
+  WHERE l.id IN (SELECT DISTINCT ci.listing_id FROM public.cart_items ci WHERE ci.user_id = v_uid)
+  ORDER BY l.id
+  FOR UPDATE;
+
+  PERFORM 1
+  FROM public.listing_variants lv
+  WHERE lv.id IN (
+    SELECT DISTINCT ci.variant_id
+    FROM public.cart_items ci
+    WHERE ci.user_id = v_uid AND ci.variant_id IS NOT NULL
+  )
+  ORDER BY lv.id
+  FOR UPDATE;
+
+  -- Validate every cart item and reserve stock atomically
+  FOR v_ci IN
+    SELECT ci.id, ci.listing_id, ci.variant_id, ci.quantity
+    FROM public.cart_items ci
+    WHERE ci.user_id = v_uid
+    ORDER BY ci.listing_id, ci.variant_id NULLS FIRST, ci.id
+  LOOP
+    IF v_ci.quantity IS NULL OR v_ci.quantity < 1 THEN
+      RAISE EXCEPTION 'INVALID_QUANTITY';
+    END IF;
+
+    SELECT * INTO v_listing
+    FROM public.listings
+    WHERE id = v_ci.listing_id;
+
+    IF NOT FOUND OR v_listing.status <> 'published' THEN
+      RAISE EXCEPTION 'LISTING_UNAVAILABLE';
+    END IF;
+
+    IF v_listing.kind NOT IN ('pre_loved', 'business') THEN
+      RAISE EXCEPTION 'LISTING_NOT_PHYSICAL';
+    END IF;
+
+    IF COALESCE(v_listing.is_food, false) AND v_listing.availability_mode = 'pre_order' THEN
+      RAISE EXCEPTION 'FOOD_PREORDER_NOT_ENABLED';
+    END IF;
+
+    IF v_listing.seller_id = v_uid THEN
+      RAISE EXCEPTION 'SELF_PURCHASE_FORBIDDEN';
+    END IF;
+
+    IF public.is_member_blocked_between(v_uid, v_listing.seller_id) THEN
+      RAISE EXCEPTION 'MEMBER_BLOCKED';
+    END IF;
+
+    IF COALESCE(v_listing.has_variants, false) THEN
+      IF v_ci.variant_id IS NULL THEN
+        RAISE EXCEPTION 'VARIANT_REQUIRED';
+      END IF;
+
+      SELECT * INTO v_variant
+      FROM public.listing_variants
+      WHERE id = v_ci.variant_id
+        AND listing_id = v_listing.id;
+
+      IF NOT FOUND OR v_variant.active IS NOT TRUE THEN
+        RAISE EXCEPTION 'VARIANT_UNAVAILABLE';
+      END IF;
+
+      IF (v_variant.quantity - GREATEST(0, v_variant.reserved_quantity)) < v_ci.quantity THEN
+        RAISE EXCEPTION 'INSUFFICIENT_VARIANT_STOCK';
+      END IF;
+
+      UPDATE public.listing_variants
+      SET reserved_quantity = GREATEST(0, reserved_quantity) + v_ci.quantity
+      WHERE id = v_variant.id;
+    ELSE
+      IF v_ci.variant_id IS NOT NULL THEN
+        RAISE EXCEPTION 'UNEXPECTED_VARIANT';
+      END IF;
+
+      IF (v_listing.quantity - GREATEST(0, v_listing.reserved_quantity)) < v_ci.quantity THEN
+        RAISE EXCEPTION 'INSUFFICIENT_LISTING_STOCK';
+      END IF;
+    END IF;
+
+    UPDATE public.listings
+    SET reserved_quantity = GREATEST(0, reserved_quantity) + v_ci.quantity,
+        updated_at = v_now
+    WHERE id = v_listing.id;
+  END LOOP;
+
+  -- Create ONE separate pending_payment order per distinct seller
+  FOR v_seller IN
+    SELECT DISTINCT l.seller_id
+    FROM public.cart_items ci
+    JOIN public.listings l ON l.id = ci.listing_id
+    WHERE ci.user_id = v_uid
+    ORDER BY l.seller_id
+  LOOP
+    v_subtotal := 0;
+    v_is_food_order := false;
+    v_area_name := NULL;
+
+    SELECT
+      COALESCE(SUM(
+        CASE
+          WHEN COALESCE(l.has_variants, false) THEN lv.price_sen * ci.quantity
+          ELSE l.price_sen * ci.quantity
+        END
+      ), 0)::integer,
+      BOOL_OR(COALESCE(l.is_food, false)),
+      MIN(ca.name)
+    INTO v_subtotal, v_is_food_order, v_area_name
+    FROM public.cart_items ci
+    JOIN public.listings l ON l.id = ci.listing_id
+    LEFT JOIN public.listing_variants lv ON lv.id = ci.variant_id
+    LEFT JOIN public.collection_areas ca ON ca.id = l.collection_area_id
+    WHERE ci.user_id = v_uid
+      AND l.seller_id = v_seller.seller_id;
+
+    IF v_subtotal < 200 THEN
+      RAISE EXCEPTION 'INVALID_ORDER_SUBTOTAL';
+    END IF;
+
+    v_commission := ROUND(v_subtotal * 0.02)::integer;
+    v_seller_net := GREATEST(0, v_subtotal - v_commission);
+    v_order_code := 'BU-' || to_char(v_now AT TIME ZONE 'Asia/Kuala_Lumpur', 'YYMM') || '-'
+      || upper(substr(md5(gen_random_uuid()::text), 1, 6));
+
+    INSERT INTO public.orders (
+      order_code, buyer_id, seller_id, source,
+      subtotal_sen, fpx_fee_sen, total_paid_sen, commission_sen, seller_net_sen,
+      status, is_food_order, collection_area_name, payment_deadline, idempotency_key
+    ) VALUES (
+      v_order_code, v_uid, v_seller.seller_id, 'cart',
+      v_subtotal, v_fpx, v_subtotal + v_fpx, v_commission, v_seller_net,
+      'pending_payment', COALESCE(v_is_food_order, false),
+      COALESCE(v_area_name, 'UMSKAL Campus'),
+      v_now + interval '15 minutes', v_key
+    )
+    RETURNING * INTO v_order;
+
+    FOR v_ci IN
+      SELECT ci.listing_id, ci.variant_id, ci.quantity,
+             l.title, l.price_sen AS listing_price_sen, l.has_variants,
+             l.image_paths, l.is_food, l.availability_mode,
+             l.pickup_window_start, l.pickup_note,
+             lv.price_sen AS variant_price_sen, lv.option_values
+      FROM public.cart_items ci
+      JOIN public.listings l ON l.id = ci.listing_id
+      LEFT JOIN public.listing_variants lv ON lv.id = ci.variant_id
+      WHERE ci.user_id = v_uid
+        AND l.seller_id = v_seller.seller_id
+      ORDER BY ci.listing_id, ci.variant_id NULLS FIRST
+    LOOP
+      v_unit_sen := CASE
+        WHEN COALESCE(v_ci.has_variants, false) THEN v_ci.variant_price_sen
+        ELSE v_ci.listing_price_sen
+      END;
+
+      INSERT INTO public.order_items (
+        order_id, listing_id, variant_id, title_snapshot, variant_snapshot,
+        unit_sen, quantity, image_path, is_food, availability_mode,
+        pickup_window_start, pickup_note
+      ) VALUES (
+        v_order.id, v_ci.listing_id, v_ci.variant_id, v_ci.title, v_ci.option_values,
+        v_unit_sen, v_ci.quantity, COALESCE(v_ci.image_paths[1], ''),
+        COALESCE(v_ci.is_food, false), COALESCE(v_ci.availability_mode, 'ready'),
+        v_ci.pickup_window_start, COALESCE(v_ci.pickup_note, '')
+      );
+    END LOOP;
+
+    RETURN NEXT v_order;
+  END LOOP;
+
+  -- Clear buyer's purchased cart items atomically in the same transaction
+  DELETE FROM public.cart_items
+  WHERE user_id = v_uid;
+
+  RETURN;
+END;
+$$;
+
 -- 4. Release expired unpaid CART orders (15m payment_deadline) safely & once
 CREATE OR REPLACE FUNCTION public.release_expired_cart_orders()
 RETURNS integer
@@ -410,6 +668,9 @@ $$;
 REVOKE ALL ON FUNCTION public.create_offer_order_atomic(uuid, text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.create_offer_order_atomic(uuid, text) TO authenticated;
 
+REVOKE ALL ON FUNCTION public.create_cart_orders_atomic(text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.create_cart_orders_atomic(text) TO authenticated;
+
 REVOKE ALL ON FUNCTION public.release_expired_cart_orders() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.release_expired_cart_orders() TO service_role;
 
@@ -423,6 +684,7 @@ COMMIT;
 --   BEGIN;
 --   DROP FUNCTION IF EXISTS public.confirm_order_payment_atomic(uuid, text, text, integer, jsonb);
 --   DROP FUNCTION IF EXISTS public.release_expired_cart_orders();
+--   DROP FUNCTION IF EXISTS public.create_cart_orders_atomic(text);
 --   DROP FUNCTION IF EXISTS public.create_offer_order_atomic(uuid, text);
 --   DROP INDEX IF EXISTS public.idx_orders_pending_payment_deadline;
 --   DROP INDEX IF EXISTS public.idx_payments_unique_transaction_ref;

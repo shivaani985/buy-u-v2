@@ -19,6 +19,7 @@ import {
   formatToyyibPayExpiryMyt,
   parseToyyibPayAmountToSen,
   parseToyyibPayWebhookEnvelope,
+  summarizeMultiSellerBillBatch,
 } from "../src/lib/payments/toyyibpay.ts";
 
 const BUYER_ID = "17d414ce-8349-4dc2-bccd-94d9bd0ebc52";
@@ -206,9 +207,31 @@ test("ToyyibPay contracts format MYT expiry, reject browser redirects, verify ex
     paymentDeadlineIso: "2026-11-24T01:30:00.000Z",
   });
   assert.equal(payload.billAmount, 1600);
-  // Official ToyyibPay API: 1 = charge FPX to bill owner ("Amount"), preventing RM 1.00 double-charge
-  assert.equal(payload.billChargeToCustomer, 1);
+  // Official ToyyibPay API: "" (blank) = charge FPX & CC to bill owner, preventing RM 1.00 double-charge
+  assert.equal(payload.billChargeToCustomer, "");
+  assert.equal(payload.billPaymentChannel, 0);
   assert.equal(payload.billExternalReferenceNo, "BU-2611-0DB3");
+
+  // Multi-seller partial bill failure isolates failed seller order without losing sibling bills
+  const partialBatch = summarizeMultiSellerBillBatch([
+    {
+      orderId: "ord-a",
+      orderCode: "BU-2611-AAA1",
+      billCode: "billA123",
+      billUrl: "https://dev.toyyibpay.com/billA123",
+    },
+    {
+      orderId: "ord-b",
+      orderCode: "BU-2611-BBB2",
+      billCode: null,
+      billUrl: null,
+      error: "ToyyibPay sandbox timeout",
+    },
+  ]);
+  assert.equal(partialBatch.status, "partial_failure");
+  assert.equal(partialBatch.readyBills.length, 1);
+  assert.equal(partialBatch.failedBills.length, 1);
+  assert.equal(partialBatch.failedBills[0]?.orderId, "ord-b");
 
   // Mismatched subtotal + FPX fee throws immediately
   assert.throws(() =>

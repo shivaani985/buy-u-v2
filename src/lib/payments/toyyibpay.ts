@@ -28,14 +28,17 @@ export interface ToyyibPayCreateBillRequest {
   billTo: string;
   billEmail: string;
   billPhone: string;
+  /** Official ToyyibPay API: 0 = FPX only, 1 = Credit Card only, 2 = Both. */
+  billPaymentChannel: 0;
   /**
-   * Official ToyyibPay API:
-   * - 0 = charge FPX fee to customer ON TOP of billAmount (WOULD DOUBLE-CHARGE!)
-   * - 1 = charge FPX fee to bill owner ("chargeOn": "Amount"), matching hosted
-   *       #BU-2611-0DB3 where billAmount = total_paid_sen (subtotal + RM 1.00)
-   *       and buyer pays exactly total_paid_sen once.
+   * Official ToyyibPay API (`createBill`):
+   * - "" (blank) = Charge BOTH FPX and Credit Card fees to bill owner
+   *   (customer pays EXACTLY `billAmount` = `total_paid_sen`; ZERO RM 1.00 double-charge).
+   * - 0 = Charge FPX to customer, CC to owner (DO NOT USE when billAmount includes RM 1.00).
+   * - 1 = Charge FPX to owner, CC to customer (channel-specific; avoid ambiguity).
+   * - 2 = Charge BOTH to customer (DO NOT USE when billAmount includes RM 1.00).
    */
-  billChargeToCustomer: 1;
+  billChargeToCustomer: "";
   /** ToyyibPay format: "DD-MM-YYYY HH:mm:ss" (MYT / UTC+8). */
   billExpiryDate: string;
 }
@@ -97,10 +100,47 @@ export function buildToyyibPayCreateBillPayload(input: {
     billTo: input.buyerName.trim().slice(0, 80) || "UMS Member",
     billEmail: input.buyerEmail.trim(),
     billPhone: (input.buyerPhone ?? "").trim() || "0100000000",
-    // Charge FPX to bill owner ("Amount") since billAmount already includes fpxFeeSen.
-    billChargeToCustomer: 1,
+    billPaymentChannel: 0,
+    // Leave blank ("") per official ToyyibPay API so FPX fee is borne by bill owner
+    // and buyer pays exactly billAmount (subtotal + RM 1.00) with zero double-charge.
+    billChargeToCustomer: "",
     billExpiryDate: formatToyyibPayExpiryMyt(input.paymentDeadlineIso),
   };
+}
+
+export interface MultiSellerBillAttempt {
+  orderId: string;
+  orderCode: string;
+  billCode: string | null;
+  billUrl: string | null;
+  error?: string;
+}
+
+export interface MultiSellerBillBatchOutcome {
+  status: "all_created" | "partial_failure" | "all_failed";
+  readyBills: MultiSellerBillAttempt[];
+  failedBills: MultiSellerBillAttempt[];
+}
+
+/**
+ * Classifies multi-seller ToyyibPay bill creation results so partial failures
+ * NEVER lose created bills, NEVER double-create orders, and allow retrying
+ * only the failed seller order(s) within their 15-minute payment_deadline.
+ */
+export function summarizeMultiSellerBillBatch(
+  attempts: MultiSellerBillAttempt[]
+): MultiSellerBillBatchOutcome {
+  const readyBills = attempts.filter((a) => Boolean(a.billCode && a.billUrl));
+  const failedBills = attempts.filter((a) => !a.billCode || !a.billUrl);
+
+  const status =
+    failedBills.length === 0 && readyBills.length > 0
+      ? "all_created"
+      : readyBills.length > 0
+        ? "partial_failure"
+        : "all_failed";
+
+  return { status, readyBills, failedBills };
 }
 
 export interface ToyyibPayWebhookEnvelope {
