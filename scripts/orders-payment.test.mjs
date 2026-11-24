@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import test from "node:test";
 import { buildCartSummary } from "../src/lib/buyer/cart.ts";
 import { buildCheckoutPreparation } from "../src/lib/buyer/checkout.ts";
@@ -386,4 +388,298 @@ test("ToyyibPay contracts format MYT expiry, reject browser redirects, verify ex
     }).action,
     "mark_failed"
   );
+});
+
+// =============================================================================
+// Phase 6B.1 Final Concurrency & SQL Integrity Regression Tests
+// =============================================================================
+
+function extractSqlFunction(sql, fnName) {
+  const start = sql.indexOf(`CREATE OR REPLACE FUNCTION public.${fnName}`);
+  assert.ok(start >= 0, `Missing SQL function ${fnName}`);
+  const end = sql.indexOf("$$;", start);
+  assert.ok(end > start, `Unterminated SQL function ${fnName}`);
+  return sql.slice(start, end + 3);
+}
+
+test("Phase 6B.1 SQL enforces global listings-before-variants lock order, snapshot isolation, exact release, and active seller checks", () => {
+  const sqlPath = path.resolve(
+    process.cwd(),
+    "docs/sql/phase-6a-order-payment-foundation.sql"
+  );
+  const sql = fs.readFileSync(sqlPath, "utf8");
+
+  const offerFn = extractSqlFunction(sql, "create_offer_order_atomic");
+  const cartFn = extractSqlFunction(sql, "create_cart_orders_atomic");
+  const expiryFn = extractSqlFunction(sql, "release_expired_cart_orders");
+  const confirmFn = extractSqlFunction(sql, "confirm_order_payment_atomic");
+
+  // 1. Consistent lock order: listings (ORDER BY l.id FOR UPDATE) BEFORE listing_variants (ORDER BY lv.id FOR UPDATE)
+  for (const [name, body] of [
+    ["create_cart_orders_atomic", cartFn],
+    ["release_expired_cart_orders", expiryFn],
+    ["confirm_order_payment_atomic", confirmFn],
+  ]) {
+    const lockListingsIdx = body.indexOf("FROM public.listings l");
+    const lockVariantsIdx = body.indexOf("FROM public.listing_variants lv");
+    assert.ok(lockListingsIdx > 0, `${name} must pre-lock listings`);
+    assert.ok(lockVariantsIdx > 0, `${name} must pre-lock listing_variants`);
+    assert.ok(
+      lockListingsIdx < lockVariantsIdx,
+      `${name} must lock listings before listing_variants`
+    );
+    assert.ok(
+      body.includes("ORDER BY l.id\n  FOR UPDATE") ||
+        body.includes("ORDER BY l.id\n      FOR UPDATE"),
+      `${name} must lock listings in deterministic ID order`
+    );
+    assert.ok(
+      body.includes("ORDER BY lv.id\n  FOR UPDATE") ||
+        body.includes("ORDER BY lv.id\n      FOR UPDATE"),
+      `${name} must lock listing_variants in deterministic ID order`
+    );
+  }
+
+  // 2. Concurrent idempotency: advisory checkout lock + post-lock idempotency recheck before CART_EMPTY
+  assert.ok(cartFn.includes("pg_advisory_xact_lock("));
+  const snapshotIdx = cartFn.indexOf("INTO v_cart_item_ids");
+  const recheckIdx = cartFn.indexOf("idempotency_key = v_key", snapshotIdx);
+  const cartEmptyIdx = cartFn.indexOf("RAISE EXCEPTION 'CART_EMPTY'");
+  assert.ok(
+    snapshotIdx > 0 && recheckIdx > snapshotIdx && recheckIdx < cartEmptyIdx,
+    "create_cart_orders_atomic must recheck idempotency_key after locking and before CART_EMPTY"
+  );
+
+  // 3. Snapshotted cart item IDs used for processing & deletion (never blanket DELETE WHERE user_id = v_uid)
+  assert.ok(
+    cartFn.includes("DELETE FROM public.cart_items\n  WHERE user_id = v_uid\n    AND id = ANY(v_cart_item_ids);"),
+    "create_cart_orders_atomic must delete only snapshotted cart_item IDs"
+  );
+  assert.equal(
+    cartFn.includes("DELETE FROM public.cart_items\n  WHERE user_id = v_uid;"),
+    false
+  );
+
+  // 4. Expiry cleanup validates reservation integrity without GREATEST(0, ...)
+  assert.equal(expiryFn.includes("GREATEST(0"), false);
+  assert.ok(expiryFn.includes("INSUFFICIENT_LISTING_RESERVATION"));
+  assert.ok(expiryFn.includes("INSUFFICIENT_VARIANT_RESERVATION"));
+
+  // 5. Inactive/suspended sellers blocked in both offer and cart order creation
+  assert.ok(offerFn.includes("SELLER_NOT_ACTIVE"));
+  assert.ok(cartFn.includes("SELLER_NOT_ACTIVE"));
+});
+
+test("Concurrency model: simultaneous identical submissions, mid-checkout cart add, overlapping variant holds, inactive seller, and payment-vs-expiry races", () => {
+  // Minimal faithful in-memory state machine mirroring the SQL RPC invariants
+  const state = {
+    profiles: new Map([
+      [SELLER_A, { status: "active" }],
+      [SELLER_B, { status: "suspended" }],
+    ]),
+    listings: new Map([
+      ["L1", { id: "L1", sellerId: SELLER_A, status: "published", quantity: 5, reserved: 0, hasVariants: true }],
+      ["L2", { id: "L2", sellerId: SELLER_B, status: "published", quantity: 3, reserved: 0, hasVariants: false }],
+    ]),
+    variants: new Map([
+      ["V1", { id: "V1", listingId: "L1", active: true, quantity: 3, reserved: 0, priceSen: 1500 }],
+      ["V2", { id: "V2", listingId: "L1", active: true, quantity: 2, reserved: 0, priceSen: 1800 }],
+    ]),
+    cart: [
+      { id: "ci-1", userId: BUYER_ID, listingId: "L1", variantId: "V1", quantity: 2 },
+    ],
+    orders: [],
+  };
+
+  function runCreateCartOrders(userId, key, nowMs, onAfterSnapshot) {
+    // 1. Snapshot locked cart item IDs + post-lock idempotency recheck
+    const snapshotIds = state.cart.filter((c) => c.userId === userId).map((c) => c.id);
+    if (onAfterSnapshot) onAfterSnapshot();
+
+    const existing = state.orders.filter(
+      (o) => o.buyerId === userId && o.source === "cart" && o.idempotencyKey === key
+    );
+    if (existing.length > 0) return existing;
+    if (snapshotIds.length === 0) throw new Error("CART_EMPTY");
+
+    const items = state.cart.filter((c) => snapshotIds.includes(c.id));
+    // Validate seller active + stock before mutating
+    for (const ci of items) {
+      const l = state.listings.get(ci.listingId);
+      if (!l || l.status !== "published") throw new Error("LISTING_UNAVAILABLE");
+      const seller = state.profiles.get(l.sellerId);
+      if (!seller || seller.status !== "active") throw new Error("SELLER_NOT_ACTIVE");
+      if (l.reserved < 0 || l.quantity - l.reserved < ci.quantity) {
+        throw new Error("INSUFFICIENT_LISTING_STOCK");
+      }
+      if (l.hasVariants) {
+        const v = state.variants.get(ci.variantId);
+        if (!v || !v.active) throw new Error("VARIANT_UNAVAILABLE");
+        if (v.reserved < 0 || v.quantity - v.reserved < ci.quantity) {
+          throw new Error("INSUFFICIENT_VARIANT_STOCK");
+        }
+      }
+    }
+
+    // Reserve listings before variants
+    for (const ci of items) {
+      const l = state.listings.get(ci.listingId);
+      l.reserved += ci.quantity;
+      if (l.hasVariants) state.variants.get(ci.variantId).reserved += ci.quantity;
+    }
+
+    const order = {
+      id: `ord-${state.orders.length + 1}`,
+      buyerId: userId,
+      sellerId: SELLER_A,
+      source: "cart",
+      idempotencyKey: key,
+      status: "pending_payment",
+      paidAt: null,
+      paymentDeadlineMs: nowMs + 15 * 60_000,
+      items: items.map((ci) => ({
+        listingId: ci.listingId,
+        variantId: ci.variantId,
+        quantity: ci.quantity,
+      })),
+    };
+    state.orders.push(order);
+
+    // Delete ONLY snapshotted cart IDs
+    state.cart = state.cart.filter((c) => !snapshotIds.includes(c.id));
+    return [order];
+  }
+
+  function runReleaseExpired(nowMs) {
+    let released = 0;
+    for (const ord of state.orders) {
+      if (
+        ord.source !== "cart" ||
+        ord.status !== "pending_payment" ||
+        ord.paidAt !== null ||
+        ord.paymentDeadlineMs > nowMs
+      ) {
+        continue;
+      }
+      // Validate exact reservation integrity first (no GREATEST(0, ...))
+      let valid = true;
+      for (const item of ord.items) {
+        const l = state.listings.get(item.listingId);
+        const v = item.variantId ? state.variants.get(item.variantId) : null;
+        if (!l || l.reserved < item.quantity || (v && v.reserved < item.quantity)) {
+          valid = false;
+          break;
+        }
+      }
+      if (!valid) continue;
+
+      for (const item of ord.items) {
+        state.listings.get(item.listingId).reserved -= item.quantity;
+        if (item.variantId) state.variants.get(item.variantId).reserved -= item.quantity;
+      }
+      ord.status = "expired";
+      released += 1;
+    }
+    return released;
+  }
+
+  function runConfirmPayment(orderId, nowMs) {
+    const ord = state.orders.find((o) => o.id === orderId);
+    if (!ord) throw new Error("ORDER_NOT_FOUND");
+    if (ord.status === "expired" || nowMs >= ord.paymentDeadlineMs) {
+      return "late_payment_reconciliation";
+    }
+    for (const item of ord.items) {
+      const l = state.listings.get(item.listingId);
+      const v = item.variantId ? state.variants.get(item.variantId) : null;
+      if (l.reserved < item.quantity || l.quantity < item.quantity) {
+        throw new Error("INSUFFICIENT_LISTING_RESERVATION");
+      }
+      if (v && (v.reserved < item.quantity || v.quantity < item.quantity)) {
+        throw new Error("INSUFFICIENT_VARIANT_RESERVATION");
+      }
+      l.quantity -= item.quantity;
+      l.reserved -= item.quantity;
+      if (v) {
+        v.quantity -= item.quantity;
+        v.reserved -= item.quantity;
+      }
+    }
+    ord.status = "paid";
+    ord.paidAt = nowMs;
+    return "confirmed_paid";
+  }
+
+  const t0 = 1_700_000_000_000;
+
+  // Scenario A: Concurrent cart addition during checkout + simultaneous duplicate submission
+  const firstOrders = runCreateCartOrders(BUYER_ID, "idem-key-0001", t0, () => {
+    // Mid-checkout concurrent cart addition by the same buyer
+    state.cart.push({ id: "ci-2", userId: BUYER_ID, listingId: "L1", variantId: "V1", quantity: 1 });
+  });
+  assert.equal(firstOrders.length, 1);
+  assert.equal(state.listings.get("L1").reserved, 2);
+  assert.equal(state.variants.get("V1").reserved, 2);
+  // Concurrent cart addition ci-2 was neither purchased nor deleted
+  assert.deepEqual(state.cart.map((c) => c.id), ["ci-2"]);
+
+  // Simultaneous retry with identical idempotency key returns original order (not CART_EMPTY, no double-reserve)
+  const retryOrders = runCreateCartOrders(BUYER_ID, "idem-key-0001", t0 + 50);
+  assert.equal(retryOrders[0].id, firstOrders[0].id);
+  assert.equal(state.listings.get("L1").reserved, 2);
+  assert.equal(state.variants.get("V1").reserved, 2);
+
+  // Scenario B: Overlapping variant hold on same listing/variant (ci-2 creates Order 2 at t0 + 5m)
+  const secondOrders = runCreateCartOrders(BUYER_ID, "idem-key-0002", t0 + 5 * 60_000);
+  assert.equal(secondOrders.length, 1);
+  assert.equal(state.listings.get("L1").reserved, 3);
+  assert.equal(state.variants.get("V1").reserved, 3);
+
+  // Expiry at t0 + 16m releases ONLY Order 1 (qty 2); Order 2's overlapping hold (qty 1) stays intact
+  assert.equal(runReleaseExpired(t0 + 16 * 60_000), 1);
+  assert.equal(firstOrders[0].status, "expired");
+  assert.equal(secondOrders[0].status, "pending_payment");
+  assert.equal(state.listings.get("L1").reserved, 1);
+  assert.equal(state.variants.get("V1").reserved, 1);
+
+  // Scenario C: Payment-vs-expiry races
+  // C1: Late payment callback after Order 1 expired routes to reconciliation without touching stock/holds
+  assert.equal(runConfirmPayment(firstOrders[0].id, t0 + 16 * 60_000), "late_payment_reconciliation");
+  assert.equal(state.listings.get("L1").quantity, 5);
+  assert.equal(state.listings.get("L1").reserved, 1);
+
+  // C2: Order 2 confirms paid BEFORE its deadline; subsequent expiry sweep does not release or expire it
+  assert.equal(runConfirmPayment(secondOrders[0].id, t0 + 18 * 60_000), "confirmed_paid");
+  assert.equal(secondOrders[0].status, "paid");
+  assert.equal(state.listings.get("L1").quantity, 4);
+  assert.equal(state.listings.get("L1").reserved, 0);
+  assert.equal(state.variants.get("V1").quantity, 2);
+  assert.equal(state.variants.get("V1").reserved, 0);
+  assert.equal(runReleaseExpired(t0 + 30 * 60_000), 0);
+
+  // Scenario D: Corrupted expired order cannot decrement another live order's hold
+  state.orders.push({
+    id: "ord-corrupt",
+    buyerId: BUYER_ID,
+    sellerId: SELLER_A,
+    source: "cart",
+    idempotencyKey: "idem-corrupt",
+    status: "pending_payment",
+    paidAt: null,
+    paymentDeadlineMs: t0,
+    items: [{ listingId: "L1", variantId: "V1", quantity: 2 }],
+  });
+  state.listings.get("L1").reserved = 1; // Another live order holds 1 unit
+  state.variants.get("V1").reserved = 1;
+  assert.equal(runReleaseExpired(t0 + 40 * 60_000), 0);
+  assert.equal(state.listings.get("L1").reserved, 1); // Untouched!
+  assert.equal(state.variants.get("V1").reserved, 1); // Untouched!
+
+  // Scenario E: Inactive/suspended seller cannot receive new orders
+  state.cart.push({ id: "ci-suspended", userId: BUYER_ID, listingId: "L2", variantId: null, quantity: 1 });
+  assert.throws(
+    () => runCreateCartOrders(BUYER_ID, "idem-suspended", t0 + 50 * 60_000),
+    /SELLER_NOT_ACTIVE/
+  );
+  assert.equal(state.listings.get("L2").reserved, 0);
 });

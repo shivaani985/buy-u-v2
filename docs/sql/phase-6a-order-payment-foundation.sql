@@ -58,6 +58,7 @@ DECLARE
   v_now timestamptz := now();
   v_offer public.offers;
   v_listing public.listings;
+  v_seller_status text;
   v_area_name text;
   v_existing public.orders;
   v_order public.orders;
@@ -110,6 +111,14 @@ BEGIN
 
   IF public.is_member_blocked_between(v_offer.buyer_id, v_offer.seller_id) THEN
     RAISE EXCEPTION 'MEMBER_BLOCKED';
+  END IF;
+
+  SELECT status INTO v_seller_status
+  FROM public.profiles
+  WHERE id = v_offer.seller_id;
+
+  IF COALESCE(lower(v_seller_status), '') <> 'active' THEN
+    RAISE EXCEPTION 'SELLER_NOT_ACTIVE';
   END IF;
 
   SELECT * INTO v_listing
@@ -189,8 +198,9 @@ DECLARE
   v_uid uuid := auth.uid();
   v_now timestamptz := now();
   v_key text := trim(COALESCE(p_idempotency_key, ''));
-  v_cart_count integer := 0;
+  v_cart_item_ids uuid[];
   v_seller RECORD;
+  v_seller_status text;
   v_ci RECORD;
   v_listing public.listings;
   v_variant public.listing_variants;
@@ -212,7 +222,10 @@ BEGIN
     RAISE EXCEPTION 'INVALID_IDEMPOTENCY_KEY';
   END IF;
 
-  -- Idempotent return if this checkout submission already created orders
+  -- Serialize concurrent cart checkout submissions for the same buyer before any table locks
+  PERFORM pg_advisory_xact_lock(hashtextextended('buyu_cart_checkout:' || v_uid::text, 0));
+
+  -- Fast idempotent return if this checkout submission already created orders
   IF EXISTS (
     SELECT 1
     FROM public.orders
@@ -234,25 +247,47 @@ BEGIN
   PERFORM public.release_expired_offer_reservations();
   PERFORM public.release_expired_cart_orders();
 
-  -- Lock buyer's cart rows deterministically
-  PERFORM 1
-  FROM public.cart_items
-  WHERE user_id = v_uid
-  ORDER BY listing_id, variant_id NULLS FIRST, id
-  FOR UPDATE;
+  -- Lock buyer's current cart rows deterministically and snapshot exact locked IDs
+  SELECT array_agg(locked.id ORDER BY locked.listing_id, locked.variant_id NULLS FIRST, locked.id)
+  INTO v_cart_item_ids
+  FROM (
+    SELECT ci.id, ci.listing_id, ci.variant_id
+    FROM public.cart_items ci
+    WHERE ci.user_id = v_uid
+    ORDER BY ci.listing_id, ci.variant_id NULLS FIRST, ci.id
+    FOR UPDATE
+  ) AS locked;
 
-  SELECT count(*) INTO v_cart_count
-  FROM public.cart_items
-  WHERE user_id = v_uid;
+  -- Recheck idempotency after acquiring checkout locks (concurrent identical submission safety)
+  IF EXISTS (
+    SELECT 1
+    FROM public.orders
+    WHERE buyer_id = v_uid
+      AND source = 'cart'
+      AND idempotency_key = v_key
+  ) THEN
+    RETURN QUERY
+      SELECT *
+      FROM public.orders
+      WHERE buyer_id = v_uid
+        AND source = 'cart'
+        AND idempotency_key = v_key
+      ORDER BY created_at ASC, id ASC;
+    RETURN;
+  END IF;
 
-  IF v_cart_count = 0 THEN
+  IF v_cart_item_ids IS NULL OR cardinality(v_cart_item_ids) = 0 THEN
     RAISE EXCEPTION 'CART_EMPTY';
   END IF;
 
-  -- Pre-lock all referenced listings and variants in deterministic ID order (deadlock-free)
+  -- Pre-lock all referenced listings BEFORE variants in deterministic ID order (deadlock-free)
   PERFORM 1
   FROM public.listings l
-  WHERE l.id IN (SELECT DISTINCT ci.listing_id FROM public.cart_items ci WHERE ci.user_id = v_uid)
+  WHERE l.id IN (
+    SELECT DISTINCT ci.listing_id
+    FROM public.cart_items ci
+    WHERE ci.id = ANY(v_cart_item_ids)
+  )
   ORDER BY l.id
   FOR UPDATE;
 
@@ -261,16 +296,17 @@ BEGIN
   WHERE lv.id IN (
     SELECT DISTINCT ci.variant_id
     FROM public.cart_items ci
-    WHERE ci.user_id = v_uid AND ci.variant_id IS NOT NULL
+    WHERE ci.id = ANY(v_cart_item_ids)
+      AND ci.variant_id IS NOT NULL
   )
   ORDER BY lv.id
   FOR UPDATE;
 
-  -- Validate every cart item and reserve stock atomically
+  -- Validate every snapshotted cart item and reserve stock atomically
   FOR v_ci IN
     SELECT ci.id, ci.listing_id, ci.variant_id, ci.quantity
     FROM public.cart_items ci
-    WHERE ci.user_id = v_uid
+    WHERE ci.id = ANY(v_cart_item_ids)
     ORDER BY ci.listing_id, ci.variant_id NULLS FIRST, ci.id
   LOOP
     IF v_ci.quantity IS NULL OR v_ci.quantity < 1 THEN
@@ -297,8 +333,20 @@ BEGIN
       RAISE EXCEPTION 'SELF_PURCHASE_FORBIDDEN';
     END IF;
 
+    SELECT status INTO v_seller_status
+    FROM public.profiles
+    WHERE id = v_listing.seller_id;
+
+    IF COALESCE(lower(v_seller_status), '') <> 'active' THEN
+      RAISE EXCEPTION 'SELLER_NOT_ACTIVE';
+    END IF;
+
     IF public.is_member_blocked_between(v_uid, v_listing.seller_id) THEN
       RAISE EXCEPTION 'MEMBER_BLOCKED';
+    END IF;
+
+    IF v_listing.reserved_quantity < 0 OR (v_listing.quantity - v_listing.reserved_quantity) < v_ci.quantity THEN
+      RAISE EXCEPTION 'INSUFFICIENT_LISTING_STOCK';
     END IF;
 
     IF COALESCE(v_listing.has_variants, false) THEN
@@ -315,35 +363,33 @@ BEGIN
         RAISE EXCEPTION 'VARIANT_UNAVAILABLE';
       END IF;
 
-      IF (v_variant.quantity - GREATEST(0, v_variant.reserved_quantity)) < v_ci.quantity THEN
+      IF v_variant.reserved_quantity < 0 OR (v_variant.quantity - v_variant.reserved_quantity) < v_ci.quantity THEN
         RAISE EXCEPTION 'INSUFFICIENT_VARIANT_STOCK';
       END IF;
-
-      UPDATE public.listing_variants
-      SET reserved_quantity = GREATEST(0, reserved_quantity) + v_ci.quantity
-      WHERE id = v_variant.id;
     ELSE
       IF v_ci.variant_id IS NOT NULL THEN
         RAISE EXCEPTION 'UNEXPECTED_VARIANT';
       END IF;
-
-      IF (v_listing.quantity - GREATEST(0, v_listing.reserved_quantity)) < v_ci.quantity THEN
-        RAISE EXCEPTION 'INSUFFICIENT_LISTING_STOCK';
-      END IF;
     END IF;
 
     UPDATE public.listings
-    SET reserved_quantity = GREATEST(0, reserved_quantity) + v_ci.quantity,
+    SET reserved_quantity = reserved_quantity + v_ci.quantity,
         updated_at = v_now
     WHERE id = v_listing.id;
+
+    IF COALESCE(v_listing.has_variants, false) THEN
+      UPDATE public.listing_variants
+      SET reserved_quantity = reserved_quantity + v_ci.quantity
+      WHERE id = v_variant.id;
+    END IF;
   END LOOP;
 
-  -- Create ONE separate pending_payment order per distinct seller
+  -- Create ONE separate pending_payment order per distinct seller (snapshotted cart IDs only)
   FOR v_seller IN
     SELECT DISTINCT l.seller_id
     FROM public.cart_items ci
     JOIN public.listings l ON l.id = ci.listing_id
-    WHERE ci.user_id = v_uid
+    WHERE ci.id = ANY(v_cart_item_ids)
     ORDER BY l.seller_id
   LOOP
     v_subtotal := 0;
@@ -364,7 +410,7 @@ BEGIN
     JOIN public.listings l ON l.id = ci.listing_id
     LEFT JOIN public.listing_variants lv ON lv.id = ci.variant_id
     LEFT JOIN public.collection_areas ca ON ca.id = l.collection_area_id
-    WHERE ci.user_id = v_uid
+    WHERE ci.id = ANY(v_cart_item_ids)
       AND l.seller_id = v_seller.seller_id;
 
     IF v_subtotal < 200 THEN
@@ -398,7 +444,7 @@ BEGIN
       FROM public.cart_items ci
       JOIN public.listings l ON l.id = ci.listing_id
       LEFT JOIN public.listing_variants lv ON lv.id = ci.variant_id
-      WHERE ci.user_id = v_uid
+      WHERE ci.id = ANY(v_cart_item_ids)
         AND l.seller_id = v_seller.seller_id
       ORDER BY ci.listing_id, ci.variant_id NULLS FIRST
     LOOP
@@ -422,15 +468,19 @@ BEGIN
     RETURN NEXT v_order;
   END LOOP;
 
-  -- Clear buyer's purchased cart items atomically in the same transaction
+  -- Delete ONLY the snapshotted cart items so concurrent cart additions are preserved
   DELETE FROM public.cart_items
-  WHERE user_id = v_uid;
+  WHERE user_id = v_uid
+    AND id = ANY(v_cart_item_ids);
 
   RETURN;
 END;
 $$;
 
--- 4. Release expired unpaid CART orders (15m payment_deadline) safely & once
+-- 4. Release expired unpaid CART orders (15m payment_deadline) safely & once.
+--    Lock order matches cart creation & payment confirmation:
+--    orders -> listings (ORDER BY id) -> listing_variants (ORDER BY id).
+--    Validates exact reservation integrity; never masks corruption with GREATEST(0, ...).
 CREATE OR REPLACE FUNCTION public.release_expired_cart_orders()
 RETURNS integer
 LANGUAGE plpgsql
@@ -440,6 +490,8 @@ AS $$
 DECLARE
   v_ord RECORD;
   v_item RECORD;
+  v_listing public.listings;
+  v_variant public.listing_variants;
   v_now timestamptz := now();
   v_count integer := 0;
 BEGIN
@@ -451,34 +503,81 @@ BEGIN
       AND paid_at IS NULL
       AND payment_deadline IS NOT NULL
       AND payment_deadline <= v_now
+    ORDER BY id
     FOR UPDATE SKIP LOCKED
   LOOP
-    FOR v_item IN
-      SELECT listing_id, variant_id, quantity
-      FROM public.order_items
-      WHERE order_id = v_ord.id
-      ORDER BY listing_id, variant_id NULLS FIRST
-    LOOP
-      IF v_item.variant_id IS NOT NULL THEN
-        UPDATE public.listing_variants
-        SET reserved_quantity = GREATEST(0, reserved_quantity - v_item.quantity)
-        WHERE id = v_item.variant_id;
-      END IF;
+    BEGIN
+      -- Pre-lock ALL referenced listings BEFORE variants in deterministic ID order
+      PERFORM 1
+      FROM public.listings l
+      WHERE l.id IN (
+        SELECT DISTINCT oi.listing_id
+        FROM public.order_items oi
+        WHERE oi.order_id = v_ord.id
+      )
+      ORDER BY l.id
+      FOR UPDATE;
 
-      UPDATE public.listings
-      SET reserved_quantity = GREATEST(0, reserved_quantity - v_item.quantity),
+      PERFORM 1
+      FROM public.listing_variants lv
+      WHERE lv.id IN (
+        SELECT DISTINCT oi.variant_id
+        FROM public.order_items oi
+        WHERE oi.order_id = v_ord.id
+          AND oi.variant_id IS NOT NULL
+      )
+      ORDER BY lv.id
+      FOR UPDATE;
+
+      FOR v_item IN
+        SELECT listing_id, variant_id, quantity
+        FROM public.order_items
+        WHERE order_id = v_ord.id
+        ORDER BY listing_id, variant_id NULLS FIRST
+      LOOP
+        SELECT * INTO v_listing
+        FROM public.listings
+        WHERE id = v_item.listing_id;
+
+        IF NOT FOUND OR v_listing.reserved_quantity < v_item.quantity THEN
+          RAISE EXCEPTION 'INSUFFICIENT_LISTING_RESERVATION';
+        END IF;
+
+        IF v_item.variant_id IS NOT NULL THEN
+          SELECT * INTO v_variant
+          FROM public.listing_variants
+          WHERE id = v_item.variant_id
+            AND listing_id = v_item.listing_id;
+
+          IF NOT FOUND OR v_variant.reserved_quantity < v_item.quantity THEN
+            RAISE EXCEPTION 'INSUFFICIENT_VARIANT_RESERVATION';
+          END IF;
+        END IF;
+
+        UPDATE public.listings
+        SET reserved_quantity = reserved_quantity - v_item.quantity,
+            updated_at = v_now
+        WHERE id = v_item.listing_id;
+
+        IF v_item.variant_id IS NOT NULL THEN
+          UPDATE public.listing_variants
+          SET reserved_quantity = reserved_quantity - v_item.quantity
+          WHERE id = v_item.variant_id;
+        END IF;
+      END LOOP;
+
+      UPDATE public.orders
+      SET status = 'expired',
           updated_at = v_now
-      WHERE id = v_item.listing_id;
-    END LOOP;
+      WHERE id = v_ord.id
+        AND status = 'pending_payment'
+        AND paid_at IS NULL;
 
-    UPDATE public.orders
-    SET status = 'expired',
-        updated_at = v_now
-    WHERE id = v_ord.id
-      AND status = 'pending_payment'
-      AND paid_at IS NULL;
-
-    v_count := v_count + 1;
+      v_count := v_count + 1;
+    EXCEPTION WHEN OTHERS THEN
+      -- Roll back this order's partial release only; never corrupt another order's hold or block healthy expiries
+      RAISE WARNING 'release_expired_cart_orders skipped order % due to %', v_ord.id, SQLERRM;
+    END;
   END LOOP;
 
   RETURN v_count;
@@ -600,6 +699,28 @@ BEGIN
     RAISE EXCEPTION 'ORDER_NOT_PAYABLE';
   END IF;
 
+  -- Pre-lock ALL referenced listings BEFORE variants in deterministic ID order (deadlock-free)
+  PERFORM 1
+  FROM public.listings l
+  WHERE l.id IN (
+    SELECT DISTINCT oi.listing_id
+    FROM public.order_items oi
+    WHERE oi.order_id = v_order.id
+  )
+  ORDER BY l.id
+  FOR UPDATE;
+
+  PERFORM 1
+  FROM public.listing_variants lv
+  WHERE lv.id IN (
+    SELECT DISTINCT oi.variant_id
+    FROM public.order_items oi
+    WHERE oi.order_id = v_order.id
+      AND oi.variant_id IS NOT NULL
+  )
+  ORDER BY lv.id
+  FOR UPDATE;
+
   -- Explicitly verify reservations & stock before deducting (NEVER mask oversell with GREATEST)
   FOR v_item IN
     SELECT listing_id, variant_id, quantity
@@ -609,8 +730,7 @@ BEGIN
   LOOP
     SELECT * INTO v_listing
     FROM public.listings
-    WHERE id = v_item.listing_id
-    FOR UPDATE;
+    WHERE id = v_item.listing_id;
 
     IF NOT FOUND
        OR v_listing.reserved_quantity < v_item.quantity
@@ -622,19 +742,13 @@ BEGIN
       SELECT * INTO v_variant
       FROM public.listing_variants
       WHERE id = v_item.variant_id
-        AND listing_id = v_item.listing_id
-      FOR UPDATE;
+        AND listing_id = v_item.listing_id;
 
       IF NOT FOUND
          OR v_variant.reserved_quantity < v_item.quantity
          OR v_variant.quantity < v_item.quantity THEN
         RAISE EXCEPTION 'INSUFFICIENT_VARIANT_RESERVATION';
       END IF;
-
-      UPDATE public.listing_variants
-      SET quantity = quantity - v_item.quantity,
-          reserved_quantity = reserved_quantity - v_item.quantity
-      WHERE id = v_variant.id;
     END IF;
 
     UPDATE public.listings
@@ -642,6 +756,13 @@ BEGIN
         reserved_quantity = reserved_quantity - v_item.quantity,
         updated_at = v_now
     WHERE id = v_listing.id;
+
+    IF v_item.variant_id IS NOT NULL THEN
+      UPDATE public.listing_variants
+      SET quantity = quantity - v_item.quantity,
+          reserved_quantity = reserved_quantity - v_item.quantity
+      WHERE id = v_variant.id;
+    END IF;
   END LOOP;
 
   v_pin := lpad((floor(random() * 1000000))::int::text, 6, '0');
