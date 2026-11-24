@@ -400,12 +400,18 @@ export function validateOfferTransition(input: {
 export interface AtomicOfferSimulationState {
   listingQuantity: number;
   listingReservedQuantity: number;
+  listingSellerId?: string;
+  listingPriceSen?: number;
+  conversationMembers?: [string, string];
+  linkedOrderStatus?: "pending_payment" | "paid" | "expired" | null;
+  linkedOrderPaidAt?: string | null;
+  linkedOrderPaymentDeadline?: string | null;
   offer: OfferCardItem;
 }
 
 /**
- * Pure reference model of `accept_offer_atomic` for deterministic concurrency
- * and boundary testing (double-accept, stock=0, stock=1, 24h expiry).
+ * Pure reference model of `accept_offer_atomic` for deterministic security,
+ * concurrency, and boundary testing.
  */
 export function simulateAtomicOfferAccept(
   state: AtomicOfferSimulationState,
@@ -415,6 +421,40 @@ export function simulateAtomicOfferAccept(
 ):
   | { ok: true; nextState: AtomicOfferSimulationState }
   | { ok: false; error: string } {
+  const listingSellerId = state.listingSellerId ?? state.offer.sellerId;
+  if (
+    listingSellerId.toLowerCase() !== state.offer.sellerId.toLowerCase() ||
+    (sellerEligibility.userId &&
+      listingSellerId.toLowerCase() !== sellerEligibility.userId.toLowerCase())
+  ) {
+    return { ok: false, error: "Listing owner does not match offer seller." };
+  }
+
+  if (state.conversationMembers) {
+    const [a, b] = state.conversationMembers.map((x) => x.toLowerCase());
+    const buyer = state.offer.buyerId.toLowerCase();
+    const seller = state.offer.sellerId.toLowerCase();
+    const matches =
+      (a === buyer && b === seller) || (a === seller && b === buyer);
+    if (!matches) {
+      return {
+        ok: false,
+        error: "Offer participants do not match conversation participants.",
+      };
+    }
+  }
+
+  if (
+    state.offer.offerPriceSen < MIN_OFFER_SEN ||
+    (typeof state.listingPriceSen === "number" &&
+      state.offer.offerPriceSen > state.listingPriceSen)
+  ) {
+    return {
+      ok: false,
+      error: "Offer price must be at least RM 2.00 and not exceed listing price.",
+    };
+  }
+
   const available = Math.max(
     0,
     state.listingQuantity - Math.max(0, state.listingReservedQuantity)
@@ -438,6 +478,7 @@ export function simulateAtomicOfferAccept(
   return {
     ok: true,
     nextState: {
+      ...state,
       listingQuantity: state.listingQuantity,
       listingReservedQuantity: state.listingReservedQuantity + 1,
       offer: {
@@ -452,19 +493,26 @@ export function simulateAtomicOfferAccept(
 
 /**
  * Pure reference model of `release_expired_offer_reservations` verifying
- * exactly-once stock release after the 30-minute unpaid reservation window.
+ * exactly-once stock release at 30 minutes even if a linked unpaid order has
+ * a later payment_deadline, expiring that unpaid order atomically.
  */
 export function simulateReleaseExpiredReservation(
   state: AtomicOfferSimulationState,
   nowMs: number
 ): { released: boolean; nextState: AtomicOfferSimulationState } {
   const { offer } = state;
-  if (
-    offer.status !== "accepted" ||
-    offer.reservationReleasedAt !== null ||
-    offer.orderId !== null
-  ) {
+  if (offer.status !== "accepted" || offer.reservationReleasedAt !== null) {
     return { released: false, nextState: state };
+  }
+
+  const hasLinkedOrder = offer.orderId !== null;
+  if (hasLinkedOrder) {
+    const isUnpaidPending =
+      state.linkedOrderStatus === "pending_payment" &&
+      !state.linkedOrderPaidAt;
+    if (!isUnpaidPending) {
+      return { released: false, nextState: state };
+    }
   }
 
   const holdIso = computeReservationExpiresAt(
@@ -478,8 +526,10 @@ export function simulateReleaseExpiredReservation(
   return {
     released: true,
     nextState: {
+      ...state,
       listingQuantity: state.listingQuantity,
       listingReservedQuantity: Math.max(0, state.listingReservedQuantity - 1),
+      linkedOrderStatus: hasLinkedOrder ? "expired" : state.linkedOrderStatus,
       offer: {
         ...offer,
         status: "expired",

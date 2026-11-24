@@ -47,8 +47,9 @@ CREATE INDEX IF NOT EXISTS idx_offers_pending_expiry
   WHERE status = 'pending';
 
 -- 2. Harden existing `guard_offer_updates()` trigger:
---    - Blocks direct seller UPDATE to `status = 'accepted'` (must use `accept_offer_atomic`)
---    - Protects new expiry/reservation columns from direct authenticated mutation
+--    - Blocks ALL direct authenticated AND admin UPDATE to `status = 'accepted'`
+--      (only `postgres` / `service_role`, i.e. `accept_offer_atomic`, can accept)
+--    - Protects new expiry/reservation columns from direct mutation
 --    - Preserves authorized buyer cancel/withdraw and seller decline/reject on unexpired pending offers
 CREATE OR REPLACE FUNCTION public.guard_offer_updates()
 RETURNS trigger
@@ -59,7 +60,9 @@ AS $$
 DECLARE
   v_uid uuid := auth.uid();
 BEGIN
-  IF current_user IN ('postgres', 'service_role') OR public.is_active_admin() THEN
+  -- Strictly restrict bypass to postgres (SECURITY DEFINER RPCs) and service_role.
+  -- Active admins on `authenticated` CANNOT bypass stock reservation via direct UPDATE.
+  IF current_user IN ('postgres', 'service_role') THEN
     RETURN NEW;
   END IF;
 
@@ -77,6 +80,12 @@ BEGIN
      OR NEW.reservation_released_at IS DISTINCT FROM OLD.reservation_released_at
   THEN
     RAISE EXCEPTION 'Offer core and reservation fields cannot be modified directly'
+      USING ERRCODE = '42501';
+  END IF;
+
+  -- Explicitly block direct status = 'accepted' for every authenticated/admin caller
+  IF NEW.status = 'accepted' THEN
+    RAISE EXCEPTION 'Offers must be accepted via accept_offer_atomic to reserve stock atomically'
       USING ERRCODE = '42501';
   END IF;
 
@@ -99,10 +108,6 @@ BEGIN
         USING ERRCODE = '42501';
     END IF;
   ELSIF v_uid = OLD.seller_id THEN
-    IF NEW.status = 'accepted' THEN
-      RAISE EXCEPTION 'Offers must be accepted via accept_offer_atomic to reserve stock atomically'
-        USING ERRCODE = '42501';
-    END IF;
     IF NEW.status NOT IN ('declined', 'rejected') THEN
       RAISE EXCEPTION 'Sellers may only decline a pending offer directly'
         USING ERRCODE = '42501';
@@ -151,6 +156,8 @@ BEGIN
     AND COALESCE(expires_at, created_at + interval '24 hours') <= v_now;
 
   -- 4b. Release expired 30-minute accepted holds that remain unpaid
+  --     Enforces strict 30-minute offer hold expiry EVEN IF a linked unpaid order
+  --     has a later payment_deadline, expiring that unpaid order atomically.
   FOR v_offer IN
     SELECT o.id, o.listing_id, o.order_id
     FROM public.offers o
@@ -164,7 +171,6 @@ BEGIN
         OR (
           ord.status = 'pending_payment'
           AND ord.paid_at IS NULL
-          AND (ord.payment_deadline IS NULL OR ord.payment_deadline <= v_now)
         )
       )
     FOR UPDATE OF o SKIP LOCKED
@@ -215,6 +221,7 @@ AS $$
 DECLARE
   v_uid uuid := auth.uid();
   v_offer public.offers;
+  v_conv public.conversations;
   v_listing public.listings;
   v_buyer_status text;
   v_now timestamptz := now();
@@ -271,6 +278,19 @@ BEGIN
     RAISE EXCEPTION 'BUYER_RESTRICTED';
   END IF;
 
+  -- Verify offer buyer & seller match the linked conversation participants
+  SELECT * INTO v_conv
+  FROM public.conversations
+  WHERE id = v_offer.conversation_id;
+
+  IF NOT FOUND
+     OR NOT (
+       (v_conv.member_a = v_offer.buyer_id AND v_conv.member_b = v_offer.seller_id)
+       OR (v_conv.member_a = v_offer.seller_id AND v_conv.member_b = v_offer.buyer_id)
+     ) THEN
+    RAISE EXCEPTION 'CONVERSATION_MISMATCH';
+  END IF;
+
   -- Enforce bidirectional member_blocks
   SELECT EXISTS (
     SELECT 1
@@ -283,17 +303,28 @@ BEGIN
     RAISE EXCEPTION 'MEMBER_BLOCKED';
   END IF;
 
-  -- Lock listing row before checking & reserving stock
+  -- Lock listing row before checking ownership, pricing & reserving stock
   SELECT * INTO v_listing
   FROM public.listings
   WHERE id = v_offer.listing_id
   FOR UPDATE;
 
   IF NOT FOUND
-     OR v_listing.status <> 'published'
+     OR v_listing.seller_id <> v_offer.seller_id
+     OR v_listing.seller_id <> v_uid THEN
+    RAISE EXCEPTION 'LISTING_OWNER_MISMATCH';
+  END IF;
+
+  IF v_listing.status <> 'published'
      OR v_listing.kind <> 'pre_loved'
      OR v_listing.allow_offers IS NOT TRUE THEN
     RAISE EXCEPTION 'LISTING_NOT_ELIGIBLE';
+  END IF;
+
+  -- Enforce RM 2.00 minimum and cap at listing price
+  IF v_offer.offer_price_sen < 200
+     OR v_offer.offer_price_sen > v_listing.price_sen THEN
+    RAISE EXCEPTION 'INVALID_OFFER_PRICE';
   END IF;
 
   IF (v_listing.quantity - GREATEST(0, v_listing.reserved_quantity)) < 1 THEN

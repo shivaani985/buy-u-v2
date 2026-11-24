@@ -384,3 +384,122 @@ test("isOfferHoldPayable enforces 30-minute hold expiry and order status regardl
     false
   );
 });
+
+test("atomic accept enforces listing ownership, conversation participant match, and RM2..listingPrice bounds", () => {
+  const seller = makeEligibility("student", SELLER_ID);
+  const t0 = new Date("2026-11-24T01:00:00.000Z").getTime();
+  const otherUid = "99999999-9103-4bc2-84d3-6e0101b7659a";
+
+  // Listing owned by a different seller rejected
+  assert.equal(
+    simulateAtomicOfferAccept(
+      {
+        listingQuantity: 1,
+        listingReservedQuantity: 0,
+        listingSellerId: otherUid,
+        listingPriceSen: 1500,
+        conversationMembers: [BUYER_ID, SELLER_ID],
+        offer: makeOffer({ offerPriceSen: 1200 }),
+      },
+      seller,
+      t0
+    ).ok,
+    false
+  );
+
+  // Conversation participant mismatch rejected
+  assert.equal(
+    simulateAtomicOfferAccept(
+      {
+        listingQuantity: 1,
+        listingReservedQuantity: 0,
+        listingSellerId: SELLER_ID,
+        listingPriceSen: 1500,
+        conversationMembers: [otherUid, SELLER_ID],
+        offer: makeOffer({ offerPriceSen: 1200 }),
+      },
+      seller,
+      t0
+    ).ok,
+    false
+  );
+
+  // Offer price > listing price or < RM 2.00 rejected
+  assert.equal(
+    simulateAtomicOfferAccept(
+      {
+        listingQuantity: 1,
+        listingReservedQuantity: 0,
+        listingSellerId: SELLER_ID,
+        listingPriceSen: 1000,
+        conversationMembers: [BUYER_ID, SELLER_ID],
+        offer: makeOffer({ offerPriceSen: 1200 }),
+      },
+      seller,
+      t0
+    ).ok,
+    false
+  );
+  assert.equal(
+    simulateAtomicOfferAccept(
+      {
+        listingQuantity: 1,
+        listingReservedQuantity: 0,
+        listingSellerId: SELLER_ID,
+        listingPriceSen: 1000,
+        conversationMembers: [BUYER_ID, SELLER_ID],
+        offer: makeOffer({ offerPriceSen: 199 }),
+      },
+      seller,
+      t0
+    ).ok,
+    false
+  );
+});
+
+test("30m hold expiry releases stock and expires linked unpaid order even when order payment_deadline is later", () => {
+  const tAccept = new Date("2026-11-24T01:00:00.000Z").getTime();
+  const stateWithLaterOrderDeadline = {
+    listingQuantity: 1,
+    listingReservedQuantity: 1,
+    linkedOrderStatus: "pending_payment",
+    linkedOrderPaidAt: null,
+    // Order deadline is 60m later, but offer hold is strictly 30m
+    linkedOrderPaymentDeadline: new Date(
+      tAccept + 60 * 60 * 1000
+    ).toISOString(),
+    offer: makeOffer({
+      status: "accepted",
+      orderId: "order-unpaid-1",
+      respondedAt: new Date(tAccept).toISOString(),
+      reservationExpiresAt: new Date(
+        tAccept + OFFER_RESERVATION_TTL_MS
+      ).toISOString(),
+      reservationReleasedAt: null,
+    }),
+  };
+
+  // At 30m: hold released AND linked unpaid order expired atomically
+  const released = simulateReleaseExpiredReservation(
+    stateWithLaterOrderDeadline,
+    tAccept + OFFER_RESERVATION_TTL_MS
+  );
+  assert.equal(released.released, true);
+  assert.equal(released.nextState.listingReservedQuantity, 0);
+  assert.equal(released.nextState.linkedOrderStatus, "expired");
+  assert.equal(released.nextState.offer.status, "expired");
+
+  // Paid order is NEVER released or expired
+  const paidState = {
+    ...stateWithLaterOrderDeadline,
+    linkedOrderStatus: "paid",
+    linkedOrderPaidAt: new Date(tAccept + 5 * 60 * 1000).toISOString(),
+  };
+  const paidResult = simulateReleaseExpiredReservation(
+    paidState,
+    tAccept + OFFER_RESERVATION_TTL_MS + 60000
+  );
+  assert.equal(paidResult.released, false);
+  assert.equal(paidResult.nextState.listingReservedQuantity, 1);
+  assert.equal(paidResult.nextState.linkedOrderStatus, "paid");
+});
