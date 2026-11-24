@@ -1,11 +1,22 @@
 import type { ListingType } from "@/types/marketplace";
 
 /**
- * Converts integer sen (e.g., 1500) to Malaysian Ringgit display ("RM 15.00").
+ * Converts integer sen (e.g., 1500) to Malaysian Ringgit display ("RM 15.00")
+ * for listing price tags (0 sen displays "FREE").
  */
 export function formatSenToRm(priceSen: number): string {
   if (!Number.isFinite(priceSen) || priceSen <= 0) return "FREE";
   return `RM ${(priceSen / 100).toFixed(2)}`;
+}
+
+/**
+ * Strictly numeric currency formatting for financial dashboards, KPIs,
+ * refunds, withdrawals, and analytics (0 sen ALWAYS displays "RM 0.00", never "FREE").
+ */
+export function formatCurrencySen(amountSen: number): string {
+  if (!Number.isFinite(amountSen)) return "RM 0.00";
+  const sign = amountSen < 0 ? "-" : "";
+  return `${sign}RM ${(Math.abs(amountSen) / 100).toFixed(2)}`;
 }
 
 export function formatListingType(type: ListingType): string {

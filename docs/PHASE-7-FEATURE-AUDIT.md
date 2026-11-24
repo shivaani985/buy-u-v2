@@ -1,0 +1,46 @@
+# Buy-U v2 — Phase 7 Comprehensive Feature Audit & Requirement Traceability Matrix
+
+- **Audit Date:** 2026-11-24
+- **Codebase Baseline:** Commit `975d670` (`main`, 22 compiled routes, 85/85 local regression tests, Phase 6 closed)
+- **Hosted DB Inspected (Read-Only):** `duwwlcpdidrxkixvflag`
+- **Confirmed Policy Decisions:**
+  - **Services (8A):** Off-platform campus agreement (`requested → accepted → in_progress → delivered → completed` / `declined` / `cancelled`), excluded from paid sales & commission, eligible for verified reviews upon completion.
+  - **Free Items (8B):** Reuse existing `public.free_notices` + `public.donation_spots` + `messages.free_notice_id` with new `public.free_notice_claims` for atomic quantity reservation & collection; both active Students and Staff may claim, Students-only publish.
+  - **Charts (8E & 9A):** Zero-dependency responsive SVG/CSS charts in Buy-U Campus Pop palette (`#4E2A84`, `#008285`, `#FAF9FC`).
+
+---
+
+## 1. Requirement Traceability Matrix (Pre-Phase 8–9 Baseline → Target State)
+
+| Req ID | Module / Feature | Role(s) | Expected Behaviour | Existing Route / Component | Backend / DB Dependency | Pre-Audit Status | Missing / Gap | Action Taken in Phases 8–9 | Test Ref |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| **AUTH-01** | Registration & UMS Email Verification | Student, Staff | `@iluv.ums.edu.my` (student) & `@ums.edu.my` (staff), auth callback | `/register`, `/login`, `/auth/callback`, `/forgot-password`, `/reset-password` | `auth.users`, `profiles` | **COMPLETE** | None | Preserved | `auth-validation.test.mjs` |
+| **AUTH-02** | Separate Admin Portal Auth | Admin | Separate `/admin/login`, `is_active_admin()` | `/admin/login`, `/admin` | `admin_users` | **COMPLETE** | None | Preserved | `phase6d1-disputes.test.mjs` |
+| **DISC-01** | Homepage & Marketplace Discovery | All | Search, category filter, listing type filter, cards | `/`, `/marketplace` | `listings`, `categories` | **COMPLETE** | Add direct links to `/services` & `/free-items` | Enhanced nav/links | `buyer-foundation.test.mjs` |
+| **DISC-02** | Product Details, Variants, Food/Pre-order | All | Variant selector, stock/reserved, food pickup notes, favourites | `/listing/[id]`, `/listings/[slug]` | `listings`, `listing_variants`, `favourites` | **COMPLETE** | Add live view tracking, verified reviews display, Report & Storefront link | Integrated in 8C/8D/8F/9B | `listing-edit.test.mjs` |
+| **CART-01** | Cart, Bargaining & Unified ToyyibPay Checkout | Buyer | Multi-seller cart, RM 1 FPX fee, atomic stock reservation, offers | `/cart`, `/checkout`, `/messages`, `/api/payments/toyyibpay/*` | `cart_items`, `offers`, `checkout_sessions`, `orders`, `payments` | **COMPLETE** | Enforce `member_blocks` on new offers/messages | Block guard in 9C | `phase6b4`, `phase5b` |
+| **ORD-01** | Orders, Pickup PIN & 72h Buyer Protection | Buyer, Seller | Private 6-digit PIN, handover verify, confirm receipt, 72h deadline | `/orders`, `/seller/orders` | `orders`, `order_items` | **COMPLETE** | Add "Write Review" CTA on completed orders | Integrated in 8D | `phase6c-handover.test.mjs` |
+| **FIN-01** | Disputes, Refunds, Returns, Bank, Withdrawals, Recon | Buyer, Seller, Admin | Full Phase 6D ecosystem + durable recovery | `/orders`, `/seller/disputes`, `/seller/bank`, `/seller/withdrawals`, `/admin` | `order_disputes`, `order_refunds`, `seller_payout_accounts`, `payout_requests`, `financial_execution_attempts` | **COMPLETE** | Minor: `formatSenToRm(0)` shows `"FREE"` on financial KPI cards (Sec 18.1) | Added `formatCurrencySen(0) → "RM 0.00"` | `phase6d-financial-ecosystem.test.mjs` |
+| **SVC-01** | Services Discovery & Request Workflow | Buyer, Seller | Dedicated `/services`, request submission, accept/decline/deliver/complete | None (only `kind='service'` in `/sell`) | `service_requests` (exists, 0 rows) | **PARTIALLY IMPLEMENTED** | Missing `/services`, `/requests`, `/seller/services`, lifecycle RPCs | Implemented in **Phase 8A** | `phase7-9-marketplace.test.mjs` |
+| **FREE-01** | Free Items & Community Donations | Student, Staff | `/free-items`, publish/draft recovery, atomic claim/reserve/handover/collect, Donation Spots | None (`free_notices` & `donation_spots` exist, 0 UI) | `free_notices`, `donation_spots` (2 rows) | **MISSING** | Missing UI, `free_notice_claims` table, atomic RPCs, community impact | Implemented in **Phase 8B** | `phase7-9-marketplace.test.mjs` |
+| **STOR-01** | Public Storefront & Banner Customization | Student, All | Public `/store/[sellerId]` (banner, products, services, free items, ratings, report/block) | `/seller/storefront` (basic) | `storefronts` (missing `banner_path`, `business_info`, `is_open`) | **PARTIALLY IMPLEMENTED** | Missing public `/store/[sellerId]` route & banner/business settings | Implemented in **Phase 8C** | `phase7-9-marketplace.test.mjs` |
+| **REV-01** | Verified Reviews, Seller Responses & Moderation | Buyer, Seller, Admin | 1–5 star verified reviews on completed orders/services, seller reply, admin hide/restore | None | `reviews` (exists, 0 rows) | **MISSING** | Missing UI, service review link, seller response, moderation RPCs | Implemented in **Phase 8D** | `phase7-9-marketplace.test.mjs` |
+| **ANL-01** | Seller Business Analytics & View Tracking | Student Seller | `/seller/analytics` KPIs, trends, best-sellers vs top revenue, conversion, date filters, CSV | `/seller` (balance summary only) | `listing_views` (exists, 1 row), `orders`, `service_requests`, `reviews` | **PARTIALLY IMPLEMENTED** | Missing `/seller/analytics`, view-recording RPC, date filters, CSV export | Implemented in **Phase 8E/8F** | `phase7-9-marketplace.test.mjs` |
+| **ANL-02** | Admin Platform Analytics & Student Entrepreneurship Insights | Admin | Dedicated Platform Analytics + Entrepreneurship Insights + Community Impact + SVG charts + CSV | None (`/admin` has Financials/Disputes only) | All marketplace tables + `profiles.last_active_at` | **MISSING** | Missing Admin Platform Analytics, Entrepreneurship KPIs, CSV export | Implemented in **Phase 9A** | `phase7-9-marketplace.test.mjs` |
+| **MOD-01** | Reporting & Moderation Queue | Member, Admin | Report listings/users/reviews/messages, private evidence, admin queue, warn/hide/restrict/suspend | None | `reports` (exists, 0 rows), `admin_audit_logs` (exists, 0 rows) | **MISSING** | Missing report modal, admin report/moderation UI & audit RPCs | Implemented in **Phase 9B** | `phase7-9-marketplace.test.mjs` |
+| **BLK-01** | User Blocking | Member | Block/unblock, backend enforcement on new messages/offers/services/claims, preserve orders | None | `member_blocks` (exists, 0 rows) | **MISSING** | Missing block UI & backend guards | Implemented in **Phase 9C** | `phase7-9-marketplace.test.mjs` |
+| **NTF-01** | Notification Bell, Inbox & Preferences | Member | Header bell + unread badge, `/notifications`, mark read/all read, non-essential prefs | None (`notifications` table has 30 rows!) | `notifications` (exists, 30 rows) | **PARTIALLY IMPLEMENTED** | Missing header bell UI, `/notifications` page, mark-read actions & prefs | Implemented in **Phase 9D** | `phase7-9-marketplace.test.mjs` |
+| **ACC-01** | Account Management & Restriction Enforcement | Member | Profile edit (display name, bio, faculty, avatar), blocked users, notification prefs, restriction banners | `/account` (read-only summary) | `profiles` | **PARTIALLY IMPLEMENTED** | Missing profile editor, blocked list, prefs UI | Implemented in **Phase 9E** | `phase7-9-marketplace.test.mjs` |
+| **ADM-01** | Complete Administration Portal & Audit Logs | Admin | Organized Admin portal: Overview, Analytics, Users, Sellers, Listings, Services/Free Items/Spots, Reports, Reviews, Disputes, Financials, Audit Logs | `/admin` (Disputes + Financials only) | `admin_audit_logs`, `profiles`, `listings`, `categories`, `collection_areas`, `donation_spots` | **PARTIALLY IMPLEMENTED** | Missing Users, Sellers, Listings, Spots/Categories, Reports, Reviews, Audit Logs tabs | Implemented in **Phase 9F** | `phase7-9-marketplace.test.mjs` |
+| **POL-01** | App-Wide Visual Polish & Micro-Interactions | All | Final visual hierarchy, animations, consistency pass | All routes | N/A | **DEFERRED TO PHASE 10** | Scheduled for Phase 10 | Deferred | Phase 10 |
+| **OPS-01** | Deployment, Cron Scheduling & Public Webhook E2E | Ops | Vercel deploy, scheduled `phase6d-recovery-worker.mjs`, public ToyyibPay HTTPS callback | `scripts/phase6d-recovery-worker.mjs` | Hosted env | **DEFERRED TO PHASE 11** | Scheduled for Phase 11 | Deferred | Phase 11 |
+| **OOS-01** | Travel Ticket Commerce | N/A | Explicitly excluded | None | None | **OUTSIDE APPROVED FYP SCOPE** | N/A | Excluded | N/A |
+
+---
+
+## 2. Audit Summary
+- **Total Requirement Areas Audited:** 21 (covering all 35+ sub-modules in Section 3).
+- **Pre-Audit Complete:** 7 core modules (Phases 1–6).
+- **Pre-Audit Partially Implemented / Missing (Implemented in Phases 8–9):** 11 modules (`SVC-01`, `FREE-01`, `STOR-01`, `REV-01`, `ANL-01`, `ANL-02`, `MOD-01`, `BLK-01`, `NTF-01`, `ACC-01`, `ADM-01`) + Phase 6 minor currency formatting fix (`formatCurrencySen`).
+- **Deferred to Phase 10 / 11:** 2 (`POL-01`, `OPS-01`).
+- **Outside Approved Scope:** 1 (`OOS-01` travel tickets).

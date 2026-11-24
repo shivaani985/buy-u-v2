@@ -20,7 +20,7 @@ import {
 } from "@/app/financials/actions";
 import type { AdminFinancialDashboardData } from "@/lib/financials/admin-data";
 import { formatMytDateTime } from "@/lib/financials/policy";
-import { formatSenToRm } from "@/lib/format";
+import { formatCurrencySen } from "@/lib/format";
 
 interface AdminFinancialsClientProps {
   data: AdminFinancialDashboardData;
@@ -122,18 +122,18 @@ export function AdminFinancialsClient({ data }: AdminFinancialsClientProps) {
 
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
             {[
-              { label: "Verified Collections", val: formatSenToRm(overview.totalVerifiedCollectionsSen) },
-              { label: "Gross Product Sales", val: formatSenToRm(overview.grossProductSalesSen) },
-              { label: "FPX Fees (Not Profit)", val: formatSenToRm(overview.fpxFeesCollectedSen) },
-              { label: "Executed Refunds (Sim)", val: formatSenToRm(overview.executedRefundsSen) },
-              { label: "Net Product Sales", val: formatSenToRm(overview.netProductSalesSen) },
-              { label: "Net Commission (2%)", val: formatSenToRm(overview.netPlatformCommissionSen) },
-              { label: "Pending Settlement", val: formatSenToRm(overview.pendingSettlementSen) },
-              { label: "72h Protection Reserve", val: formatSenToRm(overview.protectionReserveSen) },
-              { label: "Frozen Seller Earnings", val: formatSenToRm(overview.frozenEarningsSen) },
-              { label: "Available Liabilities", val: formatSenToRm(overview.availableSellerLiabilitiesSen) },
-              { label: "Reserved Withdrawals", val: formatSenToRm(overview.reservedWithdrawalsSen) },
-              { label: "Paid Out (Simulated)", val: formatSenToRm(overview.successfullyPaidOutSen) },
+              { label: "Verified Collections", val: formatCurrencySen(overview.totalVerifiedCollectionsSen) },
+              { label: "Gross Product Sales", val: formatCurrencySen(overview.grossProductSalesSen) },
+              { label: "FPX Fees (Not Profit)", val: formatCurrencySen(overview.fpxFeesCollectedSen) },
+              { label: "Executed Refunds (Sim)", val: formatCurrencySen(overview.executedRefundsSen) },
+              { label: "Net Product Sales", val: formatCurrencySen(overview.netProductSalesSen) },
+              { label: "Net Commission (2%)", val: formatCurrencySen(overview.netPlatformCommissionSen) },
+              { label: "Pending Settlement", val: formatCurrencySen(overview.pendingSettlementSen) },
+              { label: "72h Protection Reserve", val: formatCurrencySen(overview.protectionReserveSen) },
+              { label: "Frozen Seller Earnings", val: formatCurrencySen(overview.frozenEarningsSen) },
+              { label: "Available Liabilities", val: formatCurrencySen(overview.availableSellerLiabilitiesSen) },
+              { label: "Reserved Withdrawals", val: formatCurrencySen(overview.reservedWithdrawalsSen) },
+              { label: "Paid Out (Simulated)", val: formatCurrencySen(overview.successfullyPaidOutSen) },
             ].map((k) => (
               <div
                 key={k.label}
@@ -219,7 +219,7 @@ export function AdminFinancialsClient({ data }: AdminFinancialsClientProps) {
                     <div>
                       <p className="text-[10.5px] text-[#6B6779]">Refund</p>
                       <p className="font-extrabold text-[#14121A]">
-                        {formatSenToRm(r.refundAmountSen)}
+                        {formatCurrencySen(r.refundAmountSen)}
                       </p>
                     </div>
                     <div>
@@ -227,7 +227,7 @@ export function AdminFinancialsClient({ data }: AdminFinancialsClientProps) {
                         Commission Reversal
                       </p>
                       <p className="font-bold text-[#4E2A84]">
-                        {formatSenToRm(r.commissionReversalSen)}
+                        {formatCurrencySen(r.commissionReversalSen)}
                       </p>
                     </div>
                     <div>
@@ -235,7 +235,7 @@ export function AdminFinancialsClient({ data }: AdminFinancialsClientProps) {
                         Seller Deduction
                       </p>
                       <p className="font-bold text-[#B42318]">
-                        {formatSenToRm(r.sellerDeductionSen)}
+                        {formatCurrencySen(r.sellerDeductionSen)}
                       </p>
                     </div>
                     <div>
@@ -404,10 +404,10 @@ export function AdminFinancialsClient({ data }: AdminFinancialsClientProps) {
                   <td className="px-4 py-3 font-mono font-bold text-[#14121A]">
                     {cs.checkout_code}
                   </td>
-                  <td className="px-4 py-3">{formatSenToRm(cs.combined_subtotal_sen)}</td>
-                  <td className="px-4 py-3">{formatSenToRm(cs.fpx_fee_sen)}</td>
+                  <td className="px-4 py-3">{formatCurrencySen(cs.combined_subtotal_sen)}</td>
+                  <td className="px-4 py-3">{formatCurrencySen(cs.fpx_fee_sen)}</td>
                   <td className="px-4 py-3 font-bold text-[#4E2A84]">
-                    {formatSenToRm(cs.total_paid_sen)}
+                    {formatCurrencySen(cs.total_paid_sen)}
                   </td>
                   <td className="px-4 py-3 font-bold capitalize">{cs.status}</td>
                   <td className="px-4 py-3 font-mono text-[11px] text-[#4A4656]">
@@ -456,7 +456,7 @@ export function AdminFinancialsClient({ data }: AdminFinancialsClientProps) {
                       {w.maskedBankSummary}
                     </td>
                     <td className="px-4 py-3 font-bold text-[#4E2A84]">
-                      {formatSenToRm(w.amountSen)}
+                      {formatCurrencySen(w.amountSen)}
                     </td>
                     <td className="px-4 py-3 font-bold capitalize">
                       {w.status.replace(/_/g, " ")}

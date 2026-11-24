@@ -163,8 +163,8 @@ export function SiteHeader({
   const navLinks = [
     { href: "/", label: "Home" },
     { href: "/marketplace", label: "Marketplace" },
-    { href: "/marketplace?type=service", label: "Services" },
-    { href: "/marketplace?type=free", label: "Free Items" },
+    { href: "/services", label: "Services" },
+    { href: "/free-items", label: "Free Items" },
     ...(!isStaff
       ? [
           {
@@ -372,17 +372,19 @@ export function SiteHeader({
             ) : null}
           </Link>
 
-          {/* Notifications (Shown on xl screens to maintain breathing room on tablet) */}
-          <button
-            type="button"
-            disabled
-            aria-disabled="true"
-            title="Notifications — coming in Phase 5"
-            aria-label="Notifications (coming in Phase 5)"
-            className="hidden h-9 w-9 items-center justify-center rounded-full text-[#706C7E] opacity-70 cursor-not-allowed xl:flex"
+          {/* Phase 9D: Active Notifications Bell */}
+          <Link
+            href="/notifications"
+            title="Notifications"
+            aria-label="Notifications"
+            className={`hidden h-9 w-9 items-center justify-center rounded-full transition-colors xl:flex ${
+              pathname === "/notifications"
+                ? "bg-[#F3EEFA] text-[#4E2A84]"
+                : "text-[#4A4656] hover:bg-[#F3EEFA] hover:text-[#4E2A84]"
+            }`}
           >
             <Bell className="h-[19px] w-[19px]" aria-hidden="true" />
-          </button>
+          </Link>
 
           <span className="hidden h-5 w-px bg-[#DCD9E6] xl:block" aria-hidden="true" />
 

@@ -3,6 +3,8 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
+  BarChart3,
+  Briefcase,
   ClipboardList,
   Landmark,
   LayoutDashboard,
@@ -15,6 +17,8 @@ import {
 const TABS = [
   { href: "/seller", label: "Seller Hub", icon: LayoutDashboard },
   { href: "/seller/orders", label: "Orders", icon: ClipboardList },
+  { href: "/seller/services", label: "Services", icon: Briefcase },
+  { href: "/seller/analytics", label: "Analytics", icon: BarChart3 },
   { href: "/seller/disputes", label: "Disputes", icon: ShieldAlert },
   { href: "/seller/withdrawals", label: "Withdrawals", icon: Wallet },
   { href: "/seller/bank", label: "Bank Account", icon: Landmark },

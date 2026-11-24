@@ -19,7 +19,7 @@ import {
   formatMytDateTime,
   MIN_WITHDRAWAL_SEN,
 } from "@/lib/financials/policy";
-import { formatSenToRm } from "@/lib/format";
+import { formatCurrencySen } from "@/lib/format";
 import type { SellerFinancialSummary } from "@/lib/seller/financials";
 import { parseRmToSen } from "@/lib/seller/validation";
 
@@ -75,14 +75,14 @@ export function SellerWithdrawalsClient({
     if (parsed.sen < MIN_WITHDRAWAL_SEN) {
       setFeedback({
         type: "error",
-        text: `Minimum withdrawal is ${formatSenToRm(MIN_WITHDRAWAL_SEN)}.`,
+        text: `Minimum withdrawal is ${formatCurrencySen(MIN_WITHDRAWAL_SEN)}.`,
       });
       return;
     }
     if (parsed.sen > availSen) {
       setFeedback({
         type: "error",
-        text: `Amount exceeds your available balance (${formatSenToRm(availSen)}).`,
+        text: `Amount exceeds your available balance (${formatCurrencySen(availSen)}).`,
       });
       return;
     }
@@ -114,13 +114,13 @@ export function SellerWithdrawalsClient({
   const cards = [
     {
       label: "Available for Withdrawal",
-      value: formatSenToRm(availSen),
+      value: formatCurrencySen(availSen),
       sub: `Passed ${BUYER_PROTECTION_HOURS}h buyer protection`,
       accent: "border-l-[#008285]",
     },
     {
       label: "Buyer Protection Reserve (72h)",
-      value: formatSenToRm(financials.protectionReserveSen),
+      value: formatCurrencySen(financials.protectionReserveSen),
       sub: financials.nextProtectionReleaseAt
         ? `Next release: ${formatMytDateTime(financials.nextProtectionReleaseAt)}`
         : "No orders in 72h reserve",
@@ -128,25 +128,25 @@ export function SellerWithdrawalsClient({
     },
     {
       label: "Pending Settlement",
-      value: formatSenToRm(financials.pendingSettlementSen),
+      value: formatCurrencySen(financials.pendingSettlementSen),
       sub: "Awaiting handover or buyer confirmation",
       accent: "border-l-[#4E2A84]",
     },
     {
       label: "Frozen (Disputes / Refunds)",
-      value: formatSenToRm(financials.frozenDisputeSen),
+      value: formatCurrencySen(financials.frozenDisputeSen),
       sub: "Held until dispute/refund resolves",
       accent: "border-l-[#B42318]",
     },
     {
       label: "Processing Withdrawals",
-      value: formatSenToRm(financials.reservedWithdrawalsSen),
+      value: formatCurrencySen(financials.reservedWithdrawalsSen),
       sub: "Reserved for active transfer",
       accent: "border-l-[#4E2A84]",
     },
     {
       label: "Total Paid Out (Simulated)",
-      value: formatSenToRm(financials.totalPaidOutSen),
+      value: formatCurrencySen(financials.totalPaidOutSen),
       sub: `${financials.failedWithdrawalCount} failed attempts excluded`,
       accent: "border-l-[#008285]",
     },
@@ -236,7 +236,7 @@ export function SellerWithdrawalsClient({
                 onClick={() => setAmountInput((availSen / 100).toFixed(2))}
                 className="rounded-xl border border-[#E6E3EE] bg-[#FAF9FC] px-3.5 py-2.5 text-xs font-bold text-[#4E2A84] hover:border-[#4E2A84] disabled:opacity-50"
               >
-                Withdraw All ({formatSenToRm(availSen)})
+                Withdraw All ({formatCurrencySen(availSen)})
               </button>
               <button
                 type="button"
@@ -305,7 +305,7 @@ export function SellerWithdrawalsClient({
                       {w.maskedBankSummary}
                     </td>
                     <td className="px-4 py-3 font-extrabold text-[#4E2A84]">
-                      {formatSenToRm(w.amountSen)}
+                      {formatCurrencySen(w.amountSen)}
                     </td>
                     <td className="px-4 py-3 font-bold capitalize">
                       {w.status.replace(/_/g, " ")}
@@ -362,7 +362,7 @@ export function SellerWithdrawalsClient({
               <div className="flex justify-between">
                 <dt className="text-[#6B6779]">Withdrawal Amount</dt>
                 <dd className="font-extrabold text-[#4E2A84]">
-                  {formatSenToRm(pendingSen)}
+                  {formatCurrencySen(pendingSen)}
                 </dd>
               </div>
               <div className="flex justify-between">
@@ -372,7 +372,7 @@ export function SellerWithdrawalsClient({
               <div className="flex justify-between border-t border-[#ECEAF3] pt-2">
                 <dt className="text-[#6B6779]">Remaining Available</dt>
                 <dd className="font-bold text-[#14121A]">
-                  {formatSenToRm(Math.max(0, availSen - pendingSen))}
+                  {formatCurrencySen(Math.max(0, availSen - pendingSen))}
                 </dd>
               </div>
             </dl>

@@ -1,0 +1,609 @@
+/**
+ * Authoritative Analytics Engine for:
+ *   - Phase 8E: Seller Business Analytics
+ *   - Phase 9A: Admin Platform Analytics
+ *   - Section 11: Student Entrepreneurship Insights & Community Impact
+ *
+ * Uses exact integer sen, Malaysian timezone (UTC+8), authoritative payment verification,
+ * zero double-counting, and spreadsheet formula-injection-safe CSV sanitization.
+ */
+import { isAuthoritativeOrderPaymentVerified } from "../financials/policy.ts";
+import { computeCommunityImpact, computeRatingSummary } from "../marketplace/phase8.ts";
+
+export type AnalyticsRangeKey = "7d" | "30d" | "90d" | "this_month" | "all" | "custom";
+
+export interface AnalyticsDateWindow {
+  key: AnalyticsRangeKey;
+  startMs: number | null;
+  endMs: number;
+  prevStartMs: number | null;
+  prevEndMs: number | null;
+}
+
+const MYT_OFFSET_MS = 8 * 60 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+export function resolveAnalyticsWindow(
+  range: AnalyticsRangeKey,
+  nowMs: number = Date.now(),
+  customStartIso?: string | null,
+  customEndIso?: string | null
+): AnalyticsDateWindow {
+  if (range === "all") {
+    return { key: "all", startMs: null, endMs: nowMs, prevStartMs: null, prevEndMs: null };
+  }
+  if (range === "custom" && customStartIso && customEndIso) {
+    const s = Date.parse(customStartIso);
+    const e = Date.parse(customEndIso);
+    if (!Number.isNaN(s) && !Number.isNaN(e) && e >= s) {
+      const span = Math.max(DAY_MS, e - s);
+      return { key: "custom", startMs: s, endMs: e, prevStartMs: s - span, prevEndMs: s };
+    }
+  }
+  if (range === "this_month") {
+    const myt = new Date(nowMs + MYT_OFFSET_MS);
+    const monthStartUtc = Date.UTC(myt.getUTCFullYear(), myt.getUTCMonth(), 1) - MYT_OFFSET_MS;
+    const span = Math.max(DAY_MS, nowMs - monthStartUtc);
+    return {
+      key: "this_month",
+      startMs: monthStartUtc,
+      endMs: nowMs,
+      prevStartMs: monthStartUtc - span,
+      prevEndMs: monthStartUtc,
+    };
+  }
+  const days = range === "90d" ? 90 : range === "30d" ? 30 : 7;
+  const span = days * DAY_MS;
+  return {
+    key: range,
+    startMs: nowMs - span,
+    endMs: nowMs,
+    prevStartMs: nowMs - span * 2,
+    prevEndMs: nowMs - span,
+  };
+}
+
+export function computeGrowthPct(current: number, previous: number | null): number | null {
+  if (previous === null || previous <= 0) return null;
+  return Number((((current - previous) / previous) * 100).toFixed(1));
+}
+
+export function toMytDayKey(isoOrMs: string | number): string {
+  const ms = typeof isoOrMs === "number" ? isoOrMs : Date.parse(isoOrMs);
+  if (Number.isNaN(ms)) return "";
+  const d = new Date(ms + MYT_OFFSET_MS);
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(d.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function inRange(iso: string | null | undefined, startMs: number | null, endMs: number): boolean {
+  if (!iso) return false;
+  const ms = Date.parse(iso);
+  if (Number.isNaN(ms)) return false;
+  if (startMs !== null && ms < startMs) return false;
+  return ms <= endMs;
+}
+
+export interface AnalyticsDatasetInput {
+  profiles: Array<{
+    id: string;
+    university_role: string;
+    status: string;
+    faculty?: string | null;
+    created_at: string;
+    last_active_at?: string | null;
+  }>;
+  listings: Array<{
+    id: string;
+    seller_id: string;
+    title: string;
+    kind: string;
+    category_id: string;
+    is_food: boolean;
+    has_variants?: boolean;
+    quantity: number;
+    reserved_quantity: number;
+    status: string;
+    created_at: string;
+  }>;
+  orders: Array<{
+    id: string;
+    buyer_id: string;
+    seller_id: string;
+    checkout_session_id: string | null;
+    subtotal_sen: number;
+    commission_sen: number;
+    seller_net_sen: number;
+    status: string;
+    paid_at: string | null;
+    completed_at: string | null;
+    created_at: string;
+  }>;
+  orderItems: Array<{
+    order_id: string;
+    listing_id: string | null;
+    title_snapshot: string;
+    unit_sen: number;
+    quantity: number;
+  }>;
+  checkoutSessions: Array<{
+    id: string;
+    buyer_id?: string | null;
+    status: string;
+    payment_status: string;
+    paid_at: string | null;
+  }>;
+  legacyPayments: Array<{
+    order_id: string;
+    status: string;
+    verified_at: string | null;
+  }>;
+  refunds: Array<{
+    order_id: string;
+    refund_type: string;
+    refund_amount_sen: number;
+    commission_reversal_sen: number;
+    seller_deduction_sen: number;
+    status: string;
+  }>;
+  views: Array<{ viewer_id: string; listing_id: string; viewed_at: string }>;
+  favourites: Array<{ user_id: string; listing_id: string; created_at?: string | null }>;
+  serviceRequests: Array<{
+    id: string;
+    listing_id: string;
+    buyer_id: string;
+    seller_id: string;
+    status: string;
+    created_at: string;
+    completed_at?: string | null;
+  }>;
+  freeNotices: Array<{ id: string; contributor_id: string; status: string; spot_id: string | null; created_at: string }>;
+  freeClaims: Array<{
+    notice_id: string;
+    donor_id: string;
+    recipient_id: string;
+    quantity: number;
+    status: string;
+    collected_at?: string | null;
+    created_at: string;
+  }>;
+  reviews: Array<{
+    id: string;
+    listing_id: string | null;
+    seller_id: string;
+    rating: number;
+    hidden: boolean;
+    created_at: string;
+  }>;
+  reports: Array<{ id: string; reason: string; status: string; created_at: string; resolved_at?: string | null }>;
+  disputes: Array<{ id: string; order_id: string; status: string; created_at: string; resolved_at?: string | null }>;
+}
+
+const EXCLUDED_UNPAID = new Set(["pending_payment", "expired", "cancelled", "canceled", "failed"]);
+
+export function computeSellerAnalytics(
+  sellerId: string,
+  data: AnalyticsDatasetInput,
+  window: AnalyticsDateWindow
+) {
+  const csById = new Map(data.checkoutSessions.map((c) => [c.id, c]));
+  const payByOrder = new Map(data.legacyPayments.map((p) => [p.order_id, p]));
+  const refundByOrder = new Map<string, { product: number; commRev: number; sellerDeduct: number }>();
+  for (const r of data.refunds) {
+    if (r.status === "succeeded") {
+      const cur = refundByOrder.get(r.order_id) ?? { product: 0, commRev: 0, sellerDeduct: 0 };
+      cur.product += r.refund_amount_sen;
+      cur.commRev += r.commission_reversal_sen;
+      cur.sellerDeduct += r.seller_deduction_sen;
+      refundByOrder.set(r.order_id, cur);
+    }
+  }
+
+  const sellerListings = data.listings.filter((l) => l.seller_id === sellerId);
+  const listingIds = new Set(sellerListings.map((l) => l.id));
+  const sellerOrders = data.orders.filter((o) => {
+    if (o.seller_id !== sellerId) return false;
+    if (EXCLUDED_UNPAID.has(o.status)) return false;
+    return isAuthoritativeOrderPaymentVerified({
+      order: o,
+      checkoutSession: o.checkout_session_id ? csById.get(o.checkout_session_id) ?? null : null,
+      legacyPayment: payByOrder.get(o.id) ?? null,
+    });
+  });
+
+  const periodOrders = sellerOrders.filter((o) => inRange(o.paid_at, window.startMs, window.endMs));
+  const prevOrders =
+    window.prevStartMs !== null && window.prevEndMs !== null
+      ? sellerOrders.filter((o) => inRange(o.paid_at, window.prevStartMs, window.prevEndMs!))
+      : [];
+
+  let grossSalesSen = 0;
+  let executedRefundsSen = 0;
+  let netSellerEarningsSen = 0;
+  let netCommissionSen = 0;
+  let completedOrders = 0;
+  const trendMap = new Map<string, { day: string; salesSen: number; orders: number }>();
+
+  for (const o of periodOrders) {
+    const adj = refundByOrder.get(o.id);
+    const refProd = adj?.product ?? 0;
+    const commRev = adj?.commRev ?? 0;
+    const selDeduct = adj?.sellerDeduct ?? 0;
+    grossSalesSen += o.subtotal_sen;
+    executedRefundsSen += refProd;
+    netCommissionSen += Math.max(0, o.commission_sen - commRev);
+    netSellerEarningsSen += Math.max(0, o.seller_net_sen - selDeduct);
+    if (o.status === "completed") completedOrders += 1;
+
+    const dk = toMytDayKey(o.paid_at ?? o.created_at);
+    if (dk) {
+      const cur = trendMap.get(dk) ?? { day: dk, salesSen: 0, orders: 0 };
+      cur.salesSen += Math.max(0, o.subtotal_sen - refProd);
+      cur.orders += 1;
+      trendMap.set(dk, cur);
+    }
+  }
+
+  let prevNetSalesSen = 0;
+  for (const o of prevOrders) {
+    const refProd = refundByOrder.get(o.id)?.product ?? 0;
+    prevNetSalesSen += Math.max(0, o.subtotal_sen - refProd);
+  }
+
+  const netSalesSen = Math.max(0, grossSalesSen - executedRefundsSen);
+  const periodOrderIds = new Set(periodOrders.map((o) => o.id));
+  const productPerf = new Map<
+    string,
+    { listingId: string; title: string; unitsSold: number; revenueSen: number; orders: number }
+  >();
+  let unitsSold = 0;
+  for (const oi of data.orderItems) {
+    if (!periodOrderIds.has(oi.order_id)) continue;
+    unitsSold += oi.quantity;
+    const lid = oi.listing_id ?? oi.title_snapshot;
+    const cur = productPerf.get(lid) ?? {
+      listingId: lid,
+      title: oi.title_snapshot,
+      unitsSold: 0,
+      revenueSen: 0,
+      orders: 0,
+    };
+    cur.unitsSold += oi.quantity;
+    cur.revenueSen += oi.unit_sen * oi.quantity;
+    cur.orders += 1;
+    productPerf.set(lid, cur);
+  }
+
+  const periodViews = data.views.filter(
+    (v) => listingIds.has(v.listing_id) && inRange(v.viewed_at, window.startMs, window.endMs)
+  );
+  const viewsByListing = new Map<string, Set<string>>();
+  for (const v of periodViews) {
+    const s = viewsByListing.get(v.listing_id) ?? new Set<string>();
+    s.add(v.viewer_id);
+    viewsByListing.set(v.listing_id, s);
+  }
+  const favCountByListing = new Map<string, number>();
+  for (const f of data.favourites) {
+    if (listingIds.has(f.listing_id)) {
+      favCountByListing.set(f.listing_id, (favCountByListing.get(f.listing_id) ?? 0) + 1);
+    }
+  }
+
+  const listingPerformance = sellerListings.map((l) => {
+    const uniqueViewers = viewsByListing.get(l.id)?.size ?? 0;
+    const perf = productPerf.get(l.id);
+    const ordCount = perf?.orders ?? 0;
+    return {
+      id: l.id,
+      title: l.title,
+      kind: l.kind,
+      status: l.status,
+      availableStock: Math.max(0, l.quantity - l.reserved_quantity),
+      views: periodViews.filter((v) => v.listing_id === l.id).length,
+      uniqueViewers,
+      favourites: favCountByListing.get(l.id) ?? 0,
+      unitsSold: perf?.unitsSold ?? 0,
+      revenueSen: perf?.revenueSen ?? 0,
+      conversionPct:
+        uniqueViewers > 0 ? Number(((ordCount / uniqueViewers) * 100).toFixed(1)) : null,
+    };
+  });
+
+  const sellerServices = data.serviceRequests.filter(
+    (sr) => sr.seller_id === sellerId && inRange(sr.created_at, window.startMs, window.endMs)
+  );
+  const sellerReviews = data.reviews.filter((r) => r.seller_id === sellerId);
+  const ratingSummary = computeRatingSummary(sellerReviews);
+
+  const byUnits = Array.from(productPerf.values()).sort((a, b) => b.unitsSold - a.unitsSold);
+  const byRevenue = Array.from(productPerf.values()).sort((a, b) => b.revenueSen - a.revenueSen);
+
+  const insights: string[] = [];
+  if (byRevenue[0]) {
+    insights.push(`Highest-revenue item: ${byRevenue[0].title} (RM ${(byRevenue[0].revenueSen / 100).toFixed(2)}).`);
+  }
+  if (byUnits[0] && byUnits[0].listingId !== byRevenue[0]?.listingId) {
+    insights.push(`Best-selling by units: ${byUnits[0].title} (${byUnits[0].unitsSold} units).`);
+  }
+  const highInterestLowConv = listingPerformance.find((l) => l.uniqueViewers >= 5 && l.unitsSold === 0);
+  if (highInterestLowConv) {
+    insights.push(`"${highInterestLowConv.title}" has ${highInterestLowConv.uniqueViewers} unique viewers but 0 orders yet.`);
+  }
+
+  return {
+    kpis: {
+      grossSalesSen,
+      executedRefundsSen,
+      netSalesSen,
+      salesGrowthPct: computeGrowthPct(netSalesSen, window.prevStartMs !== null ? prevNetSalesSen : null),
+      verifiedOrders: periodOrders.length,
+      completedOrders,
+      unitsSold,
+      averageOrderValueSen: periodOrders.length > 0 ? Math.round(netSalesSen / periodOrders.length) : 0,
+      netSellerEarningsSen,
+      netCommissionSen,
+      activeListings: sellerListings.filter((l) => l.status === "published").length,
+      totalViews: periodViews.length,
+      totalFavourites: data.favourites.filter((f) => listingIds.has(f.listing_id)).length,
+      serviceRequests: sellerServices.length,
+      completedServices: sellerServices.filter((s) => s.status === "completed").length,
+      averageRating: ratingSummary.averageRating,
+      reviewCount: ratingSummary.totalReviews,
+    },
+    salesTrend: Array.from(trendMap.values()).sort((a, b) => a.day.localeCompare(b.day)),
+    topByUnits: byUnits.slice(0, 5),
+    topByRevenue: byRevenue.slice(0, 5),
+    listingPerformance,
+    serviceSummary: {
+      total: sellerServices.length,
+      accepted: sellerServices.filter((s) => ["accepted", "in_progress", "delivered", "completed"].includes(s.status)).length,
+      completed: sellerServices.filter((s) => s.status === "completed").length,
+      declined: sellerServices.filter((s) => s.status === "declined").length,
+      cancelled: sellerServices.filter((s) => s.status === "cancelled").length,
+    },
+    ratingSummary,
+    insights,
+  };
+}
+
+export function computeAdminPlatformAnalytics(
+  data: AnalyticsDatasetInput,
+  window: AnalyticsDateWindow
+) {
+  const csById = new Map(data.checkoutSessions.map((c) => [c.id, c]));
+  const payByOrder = new Map(data.legacyPayments.map((p) => [p.order_id, p]));
+  const refundByOrder = new Map<string, { product: number; commRev: number; sellerDeduct: number }>();
+  for (const r of data.refunds) {
+    if (r.status === "succeeded") {
+      const cur = refundByOrder.get(r.order_id) ?? { product: 0, commRev: 0, sellerDeduct: 0 };
+      cur.product += r.refund_amount_sen;
+      cur.commRev += r.commission_reversal_sen;
+      cur.sellerDeduct += r.seller_deduction_sen;
+      refundByOrder.set(r.order_id, cur);
+    }
+  }
+
+  const verifiedOrdersAll = data.orders.filter((o) => {
+    if (EXCLUDED_UNPAID.has(o.status)) return false;
+    return isAuthoritativeOrderPaymentVerified({
+      order: o,
+      checkoutSession: o.checkout_session_id ? csById.get(o.checkout_session_id) ?? null : null,
+      legacyPayment: payByOrder.get(o.id) ?? null,
+    });
+  });
+
+  const periodOrders = verifiedOrdersAll.filter((o) => inRange(o.paid_at, window.startMs, window.endMs));
+  const listingById = new Map(data.listings.map((l) => [l.id, l]));
+
+  // Genuine active users in period (measured by orders, views, service requests, claims, or last_active_at — NEVER merely status='active')
+  const activeUserIds = new Set<string>();
+  for (const p of data.profiles) {
+    if (inRange(p.last_active_at, window.startMs, window.endMs)) activeUserIds.add(p.id);
+  }
+  for (const o of periodOrders) {
+    activeUserIds.add(o.buyer_id);
+    activeUserIds.add(o.seller_id);
+  }
+  for (const v of data.views) {
+    if (inRange(v.viewed_at, window.startMs, window.endMs)) activeUserIds.add(v.viewer_id);
+  }
+  for (const sr of data.serviceRequests) {
+    if (inRange(sr.created_at, window.startMs, window.endMs)) {
+      activeUserIds.add(sr.buyer_id);
+      activeUserIds.add(sr.seller_id);
+    }
+  }
+
+  let grossSalesSen = 0;
+  let executedRefundsSen = 0;
+  let netCommissionSen = 0;
+  let completedOrders = 0;
+  const salesByDay = new Map<string, number>();
+  const salesByCat = new Map<string, number>();
+  const sellerSales = new Map<string, number>();
+  const buyerOrderCounts = new Map<string, number>();
+
+  // Student Entrepreneurship distinct cohorts (Section 11)
+  const studentBusinessListingIds = new Set(
+    data.listings.filter((l) => l.kind === "business" || l.is_food).map((l) => l.id)
+  );
+  const studentBusinessSellersPublished = new Set(
+    data.listings
+      .filter((l) => (l.kind === "business" || l.is_food) && l.status === "published")
+      .map((l) => l.seller_id)
+  );
+  const preLovedSellers = new Set(
+    data.listings.filter((l) => l.kind === "pre_loved" && !l.is_food).map((l) => l.seller_id)
+  );
+  const serviceProviders = new Set(
+    data.listings.filter((l) => l.kind === "service" && l.status === "published").map((l) => l.seller_id)
+  );
+  const activeBusinessSellersInPeriod = new Set<string>();
+  let studentBusinessSalesSen = 0;
+  let studentBusinessEarningsSen = 0;
+  let studentBusinessOrders = 0;
+  let preLovedCompletedTransactions = 0;
+
+  const orderItemsByOrder = new Map<string, typeof data.orderItems>();
+  for (const oi of data.orderItems) {
+    const arr = orderItemsByOrder.get(oi.order_id) ?? [];
+    arr.push(oi);
+    orderItemsByOrder.set(oi.order_id, arr);
+  }
+
+  for (const o of periodOrders) {
+    const adj = refundByOrder.get(o.id);
+    const refProd = adj?.product ?? 0;
+    const netOrd = Math.max(0, o.subtotal_sen - refProd);
+    const netEarns = Math.max(0, o.seller_net_sen - (adj?.sellerDeduct ?? 0));
+    grossSalesSen += o.subtotal_sen;
+    executedRefundsSen += refProd;
+    netCommissionSen += Math.max(0, o.commission_sen - (adj?.commRev ?? 0));
+    if (o.status === "completed") completedOrders += 1;
+
+    const dk = toMytDayKey(o.paid_at ?? o.created_at);
+    if (dk) salesByDay.set(dk, (salesByDay.get(dk) ?? 0) + netOrd);
+    sellerSales.set(o.seller_id, (sellerSales.get(o.seller_id) ?? 0) + netOrd);
+    buyerOrderCounts.set(o.buyer_id, (buyerOrderCounts.get(o.buyer_id) ?? 0) + 1);
+
+    const items = orderItemsByOrder.get(o.id) ?? [];
+    let isBusinessOrder = false;
+    let isPreLovedOrder = false;
+    for (const oi of items) {
+      const listing = oi.listing_id ? listingById.get(oi.listing_id) : null;
+      const cat = listing?.category_id ?? "other-goods";
+      salesByCat.set(cat, (salesByCat.get(cat) ?? 0) + oi.unit_sen * oi.quantity);
+      if (oi.listing_id && studentBusinessListingIds.has(oi.listing_id)) {
+        isBusinessOrder = true;
+      } else if (listing && listing.kind === "pre_loved" && !listing.is_food) {
+        isPreLovedOrder = true;
+      }
+    }
+    if (isBusinessOrder) {
+      activeBusinessSellersInPeriod.add(o.seller_id);
+      studentBusinessSalesSen += netOrd;
+      studentBusinessEarningsSen += netEarns;
+      studentBusinessOrders += 1;
+    }
+    if (isPreLovedOrder && o.status === "completed") {
+      preLovedCompletedTransactions += 1;
+    }
+  }
+
+  const periodServices = data.serviceRequests.filter((s) => inRange(s.created_at, window.startMs, window.endMs));
+  const completedServices = periodServices.filter((s) => s.status === "completed").length;
+  const acceptedServices = periodServices.filter((s) =>
+    ["accepted", "in_progress", "delivered", "completed"].includes(s.status)
+  ).length;
+
+  const community = computeCommunityImpact({
+    notices: data.freeNotices,
+    claims: data.freeClaims.filter((c) => inRange(c.collected_at ?? c.created_at, window.startMs, window.endMs)),
+  });
+
+  const periodReports = data.reports.filter((r) => inRange(r.created_at, window.startMs, window.endMs));
+  const periodDisputes = data.disputes.filter((d) => inRange(d.created_at, window.startMs, window.endMs));
+  const repeatBuyers = Array.from(buyerOrderCounts.values()).filter((c) => c >= 2).length;
+
+  return {
+    overview: {
+      totalMembers: data.profiles.length,
+      studentsCount: data.profiles.filter((p) => p.university_role === "student").length,
+      staffCount: data.profiles.filter((p) => p.university_role === "staff").length,
+      activeStatusCount: data.profiles.filter((p) => p.status === "active").length,
+      restrictedCount: data.profiles.filter((p) => p.status !== "active").length,
+      measuredActiveUsers: activeUserIds.size,
+      newRegistrations: data.profiles.filter((p) => inRange(p.created_at, window.startMs, window.endMs)).length,
+      activeSellers: new Set(data.listings.filter((l) => l.status === "published").map((l) => l.seller_id)).size,
+      activeListings: data.listings.filter((l) => l.status === "published").length,
+      verifiedTransactions: periodOrders.length,
+      completedOrders,
+      grossProductSalesSen: grossSalesSen,
+      executedRefundsSen,
+      netProductSalesSen: Math.max(0, grossSalesSen - executedRefundsSen),
+      netPlatformCommissionSen: netCommissionSen,
+      averageOrderValueSen: periodOrders.length > 0 ? Math.round(Math.max(0, grossSalesSen - executedRefundsSen) / periodOrders.length) : 0,
+      completedServices,
+      completedDonations: community.completedDonations,
+    },
+    listingsByType: {
+      preLoved: data.listings.filter((l) => l.kind === "pre_loved" && !l.is_food).length,
+      studentBusiness: data.listings.filter((l) => l.kind === "business" || l.is_food).length,
+      services: data.listings.filter((l) => l.kind === "service").length,
+      freeItems: data.freeNotices.length,
+    },
+    salesTrend: Array.from(salesByDay.entries())
+      .map(([day, amountSen]) => ({ day, amountSen }))
+      .sort((a, b) => a.day.localeCompare(b.day)),
+    categorySales: Array.from(salesByCat.entries())
+      .map(([categoryId, amountSen]) => ({ categoryId, amountSen }))
+      .sort((a, b) => b.amountSen - a.amountSen),
+    services: {
+      activeServiceListings: data.listings.filter((l) => l.kind === "service" && l.status === "published").length,
+      totalRequests: periodServices.length,
+      completedServices,
+      acceptanceRatePct: periodServices.length > 0 ? Number(((acceptedServices / periodServices.length) * 100).toFixed(1)) : null,
+      completionRatePct: acceptedServices > 0 ? Number(((completedServices / acceptedServices) * 100).toFixed(1)) : null,
+    },
+    community,
+    engagement: {
+      totalViews: data.views.filter((v) => inRange(v.viewed_at, window.startMs, window.endMs)).length,
+      uniqueViewers: new Set(data.views.filter((v) => inRange(v.viewed_at, window.startMs, window.endMs)).map((v) => v.viewer_id)).size,
+      totalFavourites: data.favourites.length,
+    },
+    trustAndSafety: {
+      totalReports: periodReports.length,
+      openReports: data.reports.filter((r) => r.status === "open" || r.status === "under_review").length,
+      resolvedReports: data.reports.filter((r) => r.status === "resolved" || r.status === "dismissed").length,
+      activeDisputes: data.disputes.filter((d) => d.status === "open" || d.status === "under_review").length,
+      resolvedDisputes: data.disputes.filter((d) => d.status === "resolved").length,
+      disputeRatePct:
+        periodOrders.length > 0 ? Number(((periodDisputes.length / periodOrders.length) * 100).toFixed(1)) : null,
+      hiddenReviews: data.reviews.filter((r) => r.hidden).length,
+    },
+    entrepreneurship: {
+      publishedStudentBusinessSellers: studentBusinessSellersPublished.size,
+      activeStudentBusinessSellers: activeBusinessSellersInPeriod.size,
+      preLovedSellersCount: preLovedSellers.size,
+      activeServiceProviders: serviceProviders.size,
+      completedStudentBusinessOrders: studentBusinessOrders,
+      studentBusinessSalesSen,
+      studentBusinessEarningsSen,
+      avgEarningsPerBusinessSellerSen:
+        activeBusinessSellersInPeriod.size > 0
+          ? Math.round(studentBusinessEarningsSen / activeBusinessSellersInPeriod.size)
+          : 0,
+      repeatBuyers,
+      preLovedCompletedTransactions,
+      donorsCount: community.activeDonors,
+      donatedUnits: community.totalUnitsDonated,
+    },
+  };
+}
+
+/**
+ * Spreadsheet formula-injection-safe CSV cell escaping (Section 10.12).
+ */
+export function sanitizeCsvCell(value: string | number | null | undefined): string {
+  let s = String(value ?? "");
+  if (/^[=+\-@\t\r]/.test(s)) {
+    s = `'${s}`;
+  }
+  if (/[",\r\n]/.test(s)) {
+    return `"${s.replace(/"/g, '""')}"`;
+  }
+  return s;
+}
+
+export function buildAnalyticsCsv(
+  rows: Array<{ period: string; section: string; metric: string; value: string; note?: string }>
+): string {
+  const header = "Period,Section,Metric,Value,Note";
+  const lines = rows.map((r) =>
+    [r.period, r.section, r.metric, r.value, r.note ?? ""].map(sanitizeCsvCell).join(",")
+  );
+  return [header, ...lines].join("\n");
+}

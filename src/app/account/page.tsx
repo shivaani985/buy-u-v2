@@ -12,9 +12,11 @@ import {
   Wrench,
 } from "lucide-react";
 import { signOutAction } from "@/app/auth/actions";
+import { AccountSettingsClient } from "@/components/account/AccountSettingsClient";
 import { formatShortDate } from "@/lib/format";
 import { isSupabaseConfigured } from "@/lib/supabase/env";
 import { getSessionSummary } from "@/lib/supabase/server";
+import { getServerServiceClient } from "@/lib/supabase/service";
 
 export const metadata: Metadata = {
   title: "Account",
@@ -118,6 +120,42 @@ export default async function AccountPage() {
   }
 
   const profile = session.profile;
+
+  interface AccountExtraRow {
+    bio?: string | null;
+    faculty?: string | null;
+    phone?: string | null;
+    notification_prefs?: { inquiries?: boolean; reviews?: boolean; community?: boolean } | null;
+  }
+  let blockedUsers: Array<{ id: string; displayName: string; createdAt: string }> = [];
+  let rawExtra: AccountExtraRow | null = null;
+
+  const service = getServerServiceClient();
+  if (service && profile?.id) {
+    const [pRes, bRes] = await Promise.all([
+      service.from("profiles").select("bio,faculty,phone").eq("id", profile.id).maybeSingle(),
+      service.from("member_blocks").select("blocked_id,created_at").eq("blocker_id", profile.id).order("created_at", { ascending: false }),
+    ]);
+    rawExtra = (pRes.data as AccountExtraRow | null) ?? null;
+    const bRows = (bRes.error ? [] : (bRes.data ?? [])) as Array<{ blocked_id: string; created_at: string }>;
+    if (bRows.length > 0) {
+      const { data: bProfs } = await service
+        .from("profiles")
+        .select("id,display_name,full_name")
+        .in("id", bRows.map((b) => b.blocked_id));
+      const nameMap = new Map(
+        ((bProfs ?? []) as Array<{ id: string; display_name: string | null; full_name: string | null }>).map((p) => [
+          p.id,
+          p.display_name || p.full_name || "UMS Member",
+        ])
+      );
+      blockedUsers = bRows.map((b) => ({
+        id: b.blocked_id,
+        displayName: nameMap.get(b.blocked_id) ?? "UMS Member",
+        createdAt: b.created_at,
+      }));
+    }
+  }
   const role = (profile?.university_role ?? "member").toLowerCase();
   const isStudent = role === "student";
   const isStaff = role === "staff";
@@ -331,6 +369,24 @@ export default async function AccountPage() {
           </div>
         </section>
       </div>
+
+      {/* Phase 9E: Account Profile Editor, Notification Preferences & Blocked Members */}
+      {profile ? (
+        <AccountSettingsClient
+          initial={{
+            displayName: profile.display_name || profile.full_name || "",
+            bio: rawExtra?.bio || "",
+            faculty: rawExtra?.faculty || "",
+            phone: rawExtra?.phone || "",
+            prefs: {
+              inquiries: rawExtra?.notification_prefs?.inquiries !== false,
+              reviews: rawExtra?.notification_prefs?.reviews !== false,
+              community: rawExtra?.notification_prefs?.community !== false,
+            },
+          }}
+          blockedUsers={blockedUsers}
+        />
+      ) : null}
     </div>
   );
 }
