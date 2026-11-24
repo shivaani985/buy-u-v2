@@ -277,28 +277,15 @@ BEGIN
   END IF;
 
   IF public.internal_is_blocked_between(NEW.sender_id, v_other) THEN
-    -- Preserve ONLY controlled active/disputed AUTHORITATIVELY PAID order obligation messages!
+    -- Preserve ONLY controlled active/disputed AUTHORITATIVELY PAID order obligation messages
+    -- reusing the accepted Phase 6 `public.is_order_payment_verified(o.id)` helper!
     IF NEW.order_id IS NOT NULL AND EXISTS (
       SELECT 1 FROM public.orders o
       WHERE o.id = NEW.order_id
         AND o.status IN ('paid', 'handed_over', 'disputed')
-        AND o.paid_at IS NOT NULL
         AND ((o.buyer_id = NEW.sender_id AND o.seller_id = v_other)
           OR (o.seller_id = NEW.sender_id AND o.buyer_id = v_other))
-        AND (
-          EXISTS (
-            SELECT 1 FROM public.checkout_sessions cs
-            WHERE cs.id = o.checkout_session_id
-              AND cs.payment_status = 'paid'
-              AND cs.paid_at IS NOT NULL
-          )
-          OR EXISTS (
-            SELECT 1 FROM public.payments p
-            WHERE p.order_id = o.id
-              AND p.status = 'paid'
-              AND p.verified_at IS NOT NULL
-          )
-        )
+        AND public.is_order_payment_verified(o.id)
     ) THEN
       RETURN NEW;
     END IF;
@@ -791,9 +778,25 @@ BEGIN
   IF v_act = 'accept' THEN
     IF v_uid <> v_sr.seller_id THEN RAISE EXCEPTION 'FORBIDDEN_SELLER_ONLY' USING ERRCODE = '42501'; END IF;
     IF v_sr.status <> 'requested' THEN RAISE EXCEPTION 'INVALID_TRANSITION'; END IF;
+    -- Both participants must remain eligible before accepting a new obligation (no suspended accounts!)
+    IF NOT public.is_active_student() THEN
+      RAISE EXCEPTION 'FORBIDDEN_ACTIVE_STUDENT_ONLY' USING ERRCODE = '42501';
+    END IF;
+    IF NOT EXISTS (
+      SELECT 1 FROM public.profiles p
+      WHERE p.id = v_sr.buyer_id AND lower(COALESCE(p.status, '')) = 'active'
+    ) THEN
+      RAISE EXCEPTION 'BUYER_ACCOUNT_INACTIVE';
+    END IF;
     SELECT l.* INTO v_listing FROM public.listings l WHERE l.id = v_sr.listing_id;
-    IF NOT FOUND OR v_listing.status <> 'published' OR NOT COALESCE(v_listing.accepting_requests, true) THEN
+    IF NOT FOUND
+       OR lower(COALESCE(v_listing.kind, '')) <> 'service'
+       OR v_listing.status <> 'published'
+       OR NOT COALESCE(v_listing.accepting_requests, true) THEN
       RAISE EXCEPTION 'SERVICE_UNAVAILABLE';
+    END IF;
+    IF v_listing.service_mode IN ('remote', 'in_person') AND v_listing.service_mode <> v_sr.mode THEN
+      RAISE EXCEPTION 'INCOMPATIBLE_SERVICE_MODE';
     END IF;
     IF public.internal_is_blocked_between(v_sr.buyer_id, v_sr.seller_id) THEN
       RAISE EXCEPTION 'INTERACTION_BLOCKED' USING ERRCODE = '42501';
@@ -885,29 +888,13 @@ ALTER TABLE public.free_notices
   ADD COLUMN IF NOT EXISTS collection_instructions text,
   ADD COLUMN IF NOT EXISTS moderated_prev_status text;
 
--- P0.15: Minimal MIME-type, 5 MB file-size & student-ownership hardening ONLY on already-public 'free-items' bucket
--- (Never alters visibility of any private bucket!)
+-- Minimal MIME-type & 5 MB file-size metadata guard ONLY on already-public 'free-items' bucket.
+-- Preserves existing hosted storage.objects policies (which already enforce active student & UID folder ownership)
+-- and never alters visibility of any private bucket!
 UPDATE storage.buckets
 SET file_size_limit = 5242880,
     allowed_mime_types = ARRAY['image/jpeg', 'image/png', 'image/webp']
 WHERE id = 'free-items';
-
-DROP POLICY IF EXISTS free_items_student_upload ON storage.objects;
-CREATE POLICY free_items_student_upload ON storage.objects
-  FOR INSERT TO authenticated
-  WITH CHECK (
-    bucket_id = 'free-items'
-    AND public.is_active_student()
-    AND (storage.foldername(name))[1] = auth.uid()::text
-  );
-
-DROP POLICY IF EXISTS free_items_owner_delete ON storage.objects;
-CREATE POLICY free_items_owner_delete ON storage.objects
-  FOR DELETE TO authenticated
-  USING (
-    bucket_id = 'free-items'
-    AND (storage.foldername(name))[1] = auth.uid()::text
-  );
 
 -- Separate private draft table so incomplete drafts persist & recover cleanly without weakening free_notices constraints!
 CREATE TABLE IF NOT EXISTS public.free_notice_drafts (
@@ -1158,7 +1145,8 @@ $$;
 REVOKE ALL ON FUNCTION public.manage_free_notice_atomic(uuid, text, text, text, text, integer, text) FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION public.manage_free_notice_atomic(uuid, text, text, text, text, integer, text) TO authenticated;
 
--- P0.6: Safe exact-once expiry for overdue 'reserved' claims (NEVER expires 'handed_over'!)
+-- P0.6 & Critical Notifications: Safe exact-once expiry for overdue 'reserved' claims (NEVER expires 'handed_over'!)
+-- Generates mandatory deduplicated transactional notifications to BOTH recipient & donor!
 DROP FUNCTION IF EXISTS public.expire_stale_free_claims_atomic(uuid);
 CREATE OR REPLACE FUNCTION public.expire_stale_free_claims_atomic(p_notice_id uuid DEFAULT NULL)
 RETURNS integer
@@ -1173,7 +1161,7 @@ DECLARE
   v_count integer := 0;
 BEGIN
   FOR v_claim IN
-    SELECT c.id, c.notice_id, c.quantity
+    SELECT c.id, c.notice_id, c.quantity, c.donor_id, c.recipient_id, c.claim_code
     FROM public.free_notice_claims c
     WHERE c.status = 'reserved'
       AND c.reservation_expires_at IS NOT NULL
@@ -1196,6 +1184,26 @@ BEGIN
     UPDATE public.free_notice_claims
     SET status = 'expired', updated_at = v_now
     WHERE id = v_claim.id;
+
+    -- Mandatory transactional notifications (p_pref_group = NULL so optional community prefs cannot suppress!)
+    PERFORM public.safe_insert_member_notification(
+      v_claim.recipient_id,
+      'free_claim_expired',
+      NULL,
+      'Reservation expired (' || v_claim.claim_code || ')',
+      'Your 48-hour pickup reservation for "' || v_notice.title || '" expired and units were released.',
+      '/free-items',
+      'don-' || v_claim.id::text || '-expired-recipient'
+    );
+    PERFORM public.safe_insert_member_notification(
+      v_claim.donor_id,
+      'free_claim_expired',
+      NULL,
+      'Reservation expired (' || v_claim.claim_code || ')',
+      'An uncollected 48-hour reservation for "' || v_notice.title || '" expired and units returned to available stock.',
+      '/free-items',
+      'don-' || v_claim.id::text || '-expired-donor'
+    );
 
     v_count := v_count + 1;
   END LOOP;
@@ -1316,9 +1324,11 @@ DECLARE
   v_act text := lower(trim(COALESCE(p_action, '')));
   v_reason text := NULLIF(trim(COALESCE(p_reason, '')), '');
   v_now timestamptz := clock_timestamp();
+  v_prev_status text;
   v_next text;
   v_notify_uid uuid;
   v_notify_title text;
+  v_notify_pref_group text;
 BEGIN
   IF v_uid IS NULL OR NOT public.is_active_member() THEN
     RAISE EXCEPTION 'UNAUTHORIZED' USING ERRCODE = '42501';
@@ -1331,6 +1341,7 @@ BEGIN
   SELECT fn.* INTO v_notice FROM public.free_notices fn WHERE fn.id = v_notice_id FOR UPDATE;
   SELECT c.* INTO v_claim FROM public.free_notice_claims c WHERE c.id = p_claim_id FOR UPDATE;
   v_now := clock_timestamp();
+  v_prev_status := v_claim.status;
 
   IF v_uid <> v_claim.donor_id AND v_uid <> v_claim.recipient_id THEN
     RAISE EXCEPTION 'FORBIDDEN' USING ERRCODE = '42501';
@@ -1357,14 +1368,24 @@ BEGIN
     WHERE id = v_claim.id
     RETURNING * INTO v_claim;
 
+    -- Mandatory transactional notifications (NULL pref_group: never suppressed by optional community prefs!)
     PERFORM public.safe_insert_member_notification(
       v_claim.recipient_id,
       'free_claim_expired',
-      'community',
+      NULL,
       'Reservation expired (' || v_claim.claim_code || ')',
       'Your 48-hour pickup reservation for "' || v_notice.title || '" expired and units were released.',
       '/free-items',
-      'don-' || v_claim.id::text || '-expired'
+      'don-' || v_claim.id::text || '-expired-recipient'
+    );
+    PERFORM public.safe_insert_member_notification(
+      v_claim.donor_id,
+      'free_claim_expired',
+      NULL,
+      'Reservation expired (' || v_claim.claim_code || ')',
+      'An uncollected 48-hour reservation for "' || v_notice.title || '" expired and units returned to available stock.',
+      '/free-items',
+      'don-' || v_claim.id::text || '-expired-donor'
     );
 
     RETURN QUERY SELECT v_claim.id, v_claim.status, v_claim.updated_at;
@@ -1374,6 +1395,16 @@ BEGIN
   IF v_act = 'accept' THEN
     IF v_uid <> v_claim.donor_id THEN RAISE EXCEPTION 'FORBIDDEN_DONOR_ONLY' USING ERRCODE = '42501'; END IF;
     IF v_claim.status <> 'requested' THEN RAISE EXCEPTION 'INVALID_TRANSITION'; END IF;
+    -- Both donor (active student) and recipient (active member) must remain eligible before accepting a reservation!
+    IF NOT public.is_active_student() THEN
+      RAISE EXCEPTION 'FORBIDDEN_ACTIVE_STUDENT_ONLY' USING ERRCODE = '42501';
+    END IF;
+    IF NOT EXISTS (
+      SELECT 1 FROM public.profiles p
+      WHERE p.id = v_claim.recipient_id AND lower(COALESCE(p.status, '')) = 'active'
+    ) THEN
+      RAISE EXCEPTION 'RECIPIENT_ACCOUNT_INACTIVE';
+    END IF;
     IF v_notice.status <> 'active' OR v_notice.expires_at <= v_now THEN
       RAISE EXCEPTION 'FREE_ITEM_UNAVAILABLE';
     END IF;
@@ -1389,18 +1420,21 @@ BEGIN
     v_next := 'reserved';
     v_notify_uid := v_claim.recipient_id;
     v_notify_title := 'Free item reserved (' || v_claim.claim_code || ')';
+    v_notify_pref_group := NULL; -- Mandatory: accepted reservation
   ELSIF v_act = 'decline' THEN
     IF v_uid <> v_claim.donor_id THEN RAISE EXCEPTION 'FORBIDDEN_DONOR_ONLY' USING ERRCODE = '42501'; END IF;
     IF v_claim.status <> 'requested' THEN RAISE EXCEPTION 'INVALID_TRANSITION'; END IF;
     v_next := 'declined';
     v_notify_uid := v_claim.recipient_id;
     v_notify_title := 'Free item claim declined (' || v_claim.claim_code || ')';
+    v_notify_pref_group := 'community'; -- Optional inquiry response
   ELSIF v_act = 'handover' THEN
     IF v_uid <> v_claim.donor_id THEN RAISE EXCEPTION 'FORBIDDEN_DONOR_ONLY' USING ERRCODE = '42501'; END IF;
     IF v_claim.status <> 'reserved' THEN RAISE EXCEPTION 'INVALID_TRANSITION'; END IF;
     v_next := 'handed_over';
     v_notify_uid := v_claim.recipient_id;
     v_notify_title := 'Donor recorded handover (' || v_claim.claim_code || ')';
+    v_notify_pref_group := NULL; -- Mandatory: handover recorded
   ELSIF v_act = 'collect' THEN
     IF v_uid <> v_claim.recipient_id THEN RAISE EXCEPTION 'FORBIDDEN_RECIPIENT_ONLY' USING ERRCODE = '42501'; END IF;
     IF v_claim.status <> 'handed_over' THEN RAISE EXCEPTION 'INVALID_TRANSITION'; END IF;
@@ -1417,6 +1451,7 @@ BEGIN
     v_next := 'collected';
     v_notify_uid := v_claim.donor_id;
     v_notify_title := 'Donation collected (' || v_claim.claim_code || ')';
+    v_notify_pref_group := NULL; -- Mandatory: collection confirmed
   ELSIF v_act = 'cancel' THEN
     IF v_claim.status NOT IN ('requested', 'reserved') THEN RAISE EXCEPTION 'INVALID_TRANSITION'; END IF;
     IF v_claim.status = 'reserved' THEN
@@ -1430,6 +1465,8 @@ BEGIN
     v_next := 'cancelled';
     v_notify_uid := CASE WHEN v_uid = v_claim.donor_id THEN v_claim.recipient_id ELSE v_claim.donor_id END;
     v_notify_title := 'Free item claim cancelled (' || v_claim.claim_code || ')';
+    -- Mandatory when cancelling an accepted reservation; optional when cancelling an unaccepted inquiry!
+    v_notify_pref_group := CASE WHEN v_prev_status = 'reserved' THEN NULL ELSE 'community' END;
   ELSE
     RAISE EXCEPTION 'INVALID_ACTION';
   END IF;
@@ -1450,7 +1487,7 @@ BEGIN
   PERFORM public.safe_insert_member_notification(
     v_notify_uid,
     'free_claim_' || v_next,
-    'community',
+    v_notify_pref_group,
     v_notify_title,
     'Free item "' || v_notice.title || '" updated to ' || replace(v_next, '_', ' ') || '.',
     '/free-items',
@@ -1698,8 +1735,8 @@ ALTER TABLE public.listings
   ADD COLUMN IF NOT EXISTS moderated_at timestamptz,
   ADD COLUMN IF NOT EXISTS moderation_reason text;
 
--- P0.16: SECURITY INVOKER guard protecting listing moderation fields on INSERT & UPDATE
--- and blocking direct client unhiding/editing of admin-hidden listings!
+-- P0.16 & Moderation Integrity: SECURITY INVOKER guard protecting listing moderation fields
+-- on INSERT, UPDATE, and DELETE (blocks owner DELETE of admin-hidden listings to preserve moderation history!)
 CREATE OR REPLACE FUNCTION public.guard_admin_hidden_listing_trigger()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -1708,7 +1745,15 @@ SET search_path = public, pg_temp
 AS $$
 BEGIN
   IF current_user IN ('postgres', 'service_role') OR public.is_active_admin() THEN
+    IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
     RETURN NEW;
+  END IF;
+
+  IF TG_OP = 'DELETE' THEN
+    IF OLD.status = 'hidden' THEN
+      RAISE EXCEPTION 'LISTING_MODERATED_BY_ADMIN' USING ERRCODE = '42501';
+    END IF;
+    RETURN OLD;
   END IF;
 
   IF TG_OP = 'INSERT' THEN
@@ -1740,7 +1785,7 @@ $$;
 
 DROP TRIGGER IF EXISTS trg_listings_guard_admin_hidden ON public.listings;
 CREATE TRIGGER trg_listings_guard_admin_hidden
-  BEFORE INSERT OR UPDATE ON public.listings
+  BEFORE INSERT OR UPDATE OR DELETE ON public.listings
   FOR EACH ROW
   EXECUTE FUNCTION public.guard_admin_hidden_listing_trigger();
 
@@ -1831,31 +1876,68 @@ BEGIN
     RAISE EXCEPTION 'INVALID_REPORT_DETAILS';
   END IF;
 
-  -- Target existence & authorization checks (P0.7)
+  -- Target visibility & participant authorization checks (neutral REPORT_TARGET_NOT_FOUND prevents probing private drafts/messages!)
   IF v_kind = 'user' THEN
     IF p_target_id = v_uid THEN RAISE EXCEPTION 'CANNOT_REPORT_SELF'; END IF;
     IF NOT EXISTS (SELECT 1 FROM public.profiles p WHERE p.id = p_target_id) THEN
       RAISE EXCEPTION 'REPORT_TARGET_NOT_FOUND';
     END IF;
   ELSIF v_kind = 'listing' THEN
-    IF NOT EXISTS (SELECT 1 FROM public.listings l WHERE l.id = p_target_id) THEN
+    -- Published listings OR legitimate historical participant (orders/services/offers); unrelated private drafts cannot be probed!
+    IF NOT EXISTS (
+      SELECT 1 FROM public.listings l
+      WHERE l.id = p_target_id
+        AND (
+          l.status = 'published'
+          OR EXISTS (
+            SELECT 1 FROM public.order_items oi
+            JOIN public.orders o ON o.id = oi.order_id
+            WHERE oi.listing_id = l.id AND (o.buyer_id = v_uid OR o.seller_id = v_uid)
+          )
+          OR EXISTS (
+            SELECT 1 FROM public.service_requests sr
+            WHERE sr.listing_id = l.id AND (sr.buyer_id = v_uid OR sr.seller_id = v_uid)
+          )
+          OR EXISTS (
+            SELECT 1 FROM public.offers ofr
+            WHERE ofr.listing_id = l.id AND (ofr.buyer_id = v_uid OR ofr.seller_id = v_uid)
+          )
+        )
+    ) THEN
       RAISE EXCEPTION 'REPORT_TARGET_NOT_FOUND';
     END IF;
   ELSIF v_kind = 'free_notice' THEN
-    IF NOT EXISTS (SELECT 1 FROM public.free_notices fn WHERE fn.id = p_target_id) THEN
+    -- Active notices OR legitimate historical claim participant
+    IF NOT EXISTS (
+      SELECT 1 FROM public.free_notices fn
+      WHERE fn.id = p_target_id
+        AND (
+          fn.status = 'active'
+          OR EXISTS (
+            SELECT 1 FROM public.free_notice_claims fc
+            WHERE fc.notice_id = fn.id AND (fc.donor_id = v_uid OR fc.recipient_id = v_uid)
+          )
+        )
+    ) THEN
       RAISE EXCEPTION 'REPORT_TARGET_NOT_FOUND';
     END IF;
   ELSIF v_kind = 'review' THEN
-    IF NOT EXISTS (SELECT 1 FROM public.reviews r WHERE r.id = p_target_id AND r.hidden = false) THEN
+    -- Publicly visible review OR authorized participant (buyer/seller)
+    IF NOT EXISTS (
+      SELECT 1 FROM public.reviews r
+      WHERE r.id = p_target_id
+        AND (r.hidden = false OR r.buyer_id = v_uid OR r.seller_id = v_uid)
+    ) THEN
       RAISE EXCEPTION 'REPORT_TARGET_NOT_FOUND';
     END IF;
   ELSIF v_kind = 'message' THEN
+    -- Conversation participant only; neutral error avoids probing unrelated private message UUIDs
     IF NOT EXISTS (
       SELECT 1 FROM public.messages m
       JOIN public.conversations c ON c.id = m.conversation_id
       WHERE m.id = p_target_id AND (c.member_a = v_uid OR c.member_b = v_uid)
     ) THEN
-      RAISE EXCEPTION 'FORBIDDEN_REPORT_TARGET' USING ERRCODE = '42501';
+      RAISE EXCEPTION 'REPORT_TARGET_NOT_FOUND';
     END IF;
   END IF;
 
@@ -1976,12 +2058,16 @@ BEGIN
   IF v_act = 'warn' THEN
     v_next_status := v_prof.status;
   ELSIF v_act IN ('restrict', 'suspend') THEN
+    -- Block suspend-then-restore bypass on permanently closed accounts!
+    IF v_prof.status = 'closed' THEN
+      RAISE EXCEPTION 'CANNOT_MODIFY_CLOSED_ACCOUNT';
+    END IF;
     -- Maps cleanly to hosted profiles_status_check ('suspended') with explicit restriction_reason
     v_next_status := 'suspended';
   ELSIF v_act = 'restore' THEN
-    -- P0.16: NEVER reactivate permanently closed accounts! Only suspended accounts may be restored.
+    -- NEVER reactivate permanently closed accounts! Only suspended accounts may be restored.
     IF v_prof.status = 'closed' THEN
-      RAISE EXCEPTION 'CANNOT_RESTORE_CLOSED_ACCOUNT';
+      RAISE EXCEPTION 'CANNOT_MODIFY_CLOSED_ACCOUNT';
     END IF;
     v_next_status := 'active';
   ELSE
@@ -2058,6 +2144,10 @@ BEGIN
         updated_at = v_now
     WHERE id = v_listing.id;
   ELSE
+    -- Idempotent: repeated restore on a non-hidden listing MUST NOT archive a currently published listing!
+    IF v_listing.status <> 'hidden' THEN
+      RETURN v_listing.status;
+    END IF;
     -- Restore exact prior status (defaults to 'archived' if unknown, never blind-publishing drafts!)
     v_next := CASE
       WHEN v_listing.moderated_prev_status IN ('draft', 'published', 'archived') THEN v_listing.moderated_prev_status
@@ -2121,6 +2211,10 @@ BEGIN
         updated_at = v_now
     WHERE id = v_fn.id;
   ELSE
+    -- Idempotent: repeated restore on a non-hidden free notice MUST NOT change an active notice to closed!
+    IF v_fn.status <> 'hidden' THEN
+      RETURN v_fn.status;
+    END IF;
     v_next := CASE WHEN v_fn.moderated_prev_status IN ('active', 'closed') THEN v_fn.moderated_prev_status ELSE 'closed' END;
     UPDATE public.free_notices
     SET status = v_next, moderated_prev_status = NULL, updated_at = v_now

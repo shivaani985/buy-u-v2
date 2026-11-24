@@ -449,13 +449,42 @@ test("P0.13-P0.18 SQL: SECURITY INVOKER profile/listing guards, committed servic
   assert.match(SQL, /FUNCTION public\.manage_free_notice_atomic/);
   assert.match(SQL, /QUANTITY_BELOW_RESERVED/);
 
-  // P0.16: Immutable conversation/message/offer links, verified paid-order message exception, pending->accepted offer block guard, closed account restore guard
+  // P0.16 & Final Safeguards (1-6):
+  // 1. Authoritative Phase 6 payment verification helper reused in block message exception
+  assert.match(SQL, /enforce_block_on_message_trigger[\s\S]*public\.is_order_payment_verified\(o\.id\)/);
   assert.match(SQL, /trg_conversations_immutable_guard/);
   assert.match(SQL, /trg_messages_immutable_guard/);
   assert.match(SQL, /INVALID_ORDER_ATTACHMENT/);
   assert.match(SQL, /trg_offers_update_block_guard/);
-  assert.match(SQL, /CANNOT_RESTORE_CLOSED_ACCOUNT/);
+
+  // 2. Both participants remain eligible before accepting pending service requests or free-item claims
+  assert.match(SQL, /BUYER_ACCOUNT_INACTIVE/);
+  assert.match(SQL, /RECIPIENT_ACCOUNT_INACTIVE/);
+
+  // 3. Moderation integrity: DELETE guard on admin-hidden listings, idempotent restores, closed-account suspend/restrict/restore guard
+  assert.match(SQL, /BEFORE INSERT OR UPDATE OR DELETE ON public\.listings/);
+  assert.match(SQL, /IF TG_OP = 'DELETE' THEN[\s\S]*OLD\.status = 'hidden'[\s\S]*LISTING_MODERATED_BY_ADMIN/);
+  assert.match(SQL, /IF v_listing\.status <> 'hidden' THEN\s*RETURN v_listing\.status;/);
+  assert.match(SQL, /IF v_fn\.status <> 'hidden' THEN\s*RETURN v_fn\.status;/);
+  assert.match(SQL, /CANNOT_MODIFY_CLOSED_ACCOUNT/);
   assert.match(SQL, /FORBIDDEN_MODERATION_FIELDS/);
+
+  // 4. Report target visibility checks & neutral REPORT_TARGET_NOT_FOUND (no private UUID probing)
+  assert.doesNotMatch(SQL, /FORBIDDEN_REPORT_TARGET/);
+  assert.match(SQL, /ELSIF v_kind = 'listing' THEN[\s\S]*l\.status = 'published'[\s\S]*REPORT_TARGET_NOT_FOUND/);
+  assert.match(SQL, /ELSIF v_kind = 'free_notice' THEN[\s\S]*fn\.status = 'active'[\s\S]*REPORT_TARGET_NOT_FOUND/);
+  assert.match(SQL, /ELSIF v_kind = 'message' THEN[\s\S]*c\.member_a = v_uid OR c\.member_b = v_uid[\s\S]*REPORT_TARGET_NOT_FOUND/);
+
+  // 5. Mandatory transactional notifications (NULL pref group) for accepted/expired/handed_over/collected/reserved-cancelled free claims
+  assert.match(SQL, /'free_claim_expired',\s*NULL,[\s\S]*-expired-recipient/);
+  assert.match(SQL, /'free_claim_expired',\s*NULL,[\s\S]*-expired-donor/);
+  assert.match(SQL, /v_notify_pref_group := NULL; -- Mandatory: accepted reservation/);
+  assert.match(SQL, /v_notify_pref_group := NULL; -- Mandatory: handover recorded/);
+  assert.match(SQL, /v_notify_pref_group := NULL; -- Mandatory: collection confirmed/);
+  assert.match(SQL, /v_notify_pref_group := CASE WHEN v_prev_status = 'reserved' THEN NULL ELSE 'community' END;/);
+
+  // 6. No redundant storage.objects policy overrides on free-items (hosted upload policies already enforce active student & UID ownership)
+  assert.doesNotMatch(SQL, /CREATE POLICY free_items_student_upload ON storage\.objects/);
 
   // P0.18: Phase 5 mark_conversation_notifications_read_atomic + column-level reviews SELECT hiding moderation_reason/moderated_by
   assert.match(SQL, /FUNCTION public\.mark_conversation_notifications_read_atomic/);

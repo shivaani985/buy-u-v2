@@ -118,6 +118,12 @@ export async function updateServiceRequestAction(input: {
   });
 
   if (error) {
+    if (error.message.includes("BUYER_ACCOUNT_INACTIVE")) {
+      return { ok: false, message: "Cannot accept request because the requesting member's account is no longer active." };
+    }
+    if (error.message.includes("INCOMPATIBLE_SERVICE_MODE")) {
+      return { ok: false, message: "Requested service mode is no longer supported by this listing." };
+    }
     return { ok: false, message: "Could not update service request status." };
   }
 
@@ -384,6 +390,9 @@ export async function updateFreeClaimAction(input: {
   if (error) {
     if (error.message.includes("INSUFFICIENT_FREE_QUANTITY")) {
       return { ok: false, message: "Not enough unreserved units left to accept this claim." };
+    }
+    if (error.message.includes("RECIPIENT_ACCOUNT_INACTIVE")) {
+      return { ok: false, message: "Cannot accept claim because the recipient's account is no longer active." };
     }
     return { ok: false, message: "Could not update free item claim." };
   }
@@ -688,6 +697,9 @@ export async function adminModerateUserAction(input: {
   if (error) {
     if (error.message.includes("MODERATION_REASON_REQUIRED")) {
       return { ok: false, message: "Enter a moderation reason (min 5 characters)." };
+    }
+    if (error.message.includes("CANNOT_MODIFY_CLOSED_ACCOUNT")) {
+      return { ok: false, message: "Permanently closed accounts cannot be suspended, restricted, or restored." };
     }
     return { ok: false, message: "Could not apply user moderation action." };
   }

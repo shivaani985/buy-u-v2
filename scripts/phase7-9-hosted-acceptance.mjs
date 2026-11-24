@@ -238,11 +238,26 @@ async function run() {
         const claimId = Array.isArray(claimRows) ? claimRows[0]?.out_id : claimRows?.out_id;
         assert.ok(claimId);
 
+        // Turn off optional 'community' notifications to verify mandatory reservation/expiry alerts STILL deliver!
+        await buyer.client.rpc("update_notification_preferences_atomic", {
+          p_inquiries: true,
+          p_reviews: true,
+          p_community: false,
+        });
+
         const { error: accErr } = await seller.client.rpc("update_free_notice_claim_atomic", {
           p_claim_id: claimId,
           p_action: "accept",
         });
         assert.equal(accErr, null);
+
+        // Mandatory accepted reservation notification MUST exist even with community=false
+        const { data: resNotif } = await service
+          .from("notifications")
+          .select("id")
+          .eq("user_id", buyer.userId)
+          .eq("dedupe_key", `don-${claimId}-reserved`);
+        assert.equal((resNotif ?? []).length, 1, "Accepted reservation notification must bypass optional community pref");
 
         // Donor cannot reduce quantity below reserved_quantity via manage_free_notice_atomic
         const { error: belowResErr } = await seller.client.rpc("manage_free_notice_atomic", {
@@ -252,7 +267,7 @@ async function run() {
         });
         assert.ok(belowResErr);
 
-        // Force past reservation_expires_at and verify handover commits 'expired' cleanly!
+        // Force past reservation_expires_at and verify handover commits 'expired' cleanly & notifies BOTH recipient & donor!
         await service
           .from("free_notice_claims")
           .update({ reservation_expires_at: "2020-01-01T00:00:00Z" })
@@ -264,6 +279,19 @@ async function run() {
         assert.equal(hoErr, null);
         const hoStatus = Array.isArray(hoRows) ? hoRows[0]?.out_status : hoRows?.out_status;
         assert.equal(hoStatus, "expired", "Overdue handover must persist expired status instead of rolling back");
+
+        const { data: expNotifs } = await service
+          .from("notifications")
+          .select("user_id, dedupe_key")
+          .in("dedupe_key", [`don-${claimId}-expired-recipient`, `don-${claimId}-expired-donor`]);
+        assert.equal((expNotifs ?? []).length, 2, "Expiry must emit mandatory notifications to both recipient and donor");
+
+        // Restore buyer community pref back to true
+        await buyer.client.rpc("update_notification_preferences_atomic", {
+          p_inquiries: true,
+          p_reviews: true,
+          p_community: true,
+        });
 
         const { data: nAfter } = await service
           .from("free_notices")
@@ -352,6 +380,69 @@ async function run() {
         });
         assert.equal(t1, null, `admin_toggle_catalog_item_atomic failed: ${t1?.message}`);
       });
+
+      if (qaSellerEmail && qaSellerPass && qaBuyerEmail && qaBuyerPass) {
+        const seller2 = await signInAs(qaSellerEmail, qaSellerPass);
+        const buyer2 = await signInAs(qaBuyerEmail, qaBuyerPass);
+        await check("8b. Moderation DELETE guard, idempotent restore & neutral private-draft report rejection", async () => {
+          // Create synthetic draft listing owned by seller2
+          const { data: draftListing, error: dlErr } = await service
+            .from("listings")
+            .insert({
+              seller_id: seller2.userId,
+              title: "QA Moderation Guard Item",
+              description: "Synthetic item for admin-hidden DELETE guard & private-draft report check.",
+              kind: "pre_loved",
+              category_id: "books",
+              price_sen: 1000,
+              quantity: 1,
+              status: "draft",
+            })
+            .select("id")
+            .single();
+          assert.equal(dlErr, null, `Synthetic listing insert failed: ${dlErr?.message}`);
+          cleanup.push(async () => {
+            await service.from("listings").delete().eq("id", draftListing.id);
+          });
+
+          // Unrelated member reporting private draft MUST get neutral REPORT_TARGET_NOT_FOUND
+          const { error: draftRptErr } = await buyer2.client.rpc("submit_report_atomic", {
+            p_target_kind: "listing",
+            p_target_id: draftListing.id,
+            p_reason: "Spam",
+            p_explanation: "Attempting to probe unrelated private draft listing.",
+          });
+          assert.ok(draftRptErr && draftRptErr.message.includes("REPORT_TARGET_NOT_FOUND"));
+
+          // Publish listing -> Admin hides -> Seller DELETE must fail -> Admin restores TWICE -> stays 'published' (not 'archived'!)
+          await service.from("listings").update({ status: "published" }).eq("id", draftListing.id);
+          const { error: hideErr } = await admin.client.rpc("admin_moderate_listing_atomic", {
+            p_listing_id: draftListing.id,
+            p_hide: true,
+            p_reason: "QA moderation hide verification",
+          });
+          assert.equal(hideErr, null, `admin_moderate_listing_atomic hide failed: ${hideErr?.message}`);
+
+          const { error: delErr } = await seller2.client.from("listings").delete().eq("id", draftListing.id);
+          assert.ok(delErr, "Ordinary seller MUST NOT delete an admin-hidden listing");
+
+          const { data: r1, error: r1Err } = await admin.client.rpc("admin_moderate_listing_atomic", {
+            p_listing_id: draftListing.id,
+            p_hide: false,
+            p_reason: "QA moderation restore first pass",
+          });
+          assert.equal(r1Err, null);
+          assert.equal(r1, "published");
+
+          const { data: r2, error: r2Err } = await admin.client.rpc("admin_moderate_listing_atomic", {
+            p_listing_id: draftListing.id,
+            p_hide: false,
+            p_reason: "QA moderation restore idempotent replay",
+          });
+          assert.equal(r2Err, null);
+          assert.equal(r2, "published", "Repeated restore must remain idempotent and never archive published listing");
+        });
+      }
     }
 
     await check("9. Preserved Phase 6 QA orders & executed refunds remain intact", async () => {
