@@ -10,23 +10,22 @@
 --   active buyer stock holds.
 --
 -- Design guarantees:
---   1. SECURITY INVOKER trigger function checks `current_user IN ('authenticated', 'anon')`.
---      - Direct PostgREST INSERT/UPDATE/DELETE by `authenticated`/`anon` -> guarded.
---      - Authorized SECURITY DEFINER RPCs owned by `postgres` (`create_cart_orders_atomic`,
+--   1. Structural inventory invariants enforced BEFORE the privileged-role check (ALL roles,
+--      including SECURITY DEFINER `update_listing_atomic`):
+--      - Forbids toggling `listings.has_variants` while `OLD.reserved_quantity > 0`.
+--      - Forbids changing a reserved variant's `listing_id`, `option_values`, or deactivating it.
+--      - Forbids deleting any `listings` or `listing_variants` row while `OLD.reserved_quantity > 0`.
+--   2. SECURITY INVOKER trigger function checks `current_user NOT IN ('authenticated', 'anon')`
+--      for `reserved_quantity` mutations:
+--      - Authorized SECURITY DEFINER reservation RPCs (`create_cart_orders_atomic`,
 --        `accept_offer_atomic`, `release_expired_offer_reservations`,
---        `release_expired_cart_orders`, `confirm_order_payment_atomic`) run with
---        `current_user = 'postgres'` -> NOT blocked even when invoked by authenticated users.
---      - `service_role` and `pg_cron` Jobs 1 & 2 -> NOT blocked.
---   2. Rejects unauthorized direct `reserved_quantity` mutations with SQLSTATE 42501:
---      - INSERT: forbids non-zero `reserved_quantity` (default 0 / explicit 0 allowed).
---      - UPDATE: forbids changing `reserved_quantity`, setting `quantity < OLD.reserved_quantity`,
---        toggling `listings.has_variants` while `OLD.reserved_quantity > 0`, or deactivating /
---        re-parenting a `listing_variants` row while `OLD.reserved_quantity > 0`.
---      - DELETE: forbids deleting a `listings` or `listing_variants` row while
---        `OLD.reserved_quantity > 0`.
+--        `release_expired_cart_orders`, `confirm_order_payment_atomic`), `service_role`,
+--        and `pg_cron` Jobs 1 & 2 -> `reserved_quantity` mutations ALLOWED.
+--      - Direct PostgREST INSERT/UPDATE by `authenticated`/`anon` -> `reserved_quantity`
+--        forging/modification and `quantity < OLD.reserved_quantity` BLOCKED with SQLSTATE 42501.
 --   3. Preserves legitimate seller listing creation (`reserved_quantity = 0`), edits
 --      (title, description, price, status, images, safe `quantity >= reserved_quantity`),
---      and `update_listing_atomic`.
+--      and safe `update_listing_atomic` updates.
 -- =============================================================================
 
 BEGIN;
@@ -38,15 +37,47 @@ SECURITY INVOKER
 SET search_path = public, pg_temp
 AS $$
 BEGIN
-  -- Only enforce against direct client roles (`authenticated` / `anon`).
-  -- Authorized SECURITY DEFINER RPCs execute as `postgres`; cron & server jobs as `postgres`/`service_role`.
-  IF current_user NOT IN ('authenticated', 'anon') THEN
-    IF TG_OP = 'DELETE' THEN
-      RETURN OLD;
+  -- 1. Structural inventory invariants enforced for ALL roles (including SECURITY DEFINER
+  --    `update_listing_atomic`), preventing replacement/deletion/mutation of reserved stock.
+  IF TG_OP = 'DELETE' THEN
+    IF COALESCE(OLD.reserved_quantity, 0) > 0 THEN
+      RAISE EXCEPTION 'Cannot delete inventory with active reservations'
+        USING ERRCODE = '42501';
     END IF;
+    RETURN OLD;
+  END IF;
+
+  IF TG_OP = 'UPDATE' AND COALESCE(OLD.reserved_quantity, 0) > 0 THEN
+    IF TG_TABLE_NAME = 'listings' THEN
+      IF NEW.has_variants IS DISTINCT FROM OLD.has_variants THEN
+        RAISE EXCEPTION 'Cannot change variant mode while reservations are active'
+          USING ERRCODE = '42501';
+      END IF;
+    ELSIF TG_TABLE_NAME = 'listing_variants' THEN
+      IF NEW.listing_id IS DISTINCT FROM OLD.listing_id THEN
+        RAISE EXCEPTION 'Cannot reassign variant while reservations are active'
+          USING ERRCODE = '42501';
+      END IF;
+
+      IF NEW.option_values IS DISTINCT FROM OLD.option_values THEN
+        RAISE EXCEPTION 'Cannot change variant options while reservations are active'
+          USING ERRCODE = '42501';
+      END IF;
+
+      IF NEW.active IS NOT TRUE THEN
+        RAISE EXCEPTION 'Cannot deactivate variant while reservations are active'
+          USING ERRCODE = '42501';
+      END IF;
+    END IF;
+  END IF;
+
+  -- 2. Allow `reserved_quantity` mutations for authorized SECURITY DEFINER reservation RPCs,
+  --    `service_role`, and `pg_cron` (`current_user` is `postgres` / `service_role`).
+  IF current_user NOT IN ('authenticated', 'anon') THEN
     RETURN NEW;
   END IF;
 
+  -- 3. Block direct `authenticated` / `anon` reservation forging or stock tampering.
   IF TG_OP = 'INSERT' THEN
     IF COALESCE(NEW.reserved_quantity, 0) <> 0 THEN
       RAISE EXCEPTION 'Direct reservation values on INSERT are forbidden'
@@ -66,34 +97,12 @@ BEGIN
         USING ERRCODE = '42501';
     END IF;
 
-    IF TG_TABLE_NAME = 'listings' THEN
-      IF COALESCE(OLD.reserved_quantity, 0) > 0
-         AND NEW.has_variants IS DISTINCT FROM OLD.has_variants THEN
-        RAISE EXCEPTION 'Cannot change variant mode while reservations are active'
-          USING ERRCODE = '42501';
-      END IF;
-    ELSIF TG_TABLE_NAME = 'listing_variants' THEN
-      IF NEW.listing_id IS DISTINCT FROM OLD.listing_id THEN
-        RAISE EXCEPTION 'Cannot reassign variant to another listing'
-          USING ERRCODE = '42501';
-      END IF;
-
-      IF COALESCE(OLD.reserved_quantity, 0) > 0
-         AND NEW.active IS NOT TRUE THEN
-        RAISE EXCEPTION 'Cannot deactivate variant while reservations are active'
-          USING ERRCODE = '42501';
-      END IF;
+    IF TG_TABLE_NAME = 'listing_variants' AND NEW.listing_id IS DISTINCT FROM OLD.listing_id THEN
+      RAISE EXCEPTION 'Cannot reassign variant to another listing'
+        USING ERRCODE = '42501';
     END IF;
 
     RETURN NEW;
-  END IF;
-
-  IF TG_OP = 'DELETE' THEN
-    IF COALESCE(OLD.reserved_quantity, 0) > 0 THEN
-      RAISE EXCEPTION 'Cannot delete inventory with active reservations'
-        USING ERRCODE = '42501';
-    END IF;
-    RETURN OLD;
   END IF;
 
   RETURN NEW;

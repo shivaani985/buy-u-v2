@@ -684,7 +684,7 @@ test("Concurrency model: simultaneous identical submissions, mid-checkout cart a
   assert.equal(state.listings.get("L2").reserved, 0);
 });
 
-test("Phase 6B.2 reserved-stock guard SQL protects listings and listing_variants with SECURITY INVOKER + current_user + 42501", () => {
+test("Phase 6B.2 reserved-stock guard SQL protects listings and listing_variants for ALL roles on structural invariants and blocks direct client reserved_quantity tampering", () => {
   const guardSql = fs.readFileSync(
     path.resolve(process.cwd(), "docs/sql/phase-6b2-reserved-stock-guard.sql"),
     "utf8"
@@ -693,21 +693,95 @@ test("Phase 6B.2 reserved-stock guard SQL protects listings and listing_variants
   // SECURITY INVOKER + effective-role check (never auth.role(), which breaks SECURITY DEFINER RPCs)
   assert.ok(guardSql.includes("SECURITY INVOKER"));
   assert.ok(guardSql.includes("SET search_path = public, pg_temp"));
-  assert.ok(guardSql.includes("current_user NOT IN ('authenticated', 'anon')"));
+  const privReturnIdx = guardSql.indexOf("IF current_user NOT IN ('authenticated', 'anon') THEN");
+  assert.ok(privReturnIdx > 0, "Missing privileged-role early return");
   assert.equal(guardSql.includes("auth.role()"), false);
 
-  // Rejects forged INSERT, direct reserved_quantity UPDATE, quantity < reserved, active/mode tampering, and DELETE with 42501
-  assert.ok(guardSql.includes("COALESCE(NEW.reserved_quantity, 0) <> 0"));
-  assert.ok(guardSql.includes("NEW.reserved_quantity IS DISTINCT FROM OLD.reserved_quantity"));
-  assert.ok(guardSql.includes("NEW.quantity < COALESCE(OLD.reserved_quantity, 0)"));
-  assert.ok(guardSql.includes("NEW.has_variants IS DISTINCT FROM OLD.has_variants"));
-  assert.ok(guardSql.includes("NEW.active IS NOT TRUE"));
-  assert.ok(guardSql.includes("TG_OP = 'DELETE'"));
-  assert.ok((guardSql.match(/ERRCODE = '42501'/g) || []).length >= 6);
+  // Structural invariants MUST appear BEFORE the privileged-role early return (guards SECURITY DEFINER update_listing_atomic too)
+  const deleteIdx = guardSql.indexOf("IF TG_OP = 'DELETE' THEN");
+  const hasVariantsIdx = guardSql.indexOf("NEW.has_variants IS DISTINCT FROM OLD.has_variants");
+  const listingIdIdx = guardSql.indexOf("NEW.listing_id IS DISTINCT FROM OLD.listing_id");
+  const optionValuesIdx = guardSql.indexOf("NEW.option_values IS DISTINCT FROM OLD.option_values");
+  const activeIdx = guardSql.indexOf("NEW.active IS NOT TRUE");
+  for (const [label, idx] of [
+    ["DELETE active reservation guard", deleteIdx],
+    ["has_variants guard", hasVariantsIdx],
+    ["variant listing_id guard", listingIdIdx],
+    ["variant option_values guard", optionValuesIdx],
+    ["variant active guard", activeIdx],
+  ]) {
+    assert.ok(idx > 0 && idx < privReturnIdx, `${label} must execute BEFORE privileged-role early return`);
+  }
+
+  // Direct client reservation tampering blocked AFTER privileged-role early return
+  const insertIdx = guardSql.indexOf("COALESCE(NEW.reserved_quantity, 0) <> 0");
+  const reservedUpdateIdx = guardSql.indexOf("NEW.reserved_quantity IS DISTINCT FROM OLD.reserved_quantity");
+  const qtyBelowReservedIdx = guardSql.indexOf("NEW.quantity < COALESCE(OLD.reserved_quantity, 0)");
+  assert.ok(insertIdx > privReturnIdx);
+  assert.ok(reservedUpdateIdx > privReturnIdx);
+  assert.ok(qtyBelowReservedIdx > privReturnIdx);
+  assert.ok((guardSql.match(/ERRCODE = '42501'/g) || []).length >= 8);
 
   // Triggers attached to BOTH listings and listing_variants for INSERT/UPDATE/DELETE + rollback included
   assert.ok(guardSql.includes("BEFORE INSERT OR UPDATE OR DELETE ON public.listings"));
   assert.ok(guardSql.includes("BEFORE INSERT OR UPDATE OR DELETE ON public.listing_variants"));
   assert.ok(guardSql.includes("DROP TRIGGER IF EXISTS trg_guard_listings_reserved_stock"));
   assert.ok(guardSql.includes("DROP TRIGGER IF EXISTS trg_guard_listing_variants_reserved_stock"));
+
+  // Behavior simulation: legitimate seller edits vs update_listing_atomic (postgres) bypass vs reservation RPCs
+  function simulateGuard({ role, op, table, oldRow, newRow }) {
+    const oldRes = oldRow?.reserved_quantity ?? 0;
+    if (op === "DELETE") {
+      if (oldRes > 0) throw new Error("42501:DELETE_RESERVED");
+      return oldRow;
+    }
+    if (op === "UPDATE" && oldRes > 0) {
+      if (table === "listings" && newRow.has_variants !== oldRow.has_variants) {
+        throw new Error("42501:HAS_VARIANTS");
+      }
+      if (table === "listing_variants") {
+        if (newRow.listing_id !== oldRow.listing_id) throw new Error("42501:LISTING_ID");
+        if (JSON.stringify(newRow.option_values) !== JSON.stringify(oldRow.option_values)) {
+          throw new Error("42501:OPTION_VALUES");
+        }
+        if (newRow.active !== true) throw new Error("42501:DEACTIVATE");
+      }
+    }
+    if (role !== "authenticated" && role !== "anon") return newRow;
+    if (op === "INSERT" && (newRow.reserved_quantity ?? 0) !== 0) throw new Error("42501:INSERT_RESERVED");
+    if (op === "UPDATE") {
+      if (newRow.reserved_quantity !== oldRow.reserved_quantity) throw new Error("42501:UPDATE_RESERVED");
+      if (newRow.quantity != null && newRow.quantity < oldRes) throw new Error("42501:QTY_BELOW_RESERVED");
+    }
+    return newRow;
+  }
+
+  const reservedListing = { id: "L1", has_variants: true, quantity: 5, reserved_quantity: 2, price_sen: 1500 };
+  const reservedVariant = { id: "V1", listing_id: "L1", option_values: { Size: "M" }, active: true, quantity: 3, reserved_quantity: 2 };
+
+  // Legitimate seller edits pass (price/safe quantity)
+  assert.doesNotThrow(() =>
+    simulateGuard({ role: "authenticated", op: "UPDATE", table: "listings", oldRow: reservedListing, newRow: { ...reservedListing, price_sen: 1800, quantity: 2 } })
+  );
+  // Authorized reservation RPC (postgres) mutating reserved_quantity passes
+  assert.doesNotThrow(() =>
+    simulateGuard({ role: "postgres", op: "UPDATE", table: "listing_variants", oldRow: reservedVariant, newRow: { ...reservedVariant, reserved_quantity: 1, quantity: 2 } })
+  );
+  // SECURITY DEFINER update_listing_atomic (postgres) bypasses on reserved inventory are ALL blocked
+  assert.throws(() =>
+    simulateGuard({ role: "postgres", op: "UPDATE", table: "listings", oldRow: reservedListing, newRow: { ...reservedListing, has_variants: false } }),
+    /42501:HAS_VARIANTS/
+  );
+  assert.throws(() =>
+    simulateGuard({ role: "postgres", op: "UPDATE", table: "listing_variants", oldRow: reservedVariant, newRow: { ...reservedVariant, option_values: { Size: "XL" } } }),
+    /42501:OPTION_VALUES/
+  );
+  assert.throws(() =>
+    simulateGuard({ role: "postgres", op: "UPDATE", table: "listing_variants", oldRow: reservedVariant, newRow: { ...reservedVariant, active: false } }),
+    /42501:DEACTIVATE/
+  );
+  assert.throws(() =>
+    simulateGuard({ role: "postgres", op: "DELETE", table: "listing_variants", oldRow: reservedVariant }),
+    /42501:DELETE_RESERVED/
+  );
 });
