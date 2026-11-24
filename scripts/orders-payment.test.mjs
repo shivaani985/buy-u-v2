@@ -1144,8 +1144,34 @@ test("Phase 6B.4 unified checkout pricing, SQL guards, cross-table tx_ref unique
   assert.ok(sql.includes("RAISE EXCEPTION 'UNIFIED_CHECKOUT_USE_SESSION_RPC'"));
   assert.ok(sql.includes("AND checkout_session_id IS NULL"));
 
-  // 7. Non-destructive rollback documented
+  // 7. Non-destructive rollback documented (preserves unified expiry & reconciliation)
   assert.ok(sql.includes("SAFE NON-DESTRUCTIVE ROLLBACK STRATEGY"));
+  assert.ok(sql.includes("DO NOT revert `release_expired_cart_orders()`"));
+
+  // 8. Six final SQL safety review fixes:
+  // 8a. RLS enabled on payment_transaction_registry
+  assert.ok(sql.includes("ALTER TABLE public.payment_transaction_registry ENABLE ROW LEVEL SECURITY;"));
+  // 8b. No private attempt_token embedded in buyer-readable bill_code placeholders
+  assert.equal(sql.includes("v_token::text"), false);
+  assert.ok(sql.includes("v_placeholder := 'creating:' || gen_random_uuid()::text;"));
+  // 8c. Reject NULL/blank bill_code in BOTH confirm RPCs
+  assert.ok(confirmUnifiedFn.includes("RAISE EXCEPTION 'MISSING_BILL_CODE'"));
+  assert.ok(confirmLegacyFn.includes("RAISE EXCEPTION 'MISSING_BILL_CODE'"));
+  // 8d. Wall-clock clock_timestamp() used for post-lock AND post-inventory-lock deadline rechecks
+  assert.ok((confirmUnifiedFn.match(/clock_timestamp\(\)/g) || []).length >= 2);
+  assert.ok((confirmLegacyFn.match(/clock_timestamp\(\)/g) || []).length >= 2);
+  // 8e. Zero unqualified `WHERE id =` or `SELECT status INTO` inside any RETURNS TABLE function (prevents 42702)
+  for (const fnName of [
+    "create_cart_checkout_atomic",
+    "create_offer_checkout_atomic",
+    "claim_checkout_bill_slot",
+    "claim_order_bill_slot",
+  ]) {
+    const fnBody = extractSqlFunction(sql, fnName);
+    assert.equal(/\bWHERE\s+id\s*=/i.test(fnBody), false, `${fnName} has unqualified WHERE id = (42702 risk)`);
+    assert.equal(/\bSELECT\s+status\s+INTO\b/i.test(fnBody), false, `${fnName} has unqualified SELECT status INTO (42702 risk)`);
+    assert.equal(/\bWHERE\s+order_id\s*=/i.test(fnBody), false, `${fnName} has unqualified WHERE order_id = (42702 risk)`);
+  }
 
   // UI invariant: CheckoutClient has NO separate "Pay Seller Bill" button and shows RM1 once
   const checkoutUi = fs.readFileSync(

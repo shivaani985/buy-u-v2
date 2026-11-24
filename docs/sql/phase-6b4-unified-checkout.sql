@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS public.payment_transaction_registry (
   created_at      timestamptz NOT NULL DEFAULT now()
 );
 
+ALTER TABLE public.payment_transaction_registry ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON public.payment_transaction_registry FROM PUBLIC, anon, authenticated;
 GRANT ALL ON public.payment_transaction_registry TO service_role;
 
@@ -250,8 +251,8 @@ BEGIN
   ORDER BY lv.id
   FOR UPDATE;
 
-  -- Refresh clock after lock acquisition
-  v_now := now();
+  -- Refresh wall-clock timestamp after lock acquisition
+  v_now := clock_timestamp();
 
   -- Validate every snapshotted cart item, reserve stock, and accumulate combined subtotal
   FOR v_ci IN
@@ -264,9 +265,9 @@ BEGIN
       RAISE EXCEPTION 'INVALID_QUANTITY';
     END IF;
 
-    SELECT * INTO v_listing
-    FROM public.listings
-    WHERE id = v_ci.listing_id;
+    SELECT l.* INTO v_listing
+    FROM public.listings l
+    WHERE l.id = v_ci.listing_id;
 
     IF NOT FOUND OR v_listing.status <> 'published' THEN
       RAISE EXCEPTION 'LISTING_UNAVAILABLE';
@@ -284,9 +285,9 @@ BEGIN
       RAISE EXCEPTION 'SELF_PURCHASE_FORBIDDEN';
     END IF;
 
-    SELECT status INTO v_seller_status
-    FROM public.profiles
-    WHERE id = v_listing.seller_id;
+    SELECT p.status INTO v_seller_status
+    FROM public.profiles p
+    WHERE p.id = v_listing.seller_id;
 
     IF COALESCE(lower(v_seller_status), '') <> 'active' THEN
       RAISE EXCEPTION 'SELLER_NOT_ACTIVE';
@@ -305,10 +306,10 @@ BEGIN
         RAISE EXCEPTION 'VARIANT_REQUIRED';
       END IF;
 
-      SELECT * INTO v_variant
-      FROM public.listing_variants
-      WHERE id = v_ci.variant_id
-        AND listing_id = v_listing.id;
+      SELECT lv.* INTO v_variant
+      FROM public.listing_variants lv
+      WHERE lv.id = v_ci.variant_id
+        AND lv.listing_id = v_listing.id;
 
       IF NOT FOUND OR v_variant.active IS NOT TRUE THEN
         RAISE EXCEPTION 'VARIANT_UNAVAILABLE';
@@ -328,15 +329,15 @@ BEGIN
 
     v_combined_subtotal := v_combined_subtotal + (v_unit_sen * v_ci.quantity);
 
-    UPDATE public.listings
-    SET reserved_quantity = reserved_quantity + v_ci.quantity,
+    UPDATE public.listings l
+    SET reserved_quantity = l.reserved_quantity + v_ci.quantity,
         updated_at = v_now
-    WHERE id = v_listing.id;
+    WHERE l.id = v_listing.id;
 
     IF COALESCE(v_listing.has_variants, false) THEN
-      UPDATE public.listing_variants
-      SET reserved_quantity = reserved_quantity + v_ci.quantity
-      WHERE id = v_variant.id;
+      UPDATE public.listing_variants lv
+      SET reserved_quantity = lv.reserved_quantity + v_ci.quantity
+      WHERE lv.id = v_variant.id;
     END IF;
   END LOOP;
 
@@ -438,9 +439,9 @@ BEGIN
   END LOOP;
 
   -- Delete ONLY snapshotted cart items
-  DELETE FROM public.cart_items
-  WHERE user_id = v_uid
-    AND id = ANY(v_cart_item_ids);
+  DELETE FROM public.cart_items ci
+  WHERE ci.user_id = v_uid
+    AND ci.id = ANY(v_cart_item_ids);
 
   RETURN QUERY SELECT
     v_session.id, v_session.checkout_code, v_session.source,
@@ -494,17 +495,17 @@ BEGIN
   END IF;
 
   -- Lock order: offers -> checkout_sessions -> orders -> listings
-  SELECT * INTO v_offer
-  FROM public.offers
-  WHERE id = p_offer_id
+  SELECT o.* INTO v_offer
+  FROM public.offers o
+  WHERE o.id = p_offer_id
   FOR UPDATE;
 
   IF NOT FOUND THEN
     RAISE EXCEPTION 'OFFER_NOT_FOUND';
   END IF;
 
-  -- Post-lock clock for authoritative deadline revalidation
-  v_now := now();
+  -- Post-lock wall-clock timestamp for authoritative deadline revalidation
+  v_now := clock_timestamp();
 
   IF v_offer.buyer_id <> v_uid THEN
     RAISE EXCEPTION 'FORBIDDEN_BUYER_ONLY';
@@ -516,13 +517,15 @@ BEGIN
 
   -- Idempotent return if already linked to a live pending_payment checkout_session
   IF v_offer.order_id IS NOT NULL THEN
-    SELECT * INTO v_existing_order FROM public.orders WHERE id = v_offer.order_id;
+    SELECT ord.* INTO v_existing_order
+    FROM public.orders ord
+    WHERE ord.id = v_offer.order_id;
     IF FOUND AND v_existing_order.checkout_session_id IS NOT NULL THEN
-      SELECT * INTO v_session
+      SELECT cs.* INTO v_session
       FROM public.checkout_sessions cs
       WHERE cs.id = v_existing_order.checkout_session_id
       FOR UPDATE;
-      v_now := now();
+      v_now := clock_timestamp();
       IF FOUND
          AND v_session.status = 'pending_payment'
          AND v_now < v_session.payment_deadline THEN
@@ -547,21 +550,21 @@ BEGIN
     RAISE EXCEPTION 'MEMBER_BLOCKED';
   END IF;
 
-  SELECT status INTO v_seller_status
-  FROM public.profiles
-  WHERE id = v_offer.seller_id;
+  SELECT p.status INTO v_seller_status
+  FROM public.profiles p
+  WHERE p.id = v_offer.seller_id;
 
   IF COALESCE(lower(v_seller_status), '') <> 'active' THEN
     RAISE EXCEPTION 'SELLER_NOT_ACTIVE';
   END IF;
 
-  SELECT * INTO v_listing
-  FROM public.listings
-  WHERE id = v_offer.listing_id
+  SELECT l.* INTO v_listing
+  FROM public.listings l
+  WHERE l.id = v_offer.listing_id
   FOR UPDATE;
 
-  -- Revalidate offer hold deadline after acquiring listing lock
-  v_now := now();
+  -- Revalidate offer hold deadline using wall clock after acquiring listing lock
+  v_now := clock_timestamp();
   IF v_now >= v_offer.reservation_expires_at THEN
     RAISE EXCEPTION 'OFFER_HOLD_EXPIRED';
   END IF;
@@ -583,9 +586,9 @@ BEGIN
     RAISE EXCEPTION 'RESERVATION_INTEGRITY_ERROR';
   END IF;
 
-  SELECT name INTO v_area_name
-  FROM public.collection_areas
-  WHERE id = v_listing.collection_area_id;
+  SELECT ca.name INTO v_area_name
+  FROM public.collection_areas ca
+  WHERE ca.id = v_listing.collection_area_id;
 
   v_subtotal := v_offer.offer_price_sen;
   v_commission := ROUND(v_subtotal * 0.02)::integer;
@@ -626,9 +629,9 @@ BEGIN
     v_subtotal, 1, COALESCE(v_listing.image_paths[1], ''), false, 'ready', ''
   );
 
-  UPDATE public.offers
+  UPDATE public.offers o
   SET order_id = v_order.id
-  WHERE id = v_offer.id;
+  WHERE o.id = v_offer.id;
 
   RETURN QUERY SELECT
     v_session.id, v_session.checkout_code, v_session.source,
@@ -659,9 +662,9 @@ DECLARE
   v_placeholder text;
   v_has_valid_bill boolean := false;
 BEGIN
-  SELECT * INTO v_session
-  FROM public.checkout_sessions
-  WHERE id = p_checkout_session_id
+  SELECT cs.* INTO v_session
+  FROM public.checkout_sessions cs
+  WHERE cs.id = p_checkout_session_id
   FOR UPDATE;
 
   IF NOT FOUND THEN
@@ -669,8 +672,8 @@ BEGIN
     RETURN;
   END IF;
 
-  -- Post-lock deadline revalidation
-  v_now := now();
+  -- Post-lock wall-clock deadline revalidation
+  v_now := clock_timestamp();
 
   IF v_session.paid_at IS NOT NULL OR v_session.status = 'paid' THEN
     RETURN QUERY SELECT 'already_paid'::text, v_session.bill_code, v_session.bill_url, NULL::uuid;
@@ -697,10 +700,10 @@ BEGIN
   -- Reuse existing valid ToyyibPay bill (including after failed FPX bank attempt)
   IF v_has_valid_bill AND v_session.payment_status IN ('pending', 'failed') THEN
     IF v_session.payment_status = 'failed' THEN
-      UPDATE public.checkout_sessions
+      UPDATE public.checkout_sessions cs
       SET payment_status = 'pending',
           updated_at = v_now
-      WHERE id = v_session.id;
+      WHERE cs.id = v_session.id;
     END IF;
     RETURN QUERY SELECT 'reuse_bill'::text, v_session.bill_code, v_session.bill_url, NULL::uuid;
     RETURN;
@@ -713,10 +716,10 @@ BEGIN
       RETURN;
     END IF;
 
-    UPDATE public.checkout_sessions
+    UPDATE public.checkout_sessions cs
     SET bill_creation_state = 'ambiguous',
         updated_at = v_now
-    WHERE id = v_session.id;
+    WHERE cs.id = v_session.id;
 
     RETURN QUERY SELECT 'ambiguous_hold'::text, NULL::text, NULL::text, NULL::uuid;
     RETURN;
@@ -730,9 +733,10 @@ BEGIN
   IF v_session.bill_creation_state IN ('not_started', 'failed')
      AND (v_session.bill_code IS NULL OR left(v_session.bill_code, 9) = 'creating:') THEN
     v_token := gen_random_uuid();
-    v_placeholder := 'creating:' || v_session.id::text || ':' || v_token::text;
+    -- Independent random placeholder: NEVER embed private attempt_token in buyer-readable bill_code
+    v_placeholder := 'creating:' || gen_random_uuid()::text;
 
-    UPDATE public.checkout_sessions
+    UPDATE public.checkout_sessions cs
     SET bill_code = v_placeholder,
         bill_url = NULL,
         payment_status = 'pending',
@@ -740,7 +744,7 @@ BEGIN
         bill_creation_started_at = v_now,
         bill_creation_attempt_token = v_token,
         updated_at = v_now
-    WHERE id = v_session.id;
+    WHERE cs.id = v_session.id;
 
     RETURN QUERY SELECT 'create_new'::text, v_placeholder, NULL::text, v_token;
     RETURN;
@@ -780,7 +784,7 @@ BEGIN
     RETURN 'missing_slot';
   END IF;
 
-  v_now := now();
+  v_now := clock_timestamp();
 
   IF v_session.status = 'paid'
      OR v_session.payment_status IN ('paid', 'late_payment_review') THEN
@@ -880,6 +884,10 @@ DECLARE
   v_child_subtotal_sum integer := 0;
   v_items_total_sum integer := 0;
 BEGIN
+  IF p_bill_code IS NULL OR length(trim(p_bill_code)) = 0 THEN
+    RAISE EXCEPTION 'MISSING_BILL_CODE';
+  END IF;
+
   IF p_transaction_ref IS NULL OR length(trim(p_transaction_ref)) = 0 THEN
     RAISE EXCEPTION 'MISSING_TRANSACTION_REF';
   END IF;
@@ -918,8 +926,8 @@ BEGIN
     RAISE EXCEPTION 'CHECKOUT_NOT_FOUND';
   END IF;
 
-  -- Refresh clock AFTER acquiring all parent locks
-  v_now := now();
+  -- Refresh wall clock AFTER acquiring all parent locks
+  v_now := clock_timestamp();
 
   IF v_source = 'offer' THEN
     IF v_offer.reservation_released_at IS NOT NULL
@@ -1054,6 +1062,21 @@ BEGIN
   )
   ORDER BY lv.id
   FOR UPDATE;
+
+  -- Final post-inventory-lock wall-clock deadline recheck BEFORE deducting stock
+  v_now := clock_timestamp();
+  IF v_now >= v_session.payment_deadline
+     OR (v_source = 'offer' AND v_offer.reservation_expires_at IS NOT NULL AND v_now >= v_offer.reservation_expires_at) THEN
+    UPDATE public.checkout_sessions
+    SET payment_status = 'late_payment_review',
+        transaction_ref = p_transaction_ref,
+        verified_at = v_now,
+        raw_callback = p_raw_callback,
+        updated_at = v_now
+    WHERE id = v_session.id;
+
+    RETURN 'late_payment_reconciliation';
+  END IF;
 
   -- Verify & deduct stock across EVERY child order (all-or-nothing inside this single TX)
   FOR v_item IN
@@ -1203,9 +1226,9 @@ DECLARE
   v_placeholder text;
   v_has_valid_bill boolean := false;
 BEGIN
-  SELECT * INTO v_order
-  FROM public.orders
-  WHERE id = p_order_id
+  SELECT o.* INTO v_order
+  FROM public.orders o
+  WHERE o.id = p_order_id
   FOR UPDATE;
 
   IF NOT FOUND THEN
@@ -1218,7 +1241,7 @@ BEGIN
     RETURN;
   END IF;
 
-  v_now := now();
+  v_now := clock_timestamp();
 
   IF v_order.paid_at IS NOT NULL
      OR v_order.status IN ('paid', 'ready_for_pickup', 'handed_over', 'completed') THEN
@@ -1232,9 +1255,9 @@ BEGIN
     RETURN;
   END IF;
 
-  SELECT * INTO v_payment
-  FROM public.payments
-  WHERE order_id = v_order.id
+  SELECT p.* INTO v_payment
+  FROM public.payments p
+  WHERE p.order_id = v_order.id
   FOR UPDATE;
 
   IF FOUND THEN
@@ -1252,10 +1275,10 @@ BEGIN
 
     IF v_has_valid_bill AND v_payment.status IN ('pending', 'failed') THEN
       IF v_payment.status = 'failed' THEN
-        UPDATE public.payments
+        UPDATE public.payments p
         SET status = 'pending',
             updated_at = v_now
-        WHERE id = v_payment.id;
+        WHERE p.id = v_payment.id;
       END IF;
       RETURN QUERY SELECT 'reuse_bill'::text, v_payment.bill_code, v_payment.bill_url, NULL::uuid;
       RETURN;
@@ -1268,10 +1291,10 @@ BEGIN
         RETURN;
       END IF;
 
-      UPDATE public.payments
+      UPDATE public.payments p
       SET bill_creation_state = 'ambiguous',
           updated_at = v_now
-      WHERE id = v_payment.id;
+      WHERE p.id = v_payment.id;
 
       RETURN QUERY SELECT 'ambiguous_hold'::text, NULL::text, NULL::text, NULL::uuid;
       RETURN;
@@ -1285,9 +1308,10 @@ BEGIN
     IF v_payment.bill_creation_state = 'failed'
        AND (v_payment.bill_code IS NULL OR left(v_payment.bill_code, 9) = 'creating:') THEN
       v_token := gen_random_uuid();
-      v_placeholder := 'creating:' || v_order.id::text || ':' || v_token::text;
+      -- Independent random placeholder: NEVER embed private attempt_token in buyer-readable bill_code
+      v_placeholder := 'creating:' || gen_random_uuid()::text;
 
-      UPDATE public.payments
+      UPDATE public.payments p
       SET bill_code = v_placeholder,
           bill_url = NULL,
           amount_sen = v_order.total_paid_sen,
@@ -1296,7 +1320,7 @@ BEGIN
           bill_creation_started_at = v_now,
           bill_creation_attempt_token = v_token,
           updated_at = v_now
-      WHERE id = v_payment.id;
+      WHERE p.id = v_payment.id;
 
       RETURN QUERY SELECT 'create_new'::text, v_placeholder, NULL::text, v_token;
       RETURN;
@@ -1307,7 +1331,7 @@ BEGIN
   END IF;
 
   v_token := gen_random_uuid();
-  v_placeholder := 'creating:' || v_order.id::text || ':' || v_token::text;
+  v_placeholder := 'creating:' || gen_random_uuid()::text;
 
   INSERT INTO public.payments (
     order_id, provider, bill_code, bill_url, amount_sen,
@@ -1404,6 +1428,10 @@ DECLARE
   v_pin text;
   v_offer_released boolean := false;
 BEGIN
+  IF p_bill_code IS NULL OR length(trim(p_bill_code)) = 0 THEN
+    RAISE EXCEPTION 'MISSING_BILL_CODE';
+  END IF;
+
   IF p_transaction_ref IS NULL OR length(trim(p_transaction_ref)) = 0 THEN
     RAISE EXCEPTION 'MISSING_TRANSACTION_REF';
   END IF;
@@ -1454,7 +1482,7 @@ BEGIN
     RAISE EXCEPTION 'PAYMENT_BILL_NOT_FOUND';
   END IF;
 
-  v_now := now();
+  v_now := clock_timestamp();
 
   IF v_source = 'offer' THEN
     IF v_offer.reservation_released_at IS NOT NULL
@@ -1530,6 +1558,21 @@ BEGIN
   )
   ORDER BY lv.id
   FOR UPDATE;
+
+  -- Final post-inventory-lock wall-clock deadline recheck BEFORE deducting stock
+  v_now := clock_timestamp();
+  IF (v_order.payment_deadline IS NOT NULL AND v_now >= v_order.payment_deadline)
+     OR (v_source = 'offer' AND v_offer.reservation_expires_at IS NOT NULL AND v_now >= v_offer.reservation_expires_at) THEN
+    UPDATE public.payments
+    SET status = 'late_payment_review',
+        transaction_ref = p_transaction_ref,
+        verified_at = v_now,
+        raw_callback = p_raw_callback,
+        updated_at = v_now
+    WHERE id = v_payment.id;
+
+    RETURN 'late_payment_reconciliation';
+  END IF;
 
   FOR v_item IN
     SELECT listing_id, variant_id, quantity
@@ -1934,19 +1977,23 @@ GRANT EXECUTE ON FUNCTION public.release_expired_offer_reservations() TO service
 COMMIT;
 
 -- =============================================================================
--- SAFE NON-DESTRUCTIVE ROLLBACK STRATEGY (preserves ALL payment history):
---   Step 1: Re-enable legacy authenticated checkout RPCs & disable unified creation:
+-- SAFE NON-DESTRUCTIVE ROLLBACK STRATEGY (preserves ALL payment history AND
+-- keeps unified expiry & reconciliation active while unified records exist):
+--   Step 1: Stop NEW unified checkouts and re-enable legacy authenticated creation:
 --     BEGIN;
 --     REVOKE ALL ON FUNCTION public.create_cart_checkout_atomic(text) FROM authenticated;
 --     REVOKE ALL ON FUNCTION public.create_offer_checkout_atomic(uuid, text) FROM authenticated;
 --     GRANT EXECUTE ON FUNCTION public.create_cart_orders_atomic(text) TO authenticated;
 --     GRANT EXECUTE ON FUNCTION public.create_offer_order_atomic(uuid, text) TO authenticated;
 --     COMMIT;
---   Step 2: Restore prior function bodies from git commits:
---     - `docs/sql/phase-6a-order-payment-foundation.sql` (`confirm_order_payment_atomic`, `release_expired_cart_orders`)
---     - `docs/sql/phase-6b3-bill-lifecycle-hardening.sql` (`claim_order_bill_slot`, `mark_order_payment_failed_atomic`)
---     - `docs/sql/phase-5b-atomic-bargaining.sql` (`release_expired_offer_reservations`)
---   Step 3: DO NOT drop `public.checkout_sessions`, `public.payment_transaction_registry`,
+--   Step 2: DO NOT revert `release_expired_cart_orders()`, `release_expired_offer_reservations()`,
+--           `confirm_checkout_payment_atomic()`, `mark_checkout_payment_failed_atomic()`,
+--           `claim_checkout_bill_slot()`, or `finalize_checkout_bill_slot()` while ANY
+--           `public.checkout_sessions` row remains in `status = 'pending_payment'` or
+--           `payment_status IN ('pending', 'ambiguous', 'late_payment_review')`.
+--           Keeping them active guarantees unified expiry, stock release, and late-payment
+--           reconciliation continue working seamlessly during rollback drain.
+--   Step 3: NEVER drop `public.checkout_sessions`, `public.payment_transaction_registry`,
 --           or `orders.checkout_session_id` if any unified checkout records exist — retain
 --           them read-only for audit & refund reconciliation.
 -- =============================================================================
