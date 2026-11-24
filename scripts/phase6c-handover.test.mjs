@@ -66,7 +66,7 @@ test("2. Fixed seller transaction labels & earnings ledger transitions (paid -> 
       completed_at: null,
       created_at: "2026-11-24T06:55:00Z",
     },
-    // Completed -> Available for Payout
+    // Completed (> 72h ago, past buyer protection reserve) -> Available for Payout
     {
       id: "ord-comp",
       order_code: "BU-2611-CP0001",
@@ -75,9 +75,9 @@ test("2. Fixed seller transaction labels & earnings ledger transitions (paid -> 
       seller_net_sen: 980,
       total_paid_sen: 1000,
       status: "completed",
-      paid_at: "2026-11-24T05:00:00Z",
-      completed_at: "2026-11-24T06:00:00Z",
-      created_at: "2026-11-24T04:55:00Z",
+      paid_at: "2026-11-20T05:00:00Z",
+      completed_at: "2026-11-20T06:00:00Z",
+      created_at: "2026-11-20T04:55:00Z",
     },
     // Disputed -> Frozen (must NOT enter Available for Payout)
     {

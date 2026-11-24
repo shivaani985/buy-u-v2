@@ -24,6 +24,19 @@ export interface BuyerOrderPaymentView {
   status: string;
 }
 
+export interface BuyerOrderRefundView {
+  id: string;
+  refundCode: string;
+  refundType: string;
+  refundAmountSen: number;
+  status: string;
+  refundRef: string | null;
+  returnRequired: boolean;
+  returnStatus: string;
+  returnInstructions: string | null;
+  completedAt: string | null;
+}
+
 export interface BuyerOrderView {
   id: string;
   orderCode: string;
@@ -45,6 +58,7 @@ export interface BuyerOrderView {
   pickupPin: string | null;
   latestPayment: BuyerOrderPaymentView | null;
   dispute: OrderDisputeSummaryView | null;
+  refund: BuyerOrderRefundView | null;
   items: BuyerOrderItemView[];
 }
 
@@ -144,7 +158,7 @@ export async function getBuyerOrdersData(
   const sellerIds = Array.from(new Set(orderRows.map((o) => o.seller_id)));
   const service = getServerServiceClient();
 
-  const [itemsRes, profilesRes, storefrontsRes, paymentsRes, pinsRes, sessionsRes, disputesByOrder] =
+  const [itemsRes, profilesRes, storefrontsRes, paymentsRes, pinsRes, sessionsRes, disputesByOrder, refundsRes] =
     await Promise.all([
       supabase
         .from("order_items")
@@ -181,7 +195,46 @@ export async function getBuyerOrdersData(
             .order("created_at", { ascending: false })
         : Promise.resolve({ data: [] }),
       getLatestDisputesByOrderIds(orderIds),
+      supabase
+        .from("order_refunds")
+        .select(
+          "id,order_id,refund_code,refund_type,refund_amount_sen,status,refund_ref,return_required,return_status,return_instructions,completed_at"
+        )
+        .in("order_id", orderIds)
+        .order("created_at", { ascending: false }),
     ]);
+
+  const refundByOrder = new Map<string, BuyerOrderRefundView>();
+  if (!refundsRes.error && refundsRes.data) {
+    for (const r of refundsRes.data as Array<{
+      id: string;
+      order_id: string;
+      refund_code: string;
+      refund_type: string;
+      refund_amount_sen: number;
+      status: string;
+      refund_ref: string | null;
+      return_required: boolean;
+      return_status: string;
+      return_instructions: string | null;
+      completed_at: string | null;
+    }>) {
+      if (!refundByOrder.has(r.order_id)) {
+        refundByOrder.set(r.order_id, {
+          id: r.id,
+          refundCode: r.refund_code,
+          refundType: r.refund_type,
+          refundAmountSen: r.refund_amount_sen,
+          status: r.status,
+          refundRef: r.refund_ref,
+          returnRequired: r.return_required,
+          returnStatus: r.return_status,
+          returnInstructions: r.return_instructions,
+          completedAt: r.completed_at,
+        });
+      }
+    }
+  }
 
   const pinByOrder = new Map<string, string>();
   for (const row of (pinsRes.data ?? []) as Array<{
@@ -267,6 +320,7 @@ export async function getBuyerOrdersData(
     pickupPin: pinByOrder.get(o.id) ?? null,
     latestPayment: latestPaymentByOrder.get(o.id) ?? null,
     dispute: disputesByOrder.get(o.id) ?? null,
+    refund: refundByOrder.get(o.id) ?? null,
     items: itemsByOrder.get(o.id) ?? [],
   }));
 

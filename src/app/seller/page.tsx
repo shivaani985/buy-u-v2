@@ -150,12 +150,20 @@ export default async function SellerHubPage({
         ? formatRm(fin.pendingSettlementSen)
         : "Not available yet",
       icon: Hourglass,
-      hint:
-        fin.available && fin.frozenDisputeSen > 0
-          ? `Frozen (Disputes): ${formatRm(fin.frozenDisputeSen)}`
-          : undefined,
+      hint: fin.available
+        ? [
+            fin.protectionReserveSen > 0
+              ? `72h Reserve: ${formatRm(fin.protectionReserveSen)}`
+              : null,
+            fin.frozenDisputeSen > 0
+              ? `Frozen (Disputes): ${formatRm(fin.frozenDisputeSen)}`
+              : null,
+          ]
+            .filter(Boolean)
+            .join(" · ") || undefined
+        : undefined,
       tooltip:
-        "Verified paid orders awaiting handover or buyer receipt confirmation. Disputed earnings are tracked separately as frozen.",
+        "Verified paid orders awaiting handover/confirmation. Completed orders enter a 72-hour Buyer Protection Reserve before becoming withdrawable.",
     },
     {
       label: "Available for Payout",

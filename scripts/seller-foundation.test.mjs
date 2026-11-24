@@ -250,9 +250,9 @@ test("computeSellerFinancials excludes unpaid orders, deducts commissions/refund
         seller_net_sen: 1470,
         total_paid_sen: 1600,
         status: "completed",
-        paid_at: "2026-11-22T10:00:00Z",
-        completed_at: "2026-11-22T11:00:00Z",
-        created_at: "2026-11-22T09:50:00Z",
+        paid_at: "2026-11-19T10:00:00Z",
+        completed_at: "2026-11-19T11:00:00Z",
+        created_at: "2026-11-19T09:50:00Z",
       },
       {
         id: "o2",

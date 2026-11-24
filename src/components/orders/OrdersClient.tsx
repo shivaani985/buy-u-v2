@@ -21,6 +21,7 @@ import {
   retryOrderSandboxBillAction,
 } from "@/app/checkout/actions";
 import { openOrderDisputeAction } from "@/app/disputes/actions";
+import { buyerReportReturnAction } from "@/app/financials/actions";
 import { startConversationAction } from "@/app/messages/actions";
 import { confirmOrderReceiptAction } from "@/app/orders/actions";
 import { DisputeDetailCard } from "@/components/disputes/DisputeDetailCard";
@@ -30,11 +31,16 @@ import {
 } from "@/components/disputes/DisputeEvidenceUploader";
 import { OrderTimeline } from "@/components/orders/OrderTimeline";
 import {
-  COMPLETED_ORDER_DISPUTE_WINDOW_DAYS,
+  COMPLETED_ORDER_DISPUTE_WINDOW_HOURS,
   DISPUTE_REASONS,
   evaluateBuyerDisputeEligibility,
   type DisputeReasonCode,
 } from "@/lib/disputes/validation";
+import {
+  formatMytDateTime,
+  getProtectionExpiresAt,
+  isWithinBuyerProtectionWindow,
+} from "@/lib/financials/policy";
 import { formatSenToRm, formatShortDate } from "@/lib/format";
 import type {
   BuyerOrderView,
@@ -757,6 +763,86 @@ export function OrdersClient({ pendingCheckouts, orders }: OrdersClientProps) {
               </div>
             ) : null}
 
+            {order.status === "completed" && order.completedAt ? (
+              <div className="border-t border-[#ECEAF3] bg-[#FAF9FC] px-5 py-2.5 text-[11.5px] text-[#4A4656]">
+                {isWithinBuyerProtectionWindow(order.completedAt, nowMs) ? (
+                  <span>
+                    <strong className="text-[#4E2A84]">
+                      3-Day (72h) Buyer Protection Active:
+                    </strong>{" "}
+                    Eligible to report a problem until{" "}
+                    <strong>
+                      {formatMytDateTime(
+                        getProtectionExpiresAt(order.completedAt)
+                      )}
+                    </strong>
+                    .
+                  </span>
+                ) : (
+                  <span className="text-[#6B6779]">
+                    3-day (72h) buyer protection window ended on{" "}
+                    {formatMytDateTime(
+                      getProtectionExpiresAt(order.completedAt)
+                    )}
+                    .
+                  </span>
+                )}
+              </div>
+            ) : null}
+
+            {order.refund ? (
+              <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[#DCD0F0] bg-[#F7F3FD] px-5 py-3 text-xs text-[#3E2468]">
+                <div>
+                  <p className="font-extrabold">
+                    {order.refund.refundType === "partial_refund"
+                      ? "Partially Refunded"
+                      : "Refund"}{" "}
+                    · {order.refund.refundCode} (
+                    {formatSenToRm(order.refund.refundAmountSen)})
+                  </p>
+                  <p className="mt-0.5 text-[11px]">
+                    Status: <strong>{order.refund.status.replace(/_/g, " ")}</strong>
+                    {order.refund.refundRef
+                      ? ` · Simulated Ref ${order.refund.refundRef} (FYP simulation — no real bank transfer)`
+                      : " · Pending simulated execution"}
+                  </p>
+                  {order.refund.returnRequired &&
+                  order.refund.returnInstructions ? (
+                    <p className="mt-1 text-[11px] text-[#4E2A84]">
+                      Return instructions: {order.refund.returnInstructions}
+                    </p>
+                  ) : null}
+                </div>
+                {order.refund.returnRequired &&
+                order.refund.returnStatus === "awaiting_return" ? (
+                  <button
+                    type="button"
+                    disabled={busyKey === `ret:${order.refund.id}`}
+                    onClick={async () => {
+                      const rid = order.refund!.id;
+                      setBusyKey(`ret:${rid}`);
+                      try {
+                        const res = await buyerReportReturnAction(rid);
+                        setFeedbackByKey((prev) => ({
+                          ...prev,
+                          [`ord:${order.id}`]: {
+                            type: res.ok ? "info" : "error",
+                            text: res.message,
+                          },
+                        }));
+                        if (res.ok) router.refresh();
+                      } finally {
+                        setBusyKey(null);
+                      }
+                    }}
+                    className="rounded-xl bg-[#4E2A84] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#3F216B] disabled:opacity-50"
+                  >
+                    Mark Item Returned
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+
             {order.dispute ? (
               <DisputeDetailCard dispute={order.dispute} />
             ) : null}
@@ -1016,8 +1102,13 @@ export function OrdersClient({ pendingCheckouts, orders }: OrdersClientProps) {
               ))}
               {reportingOrder.status === "completed" ? (
                 <p className="mt-1.5 text-[11px] text-[#4E2A84]">
-                  Within {COMPLETED_ORDER_DISPUTE_WINDOW_DAYS}-day buyer
-                  protection window (subject to undisbursed seller balance).
+                  Within 3-day ({COMPLETED_ORDER_DISPUTE_WINDOW_HOURS}-hour)
+                  buyer protection window (ending{" "}
+                  {formatMytDateTime(
+                    getProtectionExpiresAt(reportingOrder.completedAt)
+                  ) ?? "72h after completion"}
+                  ). Approved refunds are subject to admin review and return
+                  requirements.
                 </p>
               ) : null}
             </div>

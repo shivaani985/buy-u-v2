@@ -4,16 +4,20 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   ClipboardList,
+  Landmark,
   LayoutDashboard,
   PlusCircle,
   ShieldAlert,
   Store,
+  Wallet,
 } from "lucide-react";
 
 const TABS = [
   { href: "/seller", label: "Seller Hub", icon: LayoutDashboard },
   { href: "/seller/orders", label: "Orders", icon: ClipboardList },
   { href: "/seller/disputes", label: "Disputes", icon: ShieldAlert },
+  { href: "/seller/withdrawals", label: "Withdrawals", icon: Wallet },
+  { href: "/seller/bank", label: "Bank Account", icon: Landmark },
   { href: "/seller/storefront", label: "Storefront", icon: Store },
   { href: "/sell", label: "Create Listing", icon: PlusCircle },
 ];

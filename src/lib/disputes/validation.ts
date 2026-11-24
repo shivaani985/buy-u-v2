@@ -1,3 +1,8 @@
+import {
+  BUYER_PROTECTION_HOURS,
+  isWithinBuyerProtectionWindow,
+} from "../financials/policy.ts";
+
 export type DisputeReasonCode =
   | "not_received"
   | "not_as_described"
@@ -22,7 +27,7 @@ export type RefundExecutionStatus =
 export const DISPUTE_EVIDENCE_BUCKET = "dispute-evidence";
 export const MAX_DISPUTE_EVIDENCE_FILES = 5;
 export const MAX_DISPUTE_EVIDENCE_BYTES = 5 * 1024 * 1024;
-export const COMPLETED_ORDER_DISPUTE_WINDOW_DAYS = 7;
+export const COMPLETED_ORDER_DISPUTE_WINDOW_HOURS = BUYER_PROTECTION_HOURS;
 
 export const ALLOWED_DISPUTE_IMAGE_MIMES = new Set([
   "image/jpeg",
@@ -147,12 +152,10 @@ export function evaluateBuyerDisputeEligibility(input: {
       };
     }
     const nowMs = input.nowMs ?? Date.now();
-    const completedMs = Date.parse(input.completedAt);
-    const windowMs = COMPLETED_ORDER_DISPUTE_WINDOW_DAYS * 24 * 60 * 60 * 1000;
-    if (Number.isNaN(completedMs) || nowMs > completedMs + windowMs) {
+    if (!isWithinBuyerProtectionWindow(input.completedAt, nowMs)) {
       return {
         eligible: false,
-        reason: `The ${COMPLETED_ORDER_DISPUTE_WINDOW_DAYS}-day post-completion buyer protection window has ended.`,
+        reason: `The 3-day (${BUYER_PROTECTION_HOURS}-hour) post-completion buyer protection window has ended.`,
       };
     }
     return { eligible: true };

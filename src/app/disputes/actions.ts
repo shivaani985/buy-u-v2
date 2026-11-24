@@ -51,7 +51,7 @@ function mapDisputeRpcError(message: string): string {
     return "Only verified paid orders can be disputed.";
   }
   if (message.includes("DISPUTE_WINDOW_EXPIRED")) {
-    return "The 7-day post-completion buyer protection window has ended.";
+    return "The 3-day (72-hour) post-completion buyer protection window has ended.";
   }
   if (message.includes("FUNDS_ALREADY_DISBURSED")) {
     return "Funds for this completed order have already been disbursed and cannot be automatically frozen.";

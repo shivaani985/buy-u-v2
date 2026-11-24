@@ -1,3 +1,8 @@
+import {
+  getProtectionExpiresAt,
+  isEligibleForWithdrawalRelease,
+} from "../financials/policy.ts";
+
 export type SalesRange = "7d" | "30d" | "all";
 
 export interface RawSellerOrder {
@@ -56,16 +61,32 @@ export interface SalesChartPoint {
   amountSen: number;
 }
 
+export interface RawOrderRefund {
+  order_id: string;
+  refund_amount_sen: number;
+  commission_reversal_sen: number;
+  seller_deduction_sen: number;
+  status: string;
+}
+
 export interface SellerFinancialSummary {
   available: boolean;
   unavailableReason?: string;
   range: SalesRange;
   totalSalesSen: number;
+  executedRefundsSen: number;
+  netSalesSen: number;
   pendingSettlementSen: number;
+  protectionReserveSen: number;
+  nextProtectionReleaseAt: string | null;
   frozenDisputeSen: number;
   availableForPayoutSen: number;
+  reservedWithdrawalsSen: number;
   totalPaidOutSen: number;
+  failedWithdrawalCount: number;
   commissionTotalSen: number;
+  commissionReversalSen: number;
+  netCommissionSen: number;
   verifiedOrderCount: number;
   transactions: SellerTransactionItem[];
   chartPoints: SalesChartPoint[];
@@ -88,8 +109,12 @@ const EXCLUDED_CANCELLED_STATUSES = new Set([
   "pending_payment",
 ]);
 
-// Actual hosted payout_requests statuses: pending, paid, rejected
-const ACTIVE_PAYOUT_DEDUCTION_STATUSES = new Set(["pending", "paid"]);
+// Actual hosted payout_requests statuses: pending, processing, paid, failed, rejected, reconciliation_required
+const RESERVED_PAYOUT_STATUSES = new Set([
+  "pending",
+  "processing",
+  "reconciliation_required",
+]);
 
 const PAID_OUT_STATUSES = new Set(["paid"]);
 
@@ -156,6 +181,7 @@ export function computeSellerFinancials(input: {
   payments: RawPayment[];
   payoutRequests: RawPayoutRequest[];
   disputes: RawOrderDispute[];
+  refunds?: RawOrderRefund[];
   range: SalesRange;
   now?: Date;
 }): SellerFinancialSummary {
@@ -180,32 +206,55 @@ export function computeSellerFinancials(input: {
     }
   }
 
-  const refundByOrder = new Map<string, number>();
+  const refundByOrder = new Map<
+    string,
+    { product: number; commRev: number; sellerDeduct: number }
+  >();
+  for (const r of input.refunds ?? []) {
+    if ((r.status ?? "").toLowerCase() === "succeeded") {
+      const cur = refundByOrder.get(r.order_id) ?? {
+        product: 0,
+        commRev: 0,
+        sellerDeduct: 0,
+      };
+      cur.product += r.refund_amount_sen ?? 0;
+      cur.commRev += r.commission_reversal_sen ?? 0;
+      cur.sellerDeduct += r.seller_deduction_sen ?? 0;
+      refundByOrder.set(r.order_id, cur);
+    }
+  }
+
   const frozenDisputeOrders = new Set<string>();
   const ACTIVE_DISPUTE_STATUSES = new Set(["open", "under_review"]);
   for (const d of input.disputes) {
     const ds = (d.status ?? "").toLowerCase();
     const execStatus = (d.refund_execution_status ?? "").toLowerCase();
     if (execStatus === "pending_execution" || ACTIVE_DISPUTE_STATUSES.has(ds)) {
-      // Active disputes AND pending-execution refund proposals stay frozen
       frozenDisputeOrders.add(d.order_id);
     } else if (
       ds === "resolved" &&
       (d.refund_amount_sen ?? 0) > 0 &&
-      (execStatus === "" || execStatus === "executed")
+      (execStatus === "" || execStatus === "executed") &&
+      !refundByOrder.has(d.order_id)
     ) {
-      refundByOrder.set(
-        d.order_id,
-        (refundByOrder.get(d.order_id) ?? 0) + (d.refund_amount_sen ?? 0)
-      );
+      // Fallback when caller passes legacy dispute without order_refunds rows
+      refundByOrder.set(d.order_id, {
+        product: d.refund_amount_sen ?? 0,
+        commRev: 0,
+        sellerDeduct: d.refund_amount_sen ?? 0,
+      });
     }
   }
 
   let totalSalesSen = 0;
+  let executedRefundsSen = 0;
   let commissionTotalSen = 0;
+  let commissionReversalSen = 0;
   let pendingSettlementSen = 0;
+  let protectionReserveSen = 0;
+  let nextProtectionReleaseMs: number | null = null;
   let frozenDisputeSen = 0;
-  let completedNetSen = 0;
+  let maturedCompletedNetSen = 0;
   let verifiedOrderCount = 0;
 
   // Prepare 7-day buckets ending at `now` (used for Weekly Sales chart)
@@ -225,7 +274,6 @@ export function computeSellerFinancials(input: {
   const seenOrderIds = new Set<string>();
 
   for (const order of input.orders) {
-    // Prevent duplicated earnings if an order ever appears twice in input
     if (seenOrderIds.has(order.id)) continue;
     seenOrderIds.add(order.id);
 
@@ -238,9 +286,13 @@ export function computeSellerFinancials(input: {
           payment.verified_at)
     );
 
-    const refundedSen = refundByOrder.get(order.id) ?? 0;
-    const grossSen = Math.max(0, (order.subtotal_sen ?? 0) - refundedSen);
-    const netSen = Math.max(0, (order.seller_net_sen ?? 0) - refundedSen);
+    const adj = refundByOrder.get(order.id);
+    const refundedProductSen = adj?.product ?? 0;
+    const refundedSellerSen = adj?.sellerDeduct ?? 0;
+    const refundedCommSen = adj?.commRev ?? 0;
+
+    const grossSen = Math.max(0, (order.subtotal_sen ?? 0) - refundedProductSen);
+    const netSen = Math.max(0, (order.seller_net_sen ?? 0) - refundedSellerSen);
     const effectiveTs = order.paid_at ?? order.created_at;
     const effectiveMs = Date.parse(effectiveTs);
 
@@ -248,6 +300,11 @@ export function computeSellerFinancials(input: {
       paymentVerified && !EXCLUDED_CANCELLED_STATUSES.has(statusLower);
     const isFrozenDispute =
       statusLower === "disputed" || frozenDisputeOrders.has(order.id);
+
+    if (paymentVerified && refundedProductSen > 0) {
+      executedRefundsSen += refundedProductSen;
+      commissionReversalSen += refundedCommSen;
+    }
 
     if (isVerifiedSale) {
       // Range-scoped Total Sales
@@ -257,13 +314,27 @@ export function computeSellerFinancials(input: {
         verifiedOrderCount += 1;
       }
 
-      // All-time live settlement, frozen dispute, and payout balances
+      // Mutually exclusive all-time balance buckets with exact 72-hour protection boundary
       if (isFrozenDispute) {
         frozenDisputeSen += netSen;
       } else if (IN_PROGRESS_SETTLEMENT_STATUSES.has(statusLower)) {
         pendingSettlementSen += netSen;
       } else if (COMPLETED_STATUSES.has(statusLower)) {
-        completedNetSen += netSen;
+        if (isEligibleForWithdrawalRelease(order.completed_at, nowMs)) {
+          maturedCompletedNetSen += netSen;
+        } else {
+          protectionReserveSen += netSen;
+          const expIso = getProtectionExpiresAt(order.completed_at);
+          if (expIso) {
+            const expMs = Date.parse(expIso);
+            if (
+              !Number.isNaN(expMs) &&
+              (nextProtectionReleaseMs === null || expMs < nextProtectionReleaseMs)
+            ) {
+              nextProtectionReleaseMs = expMs;
+            }
+          }
+        }
       }
 
       // Weekly Sales Chart bucket
@@ -289,31 +360,44 @@ export function computeSellerFinancials(input: {
   }
 
   let totalPaidOutSen = 0;
-  let reservedOrPaidPayoutSen = 0;
+  let reservedWithdrawalsSen = 0;
+  let failedWithdrawalCount = 0;
   for (const pr of input.payoutRequests) {
     const s = (pr.status ?? "").toLowerCase();
     if (PAID_OUT_STATUSES.has(s)) {
       totalPaidOutSen += pr.amount_sen ?? 0;
-    }
-    if (ACTIVE_PAYOUT_DEDUCTION_STATUSES.has(s)) {
-      reservedOrPaidPayoutSen += pr.amount_sen ?? 0;
+    } else if (RESERVED_PAYOUT_STATUSES.has(s)) {
+      reservedWithdrawalsSen += pr.amount_sen ?? 0;
+    } else if (s === "failed") {
+      failedWithdrawalCount += 1;
     }
   }
 
   const availableForPayoutSen = Math.max(
     0,
-    completedNetSen - reservedOrPaidPayoutSen
+    maturedCompletedNetSen - reservedWithdrawalsSen - totalPaidOutSen
   );
 
   return {
     available: true,
     range: input.range,
     totalSalesSen,
+    executedRefundsSen,
+    netSalesSen: totalSalesSen,
     pendingSettlementSen,
+    protectionReserveSen,
+    nextProtectionReleaseAt:
+      nextProtectionReleaseMs !== null
+        ? new Date(nextProtectionReleaseMs).toISOString()
+        : null,
     frozenDisputeSen,
     availableForPayoutSen,
+    reservedWithdrawalsSen,
     totalPaidOutSen,
+    failedWithdrawalCount,
     commissionTotalSen,
+    commissionReversalSen,
+    netCommissionSen: Math.max(0, commissionTotalSen - commissionReversalSen),
     verifiedOrderCount,
     transactions: transactions.slice(0, 6),
     chartPoints: Array.from(dayBuckets.values()),

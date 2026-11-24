@@ -4,7 +4,7 @@ import path from "node:path";
 import test from "node:test";
 import {
   buildPrivateDisputeEvidenceUrl,
-  COMPLETED_ORDER_DISPUTE_WINDOW_DAYS,
+  COMPLETED_ORDER_DISPUTE_WINDOW_HOURS,
   DISPUTE_REASONS,
   evaluateBuyerDisputeEligibility,
   getDisputeResolutionSummary,
@@ -59,13 +59,13 @@ test("1. Dispute reasons (all 6 >= 10 chars), eligibility (paid/handed_over/7d c
     true
   );
 
-  // Completed within 7-day protection window -> eligible; after 7 days -> rejected
-  assert.equal(COMPLETED_ORDER_DISPUTE_WINDOW_DAYS, 7);
+  // Completed within 72-hour (3-day) protection window -> eligible; at/after 72 hours -> rejected
+  assert.equal(COMPLETED_ORDER_DISPUTE_WINDOW_HOURS, 72);
   assert.equal(
     evaluateBuyerDisputeEligibility({
       status: "completed",
-      paidAt: "2026-11-20T06:00:00Z",
-      completedAt: "2026-11-20T08:00:00Z",
+      paidAt: "2026-11-22T06:00:00Z",
+      completedAt: "2026-11-22T08:00:00Z",
       hasActiveDispute: false,
       nowMs,
     }).eligible,
@@ -74,8 +74,8 @@ test("1. Dispute reasons (all 6 >= 10 chars), eligibility (paid/handed_over/7d c
   assert.equal(
     evaluateBuyerDisputeEligibility({
       status: "completed",
-      paidAt: "2026-11-10T06:00:00Z",
-      completedAt: "2026-11-10T08:00:00Z",
+      paidAt: "2026-11-20T06:00:00Z",
+      completedAt: "2026-11-20T08:00:00Z",
       hasActiveDispute: false,
       nowMs,
     }).eligible,
@@ -164,7 +164,7 @@ test("3. Financial integrity: frozen dispute balance isolated, pending_execution
         completed_at: null,
         created_at: "2026-11-24T05:55:00Z",
       },
-      // Sibling B: completed and unaffected -> Available for Payout
+      // Sibling B: completed > 72h ago and unaffected -> Available for Payout
       {
         id: "child-b",
         order_code: "BU-2611-B1",
@@ -173,9 +173,9 @@ test("3. Financial integrity: frozen dispute balance isolated, pending_execution
         seller_net_sen: 1960,
         total_paid_sen: 2000,
         status: "completed",
-        paid_at: "2026-11-24T06:00:00Z",
-        completed_at: "2026-11-24T08:00:00Z",
-        created_at: "2026-11-24T05:55:00Z",
+        paid_at: "2026-11-20T06:00:00Z",
+        completed_at: "2026-11-20T08:00:00Z",
+        created_at: "2026-11-20T05:55:00Z",
       },
     ],
     orderItems: [],

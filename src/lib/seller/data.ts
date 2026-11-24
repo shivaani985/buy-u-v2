@@ -6,6 +6,7 @@ import {
   computeSellerFinancials,
   type RawOrderDispute,
   type RawOrderItem,
+  type RawOrderRefund,
   type RawPayment,
   type RawPayoutRequest,
   type RawSellerOrder,
@@ -81,11 +82,19 @@ export async function getSellerHubData(
     unavailableReason: "Financial summary unavailable.",
     range,
     totalSalesSen: 0,
+    executedRefundsSen: 0,
+    netSalesSen: 0,
     pendingSettlementSen: 0,
+    protectionReserveSen: 0,
+    nextProtectionReleaseAt: null,
     frozenDisputeSen: 0,
     availableForPayoutSen: 0,
+    reservedWithdrawalsSen: 0,
     totalPaidOutSen: 0,
+    failedWithdrawalCount: 0,
     commissionTotalSen: 0,
+    commissionReversalSen: 0,
+    netCommissionSen: 0,
     verifiedOrderCount: 0,
     transactions: [],
     chartPoints: [],
@@ -268,9 +277,10 @@ export async function getSellerHubData(
     let orderItems: RawOrderItem[] = [];
     let payments: RawPayment[] = [];
     let disputes: RawOrderDispute[] = [];
+    let refunds: RawOrderRefund[] = [];
 
     if (orderIds.length > 0) {
-      const [itemsRes, paymentsRes, disputesRes] = await Promise.all([
+      const [itemsRes, paymentsRes, disputesRes, refundsRes] = await Promise.all([
         supabase
           .from("order_items")
           .select("order_id, title_snapshot, quantity")
@@ -283,10 +293,15 @@ export async function getSellerHubData(
           .from("order_disputes")
           .select("order_id, status, refund_amount_sen, refund_execution_status")
           .in("order_id", orderIds),
+        supabase
+          .from("order_refunds")
+          .select("order_id, refund_amount_sen, commission_reversal_sen, seller_deduction_sen, status")
+          .in("order_id", orderIds),
       ]);
       if (!itemsRes.error) orderItems = (itemsRes.data ?? []) as RawOrderItem[];
       if (!paymentsRes.error) payments = (paymentsRes.data ?? []) as RawPayment[];
       if (!disputesRes.error) disputes = (disputesRes.data ?? []) as RawOrderDispute[];
+      if (!refundsRes.error) refunds = (refundsRes.data ?? []) as RawOrderRefund[];
     }
 
     financials = computeSellerFinancials({
@@ -295,6 +310,7 @@ export async function getSellerHubData(
       payments,
       payoutRequests,
       disputes,
+      refunds,
       range,
     });
   } else {
