@@ -132,8 +132,10 @@ test("2. Fixed seller transaction labels & earnings ledger transitions (paid -> 
 
   // Deduplicated sales: 1500 + 2000 + 1000 + 3000 = 7500
   assert.equal(fin.totalSalesSen, 7500);
-  // Pending settlement: paid (1470) + handed_over (1960) + disputed frozen (2940) = 6370
-  assert.equal(fin.pendingSettlementSen, 6370);
+  // Pending settlement (non-disputed): paid (1470) + handed_over (1960) = 3430
+  assert.equal(fin.pendingSettlementSen, 3430);
+  // Frozen dispute balance tracked separately: disputed (2940)
+  assert.equal(fin.frozenDisputeSen, 2940);
   // Available for payout: ONLY completed (980)
   assert.equal(fin.availableForPayoutSen, 980);
 

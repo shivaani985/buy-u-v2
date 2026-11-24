@@ -1,4 +1,8 @@
 import { evaluateBuyerEligibility, type BuyerEligibilityResult } from "@/lib/buyer/validation";
+import {
+  getLatestDisputesByOrderIds,
+  type OrderDisputeSummaryView,
+} from "@/lib/disputes/data";
 import { resolvePublicStorageUrl } from "@/lib/format";
 import { getPublicSupabaseEnv } from "@/lib/supabase/env";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
@@ -40,6 +44,7 @@ export interface BuyerOrderView {
   /** Strictly buyer-only pickup PIN (never queried or exposed on seller routes). */
   pickupPin: string | null;
   latestPayment: BuyerOrderPaymentView | null;
+  dispute: OrderDisputeSummaryView | null;
   items: BuyerOrderItemView[];
 }
 
@@ -139,7 +144,7 @@ export async function getBuyerOrdersData(
   const sellerIds = Array.from(new Set(orderRows.map((o) => o.seller_id)));
   const service = getServerServiceClient();
 
-  const [itemsRes, profilesRes, storefrontsRes, paymentsRes, pinsRes, sessionsRes] =
+  const [itemsRes, profilesRes, storefrontsRes, paymentsRes, pinsRes, sessionsRes, disputesByOrder] =
     await Promise.all([
       supabase
         .from("order_items")
@@ -175,6 +180,7 @@ export async function getBuyerOrdersData(
             .eq("buyer_id", eligibility.userId)
             .order("created_at", { ascending: false })
         : Promise.resolve({ data: [] }),
+      getLatestDisputesByOrderIds(orderIds),
     ]);
 
   const pinByOrder = new Map<string, string>();
@@ -260,6 +266,7 @@ export async function getBuyerOrdersData(
     createdAt: o.created_at,
     pickupPin: pinByOrder.get(o.id) ?? null,
     latestPayment: latestPaymentByOrder.get(o.id) ?? null,
+    dispute: disputesByOrder.get(o.id) ?? null,
     items: itemsByOrder.get(o.id) ?? [],
   }));
 

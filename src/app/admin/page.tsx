@@ -4,6 +4,8 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { Lock, LogOut, ShieldCheck } from "lucide-react";
 import { signOutAction } from "@/app/auth/actions";
+import { AdminDisputesClient } from "@/components/admin/AdminDisputesClient";
+import { getAdminDisputesData } from "@/lib/disputes/data";
 import { getSessionSummary } from "@/lib/supabase/server";
 
 export const metadata: Metadata = {
@@ -53,6 +55,8 @@ export default async function AdminPage() {
       </div>
     );
   }
+
+  const { disputes, error: disputesError } = await getAdminDisputesData(session);
 
   return (
     <div className="mx-auto w-full max-w-[1200px] px-4 py-10 sm:px-6 lg:px-10">
@@ -123,6 +127,32 @@ export default async function AdminPage() {
           </section>
         ))}
       </div>
+      {/* Phase 6D.1 Admin Dispute Management Queue */}
+      <section className="mt-8 space-y-4">
+        <div className="flex flex-wrap items-baseline justify-between gap-2">
+          <div>
+            <h2 className="text-xl font-extrabold tracking-tight text-[#14121A]">
+              Order Disputes &amp; Buyer Protection
+            </h2>
+            <p className="mt-0.5 text-xs text-[#6B6779]">
+              Review buyer/seller evidence, record internal notes, and propose
+              resolutions. Refund proposals remain pending execution until Phase
+              6D.2.
+            </p>
+          </div>
+          <span className="text-xs font-bold text-[#4E2A84]">
+            {disputes.length} {disputes.length === 1 ? "case" : "cases"}
+          </span>
+        </div>
+
+        {disputesError ? (
+          <p role="alert" className="rounded-xl border border-[#F9C6C2] bg-[#FEF2F2] p-4 text-xs font-semibold text-[#B42318]">
+            {disputesError}
+          </p>
+        ) : (
+          <AdminDisputesClient disputes={disputes} />
+        )}
+      </section>
     </div>
   );
 }

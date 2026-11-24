@@ -20,9 +20,21 @@ import {
   retryCheckoutSandboxBillAction,
   retryOrderSandboxBillAction,
 } from "@/app/checkout/actions";
+import { openOrderDisputeAction } from "@/app/disputes/actions";
 import { startConversationAction } from "@/app/messages/actions";
 import { confirmOrderReceiptAction } from "@/app/orders/actions";
+import { DisputeDetailCard } from "@/components/disputes/DisputeDetailCard";
+import {
+  DisputeEvidenceUploader,
+  type UploadedEvidenceItem,
+} from "@/components/disputes/DisputeEvidenceUploader";
 import { OrderTimeline } from "@/components/orders/OrderTimeline";
+import {
+  COMPLETED_ORDER_DISPUTE_WINDOW_DAYS,
+  DISPUTE_REASONS,
+  evaluateBuyerDisputeEligibility,
+  type DisputeReasonCode,
+} from "@/lib/disputes/validation";
 import { formatSenToRm, formatShortDate } from "@/lib/format";
 import type {
   BuyerOrderView,
@@ -84,9 +96,70 @@ export function OrdersClient({ pendingCheckouts, orders }: OrdersClientProps) {
   const [reportingOrder, setReportingOrder] = useState<BuyerOrderView | null>(
     null
   );
+  const [disputeReason, setDisputeReason] =
+    useState<DisputeReasonCode>("not_received");
+  const [disputeDesc, setDisputeDesc] = useState("");
+  const [disputeEvidence, setDisputeEvidence] = useState<
+    UploadedEvidenceItem[]
+  >([]);
+  const [disputeConfirmed, setDisputeConfirmed] = useState(false);
+  const [disputeFormError, setDisputeFormError] = useState<string | null>(null);
   const [feedbackByKey, setFeedbackByKey] = useState<
     Record<string, { type: "info" | "error"; text: string }>
   >({});
+
+  function openReportDialog(order: BuyerOrderView) {
+    setReportingOrder(order);
+    setDisputeReason("not_received");
+    setDisputeDesc("");
+    setDisputeEvidence([]);
+    setDisputeConfirmed(false);
+    setDisputeFormError(null);
+  }
+
+  async function handleSubmitDispute() {
+    if (!reportingOrder) return;
+    if (disputeDesc.trim().length < 20) {
+      setDisputeFormError(
+        "Please describe the issue in at least 20 characters."
+      );
+      return;
+    }
+    if (!disputeConfirmed) {
+      setDisputeFormError(
+        "Please tick the confirmation box before opening a dispute."
+      );
+      return;
+    }
+
+    const order = reportingOrder;
+    setBusyKey(`disp:${order.id}`);
+    setDisputeFormError(null);
+    try {
+      const res = await openOrderDisputeAction({
+        orderId: order.id,
+        reasonCode: disputeReason,
+        description: disputeDesc.trim(),
+        evidencePaths: disputeEvidence.map((e) => e.path),
+      });
+      if (!res.ok) {
+        setDisputeFormError(res.message);
+        return;
+      }
+      setReportingOrder(null);
+      setFeedbackByKey((prev) => ({
+        ...prev,
+        [`ord:${order.id}`]: { type: "info", text: res.message },
+      }));
+      router.refresh();
+    } catch {
+      setDisputeFormError(
+        "Network error while opening dispute. Please try again."
+      );
+    } finally {
+      setBusyKey(null);
+    }
+  }
 
   async function handleContactSeller(order: BuyerOrderView) {
     const key = `msg:${order.id}`;
@@ -515,6 +588,23 @@ export function OrdersClient({ pendingCheckouts, orders }: OrdersClientProps) {
         const isEligibleForPin =
           Boolean(order.pickupPin) && statusLower === "paid";
         const canConfirmReceipt = statusLower === "handed_over";
+        const hasActiveDispute = Boolean(
+          order.dispute &&
+            (order.dispute.status === "open" ||
+              order.dispute.status === "under_review")
+        );
+        const hasPendingRefundExecution = Boolean(
+          order.dispute &&
+            order.dispute.refundExecutionStatus === "pending_execution"
+        );
+        const disputeEligibility = evaluateBuyerDisputeEligibility({
+          status: order.status,
+          paidAt: order.paidAt,
+          completedAt: order.completedAt,
+          hasActiveDispute,
+          hasPendingRefundExecution,
+          nowMs,
+        });
         const canContactOrReport =
           statusLower === "paid" ||
           statusLower === "handed_over" ||
@@ -667,6 +757,10 @@ export function OrdersClient({ pendingCheckouts, orders }: OrdersClientProps) {
               </div>
             ) : null}
 
+            {order.dispute ? (
+              <DisputeDetailCard dispute={order.dispute} />
+            ) : null}
+
             {canContactOrReport ? (
               <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[#ECEAF3] bg-white px-5 py-3 text-xs">
                 <button
@@ -688,14 +782,16 @@ export function OrdersClient({ pendingCheckouts, orders }: OrdersClientProps) {
                   )}
                   <span>Contact Seller / Arrange Collection</span>
                 </button>
-                <button
-                  type="button"
-                  onClick={() => setReportingOrder(order)}
-                  className="inline-flex items-center gap-1 rounded-xl px-2.5 py-1.5 font-semibold text-[#6B6779] transition hover:bg-[#FAF9FC] hover:text-[#4E2A84]"
-                >
-                  <Flag className="h-3.5 w-3.5" aria-hidden="true" />
-                  <span>Report a Problem (Not Yet Available)</span>
-                </button>
+                {disputeEligibility.eligible ? (
+                  <button
+                    type="button"
+                    onClick={() => openReportDialog(order)}
+                    className="inline-flex items-center gap-1 rounded-xl border border-[#F4D5D3] bg-[#FFF8F8] px-3 py-1.5 font-semibold text-[#B42318] transition hover:bg-[#FEF2F2]"
+                  >
+                    <Flag className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span>Report a Problem</span>
+                  </button>
+                ) : null}
               </div>
             ) : null}
 
@@ -879,7 +975,7 @@ export function OrdersClient({ pendingCheckouts, orders }: OrdersClientProps) {
         </div>
       ) : null}
 
-      {/* Phase 6D-compatible Report a Problem Entry Point Dialog */}
+      {/* Phase 6D.1 Buyer Dispute Creation Dialog */}
       {reportingOrder ? (
         <div
           role="dialog"
@@ -887,14 +983,20 @@ export function OrdersClient({ pendingCheckouts, orders }: OrdersClientProps) {
           aria-labelledby="report-problem-title"
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
         >
-          <div className="w-full max-w-md rounded-2xl border border-[#E6E3EE] bg-white p-6 shadow-xl">
+          <div className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-2xl border border-[#E6E3EE] bg-white p-6 shadow-xl">
             <div className="flex items-start justify-between gap-3">
-              <h2
-                id="report-problem-title"
-                className="text-base font-extrabold text-[#14121A]"
-              >
-                Report a Problem · #{reportingOrder.orderCode}
-              </h2>
+              <div>
+                <h2
+                  id="report-problem-title"
+                  className="text-base font-extrabold text-[#14121A]"
+                >
+                  Report a Problem &middot; #{reportingOrder.orderCode}
+                </h2>
+                <p className="mt-0.5 text-xs text-[#6B6779]">
+                  Seller: {reportingOrder.sellerName} &middot;{" "}
+                  {formatSenToRm(reportingOrder.subtotalSen)}
+                </p>
+              </div>
               <button
                 type="button"
                 aria-label="Close dialog"
@@ -904,38 +1006,112 @@ export function OrdersClient({ pendingCheckouts, orders }: OrdersClientProps) {
                 <X className="h-4 w-4" />
               </button>
             </div>
-            <p className="mt-2 text-sm text-[#4A4656]">
-              If your item is missing, damaged, or not as described, do not
-              confirm receipt yet. Formal in-app order disputes &amp; evidence
-              submission are being activated in Phase 6D.
-            </p>
-            <p className="mt-2 rounded-xl bg-[#FAF9FC] p-3 text-xs text-[#6B6779]">
-              Keep your order reference{" "}
-              <strong className="font-mono text-[#14121A]">
-                #{reportingOrder.orderCode}
-              </strong>{" "}
-              and message the seller first to resolve campus collection issues
-              quickly.
-            </p>
+
+            {/* Order & Product Summary */}
+            <div className="mt-3 rounded-xl border border-[#ECEAF3] bg-[#FAF9FC] p-3 text-xs">
+              {reportingOrder.items.map((it) => (
+                <p key={it.id} className="truncate font-semibold text-[#14121A]">
+                  {it.title} &times; {it.quantity} ({formatSenToRm(it.unitSen)})
+                </p>
+              ))}
+              {reportingOrder.status === "completed" ? (
+                <p className="mt-1.5 text-[11px] text-[#4E2A84]">
+                  Within {COMPLETED_ORDER_DISPUTE_WINDOW_DAYS}-day buyer
+                  protection window (subject to undisbursed seller balance).
+                </p>
+              ) : null}
+            </div>
+
+            <div className="mt-4 space-y-3.5">
+              <div>
+                <label
+                  htmlFor="dispute-reason-select"
+                  className="block text-xs font-bold text-[#14121A]"
+                >
+                  Reason
+                </label>
+                <select
+                  id="dispute-reason-select"
+                  value={disputeReason}
+                  onChange={(e) =>
+                    setDisputeReason(e.target.value as DisputeReasonCode)
+                  }
+                  className="mt-1 w-full rounded-xl border border-[#E6E3EE] bg-white px-3 py-2 text-xs font-semibold text-[#14121A] focus:border-[#4E2A84] focus:outline-none"
+                >
+                  {DISPUTE_REASONS.map((r) => (
+                    <option key={r.code} value={r.code}>
+                      {r.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label
+                  htmlFor="dispute-description-input"
+                  className="block text-xs font-bold text-[#14121A]"
+                >
+                  Detailed Description (20&ndash;2,000 characters)
+                </label>
+                <textarea
+                  id="dispute-description-input"
+                  rows={4}
+                  maxLength={2000}
+                  value={disputeDesc}
+                  onChange={(e) => setDisputeDesc(e.target.value)}
+                  placeholder="Describe what went wrong, dates/times, and what resolution you are seeking..."
+                  className="mt-1 w-full rounded-xl border border-[#E6E3EE] bg-white px-3 py-2 text-xs text-[#14121A] focus:border-[#4E2A84] focus:outline-none"
+                />
+              </div>
+
+              <DisputeEvidenceUploader
+                orderId={reportingOrder.id}
+                items={disputeEvidence}
+                onChange={setDisputeEvidence}
+                disabled={busyKey === `disp:${reportingOrder.id}`}
+              />
+
+              <label className="flex items-start gap-2 rounded-xl border border-[#ECEAF3] bg-[#FAF9FC] p-3 text-xs text-[#4A4656]">
+                <input
+                  type="checkbox"
+                  checked={disputeConfirmed}
+                  onChange={(e) => setDisputeConfirmed(e.target.checked)}
+                  className="mt-0.5 h-4 w-4 rounded border-[#C7C0DB] accent-[#4E2A84]"
+                />
+                <span>
+                  I confirm this report is truthful. Opening a dispute freezes
+                  this order&apos;s earnings while Buy-U admin reviews both
+                  sides.
+                </span>
+              </label>
+
+              {disputeFormError ? (
+                <p role="alert" className="text-xs font-semibold text-[#B42318]">
+                  {disputeFormError}
+                </p>
+              ) : null}
+            </div>
+
             <div className="mt-5 flex justify-end gap-2">
               <button
                 type="button"
                 onClick={() => setReportingOrder(null)}
                 className="rounded-xl border border-[#E6E3EE] bg-white px-4 py-2 text-xs font-bold text-[#14121A] hover:bg-[#FAF9FC]"
               >
-                Close
+                Cancel
               </button>
               <button
                 type="button"
-                onClick={() => {
-                  const target = reportingOrder;
-                  setReportingOrder(null);
-                  handleContactSeller(target);
-                }}
-                className="inline-flex items-center gap-1.5 rounded-xl bg-[#4E2A84] px-4 py-2 text-xs font-bold text-white hover:bg-[#3F216B]"
+                disabled={busyKey === `disp:${reportingOrder.id}`}
+                onClick={handleSubmitDispute}
+                className="inline-flex items-center gap-1.5 rounded-xl bg-[#B42318] px-4 py-2 text-xs font-bold text-white hover:bg-[#912018] disabled:opacity-50"
               >
-                <MessageCircle className="h-3.5 w-3.5" />
-                <span>Message Seller</span>
+                {busyKey === `disp:${reportingOrder.id}` ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Flag className="h-3.5 w-3.5" />
+                )}
+                <span>Submit Dispute</span>
               </button>
             </div>
           </div>

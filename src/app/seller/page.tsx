@@ -150,8 +150,12 @@ export default async function SellerHubPage({
         ? formatRm(fin.pendingSettlementSen)
         : "Not available yet",
       icon: Hourglass,
+      hint:
+        fin.available && fin.frozenDisputeSen > 0
+          ? `Frozen (Disputes): ${formatRm(fin.frozenDisputeSen)}`
+          : undefined,
       tooltip:
-        "Verified paid orders currently awaiting campus handover or completion.",
+        "Verified paid orders awaiting handover or buyer receipt confirmation. Disputed earnings are tracked separately as frozen.",
     },
     {
       label: "Available for Payout",

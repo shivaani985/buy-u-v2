@@ -2,11 +2,18 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { ClipboardList, LayoutDashboard, PlusCircle, Store } from "lucide-react";
+import {
+  ClipboardList,
+  LayoutDashboard,
+  PlusCircle,
+  ShieldAlert,
+  Store,
+} from "lucide-react";
 
 const TABS = [
   { href: "/seller", label: "Seller Hub", icon: LayoutDashboard },
   { href: "/seller/orders", label: "Orders", icon: ClipboardList },
+  { href: "/seller/disputes", label: "Disputes", icon: ShieldAlert },
   { href: "/seller/storefront", label: "Storefront", icon: Store },
   { href: "/sell", label: "Create Listing", icon: PlusCircle },
 ];

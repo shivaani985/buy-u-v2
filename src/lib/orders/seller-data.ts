@@ -124,7 +124,7 @@ export async function getSellerOrdersData(
       .in("id", buyerIds),
     supabase
       .from("order_disputes")
-      .select("order_id,status")
+      .select("order_id,status,refund_execution_status")
       .in("order_id", orderIds),
   ]);
 
@@ -162,9 +162,11 @@ export async function getSellerOrdersData(
   for (const d of (disputesRes.data ?? []) as Array<{
     order_id: string;
     status: string | null;
+    refund_execution_status?: string | null;
   }>) {
     const ds = (d.status ?? "").toLowerCase();
-    if (ACTIVE_DISPUTE_STATUSES.has(ds)) {
+    const exec = (d.refund_execution_status ?? "").toLowerCase();
+    if (ACTIVE_DISPUTE_STATUSES.has(ds) || exec === "pending_execution") {
       activeDisputeOrders.add(d.order_id);
     }
   }

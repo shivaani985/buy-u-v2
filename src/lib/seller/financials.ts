@@ -37,6 +37,7 @@ export interface RawOrderDispute {
   order_id: string;
   status: string;
   refund_amount_sen: number | null;
+  refund_execution_status?: string | null;
 }
 
 export interface SellerTransactionItem {
@@ -61,6 +62,7 @@ export interface SellerFinancialSummary {
   range: SalesRange;
   totalSalesSen: number;
   pendingSettlementSen: number;
+  frozenDisputeSen: number;
   availableForPayoutSen: number;
   totalPaidOutSen: number;
   commissionTotalSen: number;
@@ -184,23 +186,30 @@ export function computeSellerFinancials(input: {
   }
 
   const refundByOrder = new Map<string, number>();
-  const openDisputeOrders = new Set<string>();
+  const frozenDisputeOrders = new Set<string>();
   const ACTIVE_DISPUTE_STATUSES = new Set(["open", "under_review"]);
   for (const d of input.disputes) {
     const ds = (d.status ?? "").toLowerCase();
-    if (ds === "resolved" && (d.refund_amount_sen ?? 0) > 0) {
+    const execStatus = (d.refund_execution_status ?? "").toLowerCase();
+    if (execStatus === "pending_execution" || ACTIVE_DISPUTE_STATUSES.has(ds)) {
+      // Active disputes AND pending-execution refund proposals stay frozen
+      frozenDisputeOrders.add(d.order_id);
+    } else if (
+      ds === "resolved" &&
+      (d.refund_amount_sen ?? 0) > 0 &&
+      (execStatus === "" || execStatus === "executed")
+    ) {
       refundByOrder.set(
         d.order_id,
         (refundByOrder.get(d.order_id) ?? 0) + (d.refund_amount_sen ?? 0)
       );
-    } else if (ACTIVE_DISPUTE_STATUSES.has(ds)) {
-      openDisputeOrders.add(d.order_id);
     }
   }
 
   let totalSalesSen = 0;
   let commissionTotalSen = 0;
   let pendingSettlementSen = 0;
+  let frozenDisputeSen = 0;
   let completedNetSen = 0;
   let verifiedOrderCount = 0;
 
@@ -242,8 +251,8 @@ export function computeSellerFinancials(input: {
 
     const isVerifiedSale =
       paymentVerified && !EXCLUDED_CANCELLED_STATUSES.has(statusLower);
-    const hasOpenDispute =
-      statusLower === "disputed" || openDisputeOrders.has(order.id);
+    const isFrozenDispute =
+      statusLower === "disputed" || frozenDisputeOrders.has(order.id);
 
     if (isVerifiedSale) {
       // Range-scoped Total Sales
@@ -253,8 +262,10 @@ export function computeSellerFinancials(input: {
         verifiedOrderCount += 1;
       }
 
-      // All-time live settlement & payout balances (disputed orders stay frozen)
-      if (hasOpenDispute || IN_PROGRESS_SETTLEMENT_STATUSES.has(statusLower)) {
+      // All-time live settlement, frozen dispute, and payout balances
+      if (isFrozenDispute) {
+        frozenDisputeSen += netSen;
+      } else if (IN_PROGRESS_SETTLEMENT_STATUSES.has(statusLower)) {
         pendingSettlementSen += netSen;
       } else if (COMPLETED_STATUSES.has(statusLower)) {
         completedNetSen += netSen;
@@ -304,6 +315,7 @@ export function computeSellerFinancials(input: {
     range: input.range,
     totalSalesSen,
     pendingSettlementSen,
+    frozenDisputeSen,
     availableForPayoutSen,
     totalPaidOutSen,
     commissionTotalSen,

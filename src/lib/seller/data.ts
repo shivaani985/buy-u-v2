@@ -82,6 +82,7 @@ export async function getSellerHubData(
     range,
     totalSalesSen: 0,
     pendingSettlementSen: 0,
+    frozenDisputeSen: 0,
     availableForPayoutSen: 0,
     totalPaidOutSen: 0,
     commissionTotalSen: 0,
@@ -280,7 +281,7 @@ export async function getSellerHubData(
           .in("order_id", orderIds),
         supabase
           .from("order_disputes")
-          .select("order_id, status, refund_amount_sen")
+          .select("order_id, status, refund_amount_sen, refund_execution_status")
           .in("order_id", orderIds),
       ]);
       if (!itemsRes.error) orderItems = (itemsRes.data ?? []) as RawOrderItem[];
