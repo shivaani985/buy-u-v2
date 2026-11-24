@@ -21,6 +21,7 @@ import {
   extractPriceSnapshots,
   type CheckoutPreparationSummary,
 } from "@/lib/buyer/checkout";
+import { TOYYIBPAY_FPX_FEE_SEN } from "@/lib/orders/pricing";
 import { formatSenToRm } from "@/lib/format";
 
 export interface CheckoutBuyerInfo {
@@ -675,16 +676,28 @@ export function CheckoutClient({
               </dd>
             </div>
             <div className="flex items-center justify-between gap-2">
-              <dt className="text-[#6B6779]">ToyyibPay FPX Fee</dt>
-              <dd className="text-xs font-semibold text-[#6B6779]">Pending</dd>
+              <dt className="text-[#6B6779]">
+                ToyyibPay FPX Fee ({preparation.sellerOrderCount}{" "}
+                {preparation.sellerOrderCount === 1 ? "bill" : "bills"})
+              </dt>
+              <dd className="font-semibold text-[#14121A]">
+                {preparation.sellerOrderCount > 0 && preparation.itemsSubtotalSen > 0
+                  ? formatSenToRm(
+                      preparation.sellerOrderCount * TOYYIBPAY_FPX_FEE_SEN
+                    )
+                  : "RM 0.00"}
+              </dd>
             </div>
             <div className="flex items-baseline justify-between gap-2 border-t border-[#F1EFF6] pt-2.5">
               <dt className="text-sm font-bold text-[#14121A]">
-                Current Subtotal
+                Estimated Total
               </dt>
               <dd className="text-2xl font-extrabold tracking-tight text-[#4E2A84]">
                 {preparation.itemsSubtotalSen > 0
-                  ? formatSenToRm(preparation.itemsSubtotalSen)
+                  ? formatSenToRm(
+                      preparation.itemsSubtotalSen +
+                        preparation.sellerOrderCount * TOYYIBPAY_FPX_FEE_SEN
+                    )
                   : "RM 0.00"}
               </dd>
             </div>
@@ -703,8 +716,9 @@ export function CheckoutClient({
             </button>
 
             <p className="text-xs leading-relaxed text-[#6B6779]">
-              Payment integration coming soon. Unknown gateway fees are marked
-              as pending and are not estimated or charged.
+              RM 1.00 ToyyibPay FPX fee applies per seller order. Buy-U&apos;s
+              2% platform commission is deducted from seller payout at no extra
+              cost to buyers. Payment execution opens in Phase 6B.
             </p>
 
             <Link

@@ -9,6 +9,7 @@ import {
   LogOut,
   Menu,
   MessageCircle,
+  Package,
   Search,
   ShieldCheck,
   ShoppingCart,
@@ -456,6 +457,16 @@ export function SiteHeader({
                         <span>Seller Hub</span>
                       </Link>
                     ) : null}
+
+                    <Link
+                      href="/orders"
+                      role="menuitem"
+                      onClick={() => setAccountMenuOpen(false)}
+                      className="flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm font-semibold text-[#14121A] hover:bg-[#F4F1FA] hover:text-[#4E2A84] transition-colors"
+                    >
+                      <Package className="h-4 w-4 text-[#4E2A84]" aria-hidden="true" />
+                      <span>My Orders</span>
+                    </Link>
 
                     <Link
                       href="/messages"
