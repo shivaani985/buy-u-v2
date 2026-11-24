@@ -1,33 +1,39 @@
 -- =============================================================================
--- Buy-U Phase 6A.1 — Safety-Reviewed Migration Proposal for Orders & Payments
+-- Buy-U Phase 6A.2 — Integrity-Hardened Migration Proposal for Orders & Payments
 -- STATUS: PROPOSAL ONLY — DO NOT APPLY WITHOUT EXPLICIT OWNER APPROVAL
 -- TARGET PROJECT: duwwlcpdidrxkixvflag
 --
 -- Safety guarantees:
--- 1. Idempotency: unique (buyer_id, seller_id, idempotency_key) on cart orders,
---    existing UNIQUE on offers.order_id, unique payments.bill_code & transaction_ref.
--- 2. Offer checkout reuses the 1-unit reservation held by `accept_offer_atomic`
---    (verifies reserved_quantity >= 1, NEVER double-reserves or double-deducts).
--- 3. ToyyibPay FPX fee: billChargeToCustomer = 1 ("Amount"), billAmount =
---    subtotal_sen + 100 (total_paid_sen) -> zero RM 1.00 double-charge.
--- 4. Payment confirmation requires service_role + exact bill_code + amount_sen
---    match; late verified payments after expiry route to `late_payment_review`
---    without touching stock.
+-- 1. Extends `payments_status_check` safely to include `'late_payment_review'`
+--    while preserving `'pending','paid','failed','expired'` and all existing rows.
+-- 2. Consistent row-lock ordering (`offers -> orders -> payments -> listings/variants`)
+--    prevents deadlocks with Phase 5B `release_expired_offer_reservations()`.
+-- 3. Explicit reservation & stock assertions before deduction (never conceals
+--    overselling with GREATEST(0, ...)).
+-- 4. Requires a valid linked accepted offer for `source = 'offer'` confirmation.
+-- 5. Verifies `transaction_ref` identity on duplicate callbacks + unique
+--    `payments.transaction_ref` index prevents replay & cross-order reuse.
+-- 6. Removes redundant `payments.bill_code` index (hosted UNIQUE already exists).
 -- =============================================================================
 
 BEGIN;
 
--- 1. Idempotency, replay-protection & expiry-sweep indexes
+-- 1. Safely extend `payments_status_check` for auditable late-payment reconciliation
+ALTER TABLE public.payments
+  DROP CONSTRAINT IF EXISTS payments_status_check;
+
+ALTER TABLE public.payments
+  ADD CONSTRAINT payments_status_check
+  CHECK (status IN ('pending', 'paid', 'failed', 'expired', 'late_payment_review'));
+
+-- 2. Idempotency, replay-protection & expiry-sweep indexes
+--    (Note: `payments.bill_code` and `offers.order_id` already have hosted UNIQUE constraints.)
 ALTER TABLE public.orders
   ADD COLUMN IF NOT EXISTS idempotency_key text;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_cart_idempotency
   ON public.orders (buyer_id, seller_id, idempotency_key)
   WHERE idempotency_key IS NOT NULL;
-
-CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_unique_bill_code
-  ON public.payments (bill_code)
-  WHERE bill_code IS NOT NULL;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_unique_transaction_ref
   ON public.payments (transaction_ref)
@@ -37,7 +43,7 @@ CREATE INDEX IF NOT EXISTS idx_orders_pending_payment_deadline
   ON public.orders (payment_deadline)
   WHERE status = 'pending_payment' AND paid_at IS NULL;
 
--- 2. Atomic offer -> order creation (reuses existing 30m reservation, no double-reserve)
+-- 3. Atomic offer -> order creation (reuses existing 30m reservation, no double-reserve)
 CREATE OR REPLACE FUNCTION public.create_offer_order_atomic(
   p_offer_id uuid,
   p_idempotency_key text DEFAULT NULL
@@ -166,7 +172,7 @@ BEGIN
 END;
 $$;
 
--- 3. Release expired unpaid CART orders (15m payment_deadline) safely & once
+-- 4. Release expired unpaid CART orders (15m payment_deadline) safely & once
 CREATE OR REPLACE FUNCTION public.release_expired_cart_orders()
 RETURNS integer
 LANGUAGE plpgsql
@@ -221,10 +227,10 @@ BEGIN
 END;
 $$;
 
--- 4. Atomic payment confirmation (service_role ONLY — invoked ONLY after
+-- 5. Atomic payment confirmation (service_role ONLY — invoked ONLY after
 --    server-side ToyyibPay `getBillTransactions` verification, NEVER from redirect).
---    Enforces bill_code match, exact amount_sen, replay protection, offer hold
---    integrity, and late-payment reconciliation without overselling.
+--    Lock order: `offers (if source='offer') -> orders -> payments -> listings/variants`
+--    (consistent with Phase 5B `release_expired_offer_reservations()` to avoid deadlocks).
 CREATE OR REPLACE FUNCTION public.confirm_order_payment_atomic(
   p_order_id uuid,
   p_bill_code text,
@@ -238,16 +244,46 @@ SECURITY DEFINER
 SET search_path = public, pg_temp
 AS $$
 DECLARE
+  v_source text;
+  v_offer public.offers;
   v_order public.orders;
   v_payment public.payments;
-  v_offer public.offers;
   v_item RECORD;
+  v_listing public.listings;
+  v_variant public.listing_variants;
   v_now timestamptz := now();
   v_pin text;
   v_offer_released boolean := false;
 BEGIN
   IF p_transaction_ref IS NULL OR length(trim(p_transaction_ref)) = 0 THEN
     RAISE EXCEPTION 'MISSING_TRANSACTION_REF';
+  END IF;
+
+  -- Non-locking peek at source so we can lock `offers` BEFORE `orders` (deadlock-free)
+  SELECT source INTO v_source
+  FROM public.orders
+  WHERE id = p_order_id;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'ORDER_NOT_FOUND';
+  END IF;
+
+  -- Lock linked offer FIRST when source = 'offer' (matches Phase 5B sweeper lock order)
+  IF v_source = 'offer' THEN
+    SELECT * INTO v_offer
+    FROM public.offers
+    WHERE order_id = p_order_id
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'LINKED_OFFER_NOT_FOUND';
+    END IF;
+
+    IF v_offer.reservation_released_at IS NOT NULL
+       OR v_offer.status <> 'accepted'
+       OR (v_offer.reservation_expires_at IS NOT NULL AND v_now >= v_offer.reservation_expires_at) THEN
+      v_offer_released := true;
+    END IF;
   END IF;
 
   SELECT * INTO v_order
@@ -273,31 +309,24 @@ BEGIN
     RAISE EXCEPTION 'AMOUNT_MISMATCH';
   END IF;
 
-  -- Idempotent repeat callback on already-paid order
+  -- Duplicate callback verification: require exact transaction_ref match
   IF v_order.paid_at IS NOT NULL
      OR v_order.status IN ('paid', 'ready_for_pickup', 'handed_over', 'completed') THEN
-    RETURN 'already_paid';
-  END IF;
-
-  -- Check offer hold integrity when order originated from bargaining
-  IF v_order.source = 'offer' THEN
-    SELECT * INTO v_offer
-    FROM public.offers
-    WHERE order_id = v_order.id
-    FOR UPDATE;
-    IF FOUND AND (
-      v_offer.reservation_released_at IS NOT NULL
-      OR v_offer.status <> 'accepted'
-      OR (v_offer.reservation_expires_at IS NOT NULL AND v_now >= v_offer.reservation_expires_at)
-    ) THEN
-      v_offer_released := true;
+    IF v_payment.transaction_ref IS NULL OR v_payment.transaction_ref <> p_transaction_ref THEN
+      RAISE EXCEPTION 'TRANSACTION_REF_CONFLICT';
     END IF;
+    RETURN 'already_paid';
   END IF;
 
   -- Late-payment after expiry or released hold: DO NOT deduct stock or oversell
   IF v_offer_released
      OR v_order.status IN ('expired', 'cancelled')
      OR (v_order.payment_deadline IS NOT NULL AND v_now >= v_order.payment_deadline) THEN
+    IF v_payment.status = 'late_payment_review'
+       AND v_payment.transaction_ref = p_transaction_ref THEN
+      RETURN 'late_payment_reconciliation';
+    END IF;
+
     UPDATE public.payments
     SET status = 'late_payment_review',
         transaction_ref = p_transaction_ref,
@@ -313,25 +342,48 @@ BEGIN
     RAISE EXCEPTION 'ORDER_NOT_PAYABLE';
   END IF;
 
-  -- Deduct reserved & total stock atomically in deterministic lock order
+  -- Explicitly verify reservations & stock before deducting (NEVER mask oversell with GREATEST)
   FOR v_item IN
     SELECT listing_id, variant_id, quantity
     FROM public.order_items
     WHERE order_id = v_order.id
     ORDER BY listing_id, variant_id NULLS FIRST
   LOOP
+    SELECT * INTO v_listing
+    FROM public.listings
+    WHERE id = v_item.listing_id
+    FOR UPDATE;
+
+    IF NOT FOUND
+       OR v_listing.reserved_quantity < v_item.quantity
+       OR v_listing.quantity < v_item.quantity THEN
+      RAISE EXCEPTION 'INSUFFICIENT_LISTING_RESERVATION';
+    END IF;
+
     IF v_item.variant_id IS NOT NULL THEN
+      SELECT * INTO v_variant
+      FROM public.listing_variants
+      WHERE id = v_item.variant_id
+        AND listing_id = v_item.listing_id
+      FOR UPDATE;
+
+      IF NOT FOUND
+         OR v_variant.reserved_quantity < v_item.quantity
+         OR v_variant.quantity < v_item.quantity THEN
+        RAISE EXCEPTION 'INSUFFICIENT_VARIANT_RESERVATION';
+      END IF;
+
       UPDATE public.listing_variants
-      SET quantity = GREATEST(0, quantity - v_item.quantity),
-          reserved_quantity = GREATEST(0, reserved_quantity - v_item.quantity)
-      WHERE id = v_item.variant_id;
+      SET quantity = quantity - v_item.quantity,
+          reserved_quantity = reserved_quantity - v_item.quantity
+      WHERE id = v_variant.id;
     END IF;
 
     UPDATE public.listings
-    SET quantity = GREATEST(0, quantity - v_item.quantity),
-        reserved_quantity = GREATEST(0, reserved_quantity - v_item.quantity),
+    SET quantity = quantity - v_item.quantity,
+        reserved_quantity = reserved_quantity - v_item.quantity,
         updated_at = v_now
-    WHERE id = v_item.listing_id;
+    WHERE id = v_listing.id;
   END LOOP;
 
   v_pin := lpad((floor(random() * 1000000))::int::text, 6, '0');
@@ -374,8 +426,10 @@ COMMIT;
 --   DROP FUNCTION IF EXISTS public.create_offer_order_atomic(uuid, text);
 --   DROP INDEX IF EXISTS public.idx_orders_pending_payment_deadline;
 --   DROP INDEX IF EXISTS public.idx_payments_unique_transaction_ref;
---   DROP INDEX IF EXISTS public.idx_payments_unique_bill_code;
 --   DROP INDEX IF EXISTS public.idx_orders_cart_idempotency;
 --   ALTER TABLE public.orders DROP COLUMN IF EXISTS idempotency_key;
+--   ALTER TABLE public.payments DROP CONSTRAINT IF EXISTS payments_status_check;
+--   ALTER TABLE public.payments ADD CONSTRAINT payments_status_check
+--     CHECK (status IN ('pending', 'paid', 'failed', 'expired'));
 --   COMMIT;
 -- =============================================================================

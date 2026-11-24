@@ -171,6 +171,7 @@ export function evaluateToyyibPayVerification(input: {
     totalPaidSen: number;
     paymentDeadlineIso: string | null;
     paidAt: string | null;
+    existingTransactionRef?: string | null;
   };
   expectedBillCode: string;
   transaction?: ToyyibPayTransactionRecord | null;
@@ -239,13 +240,22 @@ export function evaluateToyyibPayVerification(input: {
     return { action: "reject", reason: "Missing ToyyibPay transaction reference." };
   }
 
-  // Idempotent repeat callback on already-paid order
+  // Idempotent repeat callback on already-paid order (must match original transaction_ref)
   if (
     input.order.paidAt !== null ||
     ["paid", "ready_for_pickup", "handed_over", "completed"].includes(
       input.order.status
     )
   ) {
+    if (
+      input.order.existingTransactionRef &&
+      input.order.existingTransactionRef.trim() !== txRef
+    ) {
+      return {
+        action: "reject",
+        reason: `Transaction reference conflict on already-paid order (existing ${input.order.existingTransactionRef}, got ${txRef}).`,
+      };
+    }
     return { action: "idempotent_already_paid", transactionRef: txRef };
   }
 

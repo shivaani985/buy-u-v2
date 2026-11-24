@@ -308,16 +308,36 @@ test("ToyyibPay contracts format MYT expiry, reject browser redirects, verify ex
     "reject"
   );
 
-  // Idempotent repeat callback on already-paid order
+  // Idempotent repeat callback on already-paid order (exact ref passes, conflicting ref rejected)
   assert.equal(
     evaluateToyyibPayVerification({
       source: "verified_server_transaction",
-      order: { ...order, status: "paid", paidAt: "2026-11-24T01:21:00.000Z" },
+      order: {
+        ...order,
+        status: "paid",
+        paidAt: "2026-11-24T01:21:00.000Z",
+        existingTransactionRef: "TP2611233721702887",
+      },
       expectedBillCode: "u4jq05z9",
       transaction: validTx,
       nowMs: beforeDeadline,
     }).action,
     "idempotent_already_paid"
+  );
+  assert.equal(
+    evaluateToyyibPayVerification({
+      source: "verified_server_transaction",
+      order: {
+        ...order,
+        status: "paid",
+        paidAt: "2026-11-24T01:21:00.000Z",
+        existingTransactionRef: "TP2611233721702887",
+      },
+      expectedBillCode: "u4jq05z9",
+      transaction: { ...validTx, billpaymentInvoiceNo: "TP-DIFFERENT-REPLAY" },
+      nowMs: beforeDeadline,
+    }).action,
+    "reject"
   );
 
   // Late verified payment after expiry routes to reconciliation (NEVER oversells)
