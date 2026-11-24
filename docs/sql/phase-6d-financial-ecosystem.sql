@@ -530,6 +530,9 @@ $$;
 ALTER TABLE public.orders
   ADD COLUMN IF NOT EXISTS protection_expires_at timestamptz;
 
+-- P0.11: Grant explicit column-level SELECT on protection_expires_at (preserves RLS & pickup_pin lockdown)
+GRANT SELECT (protection_expires_at) ON public.orders TO authenticated;
+
 -- Preserve already-promised 7-day deadline for orders completed BEFORE Phase 6D activation
 UPDATE public.orders
 SET protection_expires_at = completed_at + interval '7 days'
@@ -1011,6 +1014,9 @@ BEGIN
       return_status = CASE WHEN COALESCE(p_return_required, false) THEN 'awaiting_return' ELSE 'not_required' END,
       return_instructions = NULLIF(trim(COALESCE(p_return_instructions, '')), ''),
       status = CASE WHEN COALESCE(p_return_required, false) THEN 'awaiting_return' ELSE 'pending_execution' END,
+      -- P0.13: Changing return requirements invalidates any pre-approved pending restock plan
+      restock_status = CASE WHEN r.restock_status = 'approved_pending_refund' THEN 'pending_decision' ELSE r.restock_status END,
+      restock_plan = CASE WHEN r.restock_status = 'approved_pending_refund' THEN NULL ELSE r.restock_plan END,
       updated_at = v_now
   WHERE r.id = v_refund.id
   RETURNING * INTO v_refund;
@@ -1207,7 +1213,7 @@ $$;
 REVOKE ALL ON FUNCTION public.confirm_return_receipt_atomic(uuid, text, boolean, text) FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION public.confirm_return_receipt_atomic(uuid, text, boolean, text) TO authenticated;
 
--- 5.4 Internal guarded post-success restock executor (strict lock order: caller holds profiles/orders/disputes/refunds, then locks listings ORDER BY id -> variants ORDER BY id)
+-- 5.4 Internal guarded post-success restock executor (P0.13: two-phase deterministic locking ALL listings -> ALL variants -> mutate; revalidates return/condition/has_variants/food snapshot)
 CREATE OR REPLACE FUNCTION public.execute_approved_refund_restock_internal(
   p_refund_id uuid,
   p_actor_id uuid
@@ -1219,9 +1225,9 @@ SET search_path = public, pg_temp
 AS $$
 DECLARE
   v_refund public.order_refunds;
+  v_dispute public.order_disputes;
   v_order public.orders;
   v_plan_item RECORD;
-  v_oi public.order_items;
   v_listing public.listings;
   v_variant public.listing_variants;
   v_any_exception boolean := false;
@@ -1235,15 +1241,61 @@ BEGIN
   END IF;
 
   SELECT o.* INTO v_order FROM public.orders o WHERE o.id = v_refund.order_id;
+  SELECT d.* INTO v_dispute FROM public.order_disputes d WHERE d.id = v_refund.dispute_id;
 
-  -- Deterministic lock ordering across listings then variants (compatible with Phase 6B!)
+  -- Revalidate return & resellable condition immediately before any stock mutation (never rolls back refund!)
+  IF (v_dispute.previous_order_status IN ('handed_over', 'completed') OR v_order.handed_over_at IS NOT NULL)
+     AND (v_refund.return_status <> 'return_confirmed' OR v_refund.item_condition <> 'resellable') THEN
+    UPDATE public.order_refunds r
+    SET restock_status = 'inventory_exception', updated_at = v_now
+    WHERE r.id = v_refund.id;
+    RETURN 'inventory_exception';
+  END IF;
+
+  IF v_refund.item_condition IN ('damaged', 'missing') THEN
+    UPDATE public.order_refunds r
+    SET restock_status = 'inventory_exception', updated_at = v_now
+    WHERE r.id = v_refund.id;
+    RETURN 'inventory_exception';
+  END IF;
+
+  -- Phase 1: Lock ALL affected listings in deterministic ID order BEFORE any mutation (Phase 6B compatible!)
+  PERFORM 1
+  FROM public.listings l
+  WHERE l.id IN (
+    SELECT DISTINCT oi.listing_id
+    FROM jsonb_array_elements(COALESCE(v_refund.restock_plan, '[]'::jsonb)) elem
+    JOIN public.order_items oi
+      ON oi.id = (elem->>'order_item_id')::uuid
+     AND oi.order_id = v_order.id
+    WHERE oi.listing_id IS NOT NULL
+  )
+  ORDER BY l.id
+  FOR UPDATE;
+
+  -- Phase 2: Lock ALL affected variants in deterministic ID order BEFORE any mutation
+  PERFORM 1
+  FROM public.listing_variants lv
+  WHERE lv.id IN (
+    SELECT DISTINCT oi.variant_id
+    FROM jsonb_array_elements(COALESCE(v_refund.restock_plan, '[]'::jsonb)) elem
+    JOIN public.order_items oi
+      ON oi.id = (elem->>'order_item_id')::uuid
+     AND oi.order_id = v_order.id
+    WHERE oi.variant_id IS NOT NULL
+  )
+  ORDER BY lv.id
+  FOR UPDATE;
+
+  -- Phase 3: Validate structure & mutate inventory (exactly once per refund_id + order_item_id)
   FOR v_plan_item IN
     SELECT
       (elem->>'order_item_id')::uuid AS order_item_id,
       (elem->>'quantity')::integer AS restore_qty,
       oi.listing_id,
       oi.variant_id,
-      oi.quantity AS purchased_qty
+      oi.quantity AS purchased_qty,
+      COALESCE(oi.is_food, false) AS snapshot_is_food
     FROM jsonb_array_elements(COALESCE(v_refund.restock_plan, '[]'::jsonb)) elem
     JOIN public.order_items oi
       ON oi.id = (elem->>'order_item_id')::uuid
@@ -1271,8 +1323,11 @@ BEGIN
       CONTINUE;
     END IF;
 
-    SELECT * INTO v_listing FROM public.listings WHERE id = v_plan_item.listing_id FOR UPDATE;
-    IF NOT FOUND OR v_listing.is_food OR lower(COALESCE(v_listing.kind, '')) = 'service' THEN
+    SELECT * INTO v_listing FROM public.listings WHERE id = v_plan_item.listing_id;
+    IF NOT FOUND
+       OR v_plan_item.snapshot_is_food
+       OR COALESCE(v_listing.is_food, false)
+       OR lower(COALESCE(v_listing.kind, '')) = 'service' THEN
       v_any_exception := true;
       INSERT INTO public.order_restock_logs (
         refund_id, order_id, order_item_id, listing_id, variant_id,
@@ -1280,8 +1335,33 @@ BEGIN
       ) VALUES (
         v_refund.id, v_order.id, v_plan_item.order_item_id, v_plan_item.listing_id, v_plan_item.variant_id,
         0, 'inventory_exception',
-        CASE WHEN NOT FOUND THEN 'Listing no longer exists' ELSE 'Food or service listing ineligible for restock' END,
+        CASE WHEN NOT FOUND THEN 'Listing no longer exists' ELSE 'Food or service item ineligible for restock' END,
         p_actor_id, v_now
+      );
+      CONTINUE;
+    END IF;
+
+    -- Validate current has_variants structure vs purchased variant_id
+    IF COALESCE(v_listing.has_variants, false) AND v_plan_item.variant_id IS NULL THEN
+      v_any_exception := true;
+      INSERT INTO public.order_restock_logs (
+        refund_id, order_id, order_item_id, listing_id, variant_id,
+        quantity_restored, outcome, note, approved_by, created_at
+      ) VALUES (
+        v_refund.id, v_order.id, v_plan_item.order_item_id, v_plan_item.listing_id, v_plan_item.variant_id,
+        0, 'inventory_exception', 'Listing switched to variants; non-variant item incompatible', p_actor_id, v_now
+      );
+      CONTINUE;
+    END IF;
+
+    IF NOT COALESCE(v_listing.has_variants, false) AND v_plan_item.variant_id IS NOT NULL THEN
+      v_any_exception := true;
+      INSERT INTO public.order_restock_logs (
+        refund_id, order_id, order_item_id, listing_id, variant_id,
+        quantity_restored, outcome, note, approved_by, created_at
+      ) VALUES (
+        v_refund.id, v_order.id, v_plan_item.order_item_id, v_plan_item.listing_id, v_plan_item.variant_id,
+        0, 'inventory_exception', 'Listing no longer uses variants; purchased variant incompatible', p_actor_id, v_now
       );
       CONTINUE;
     END IF;
@@ -1289,8 +1369,7 @@ BEGIN
     IF v_plan_item.variant_id IS NOT NULL THEN
       SELECT * INTO v_variant
       FROM public.listing_variants
-      WHERE id = v_plan_item.variant_id AND listing_id = v_listing.id
-      FOR UPDATE;
+      WHERE id = v_plan_item.variant_id AND listing_id = v_listing.id;
 
       IF NOT FOUND THEN
         v_any_exception := true;
@@ -1299,7 +1378,7 @@ BEGIN
           quantity_restored, outcome, note, approved_by, created_at
         ) VALUES (
           v_refund.id, v_order.id, v_plan_item.order_item_id, v_plan_item.listing_id, v_plan_item.variant_id,
-          0, 'inventory_exception', 'Variant no longer exists or moved', p_actor_id, v_now
+          0, 'inventory_exception', 'Variant no longer exists or belongs to another listing', p_actor_id, v_now
         );
         CONTINUE;
       END IF;
@@ -1355,6 +1434,8 @@ DECLARE
   v_dispute public.order_disputes;
   v_refund public.order_refunds;
   v_plan jsonb := '[]'::jsonb;
+  v_seen_items uuid[] := '{}'::uuid[];
+  v_item_count integer := 0;
   v_item RECORD;
   v_oi public.order_items;
   v_listing public.listings;
@@ -1407,6 +1488,14 @@ BEGIN
     RAISE EXCEPTION 'RESTOCK_UNSUITABLE_CONDITION';
   END IF;
 
+  SELECT COUNT(*)::integer INTO v_item_count
+  FROM public.order_items oi WHERE oi.order_id = v_order.id;
+
+  -- P0.13: Multi-item orders require explicit item/quantity selection
+  IF p_items IS NULL AND v_item_count > 1 THEN
+    RAISE EXCEPTION 'EXPLICIT_MULTI_ITEM_RESTOCK_REQUIRED';
+  END IF;
+
   -- Build and validate explicit restock plan
   IF p_items IS NOT NULL THEN
     IF jsonb_typeof(p_items) <> 'array' OR jsonb_array_length(p_items) = 0 THEN
@@ -1418,6 +1507,14 @@ BEGIN
         (elem->>'quantity')::integer AS req_qty
       FROM jsonb_array_elements(p_items) elem
     LOOP
+      IF v_item.order_item_id IS NULL THEN
+        RAISE EXCEPTION 'INVALID_RESTOCK_ORDER_ITEM';
+      END IF;
+      IF v_item.order_item_id = ANY(v_seen_items) THEN
+        RAISE EXCEPTION 'DUPLICATE_RESTOCK_ORDER_ITEM';
+      END IF;
+      v_seen_items := array_append(v_seen_items, v_item.order_item_id);
+
       SELECT oi.* INTO v_oi
       FROM public.order_items oi
       WHERE oi.id = v_item.order_item_id AND oi.order_id = v_order.id;
@@ -1427,8 +1524,11 @@ BEGIN
       IF v_item.req_qty IS NULL OR v_item.req_qty <= 0 OR v_item.req_qty > v_oi.quantity THEN
         RAISE EXCEPTION 'INVALID_RESTOCK_QUANTITY';
       END IF;
+      IF COALESCE(v_oi.is_food, false) THEN
+        RAISE EXCEPTION 'FOOD_OR_SERVICE_NOT_RESTOCKABLE';
+      END IF;
       SELECT l.* INTO v_listing FROM public.listings l WHERE l.id = v_oi.listing_id;
-      IF FOUND AND (v_listing.is_food OR lower(COALESCE(v_listing.kind, '')) = 'service') THEN
+      IF FOUND AND (COALESCE(v_listing.is_food, false) OR lower(COALESCE(v_listing.kind, '')) = 'service') THEN
         RAISE EXCEPTION 'FOOD_OR_SERVICE_NOT_RESTOCKABLE';
       END IF;
       v_plan := v_plan || jsonb_build_array(
@@ -1439,8 +1539,11 @@ BEGIN
     FOR v_oi IN
       SELECT oi.* FROM public.order_items oi WHERE oi.order_id = v_order.id ORDER BY oi.id
     LOOP
+      IF COALESCE(v_oi.is_food, false) THEN
+        RAISE EXCEPTION 'FOOD_OR_SERVICE_NOT_RESTOCKABLE';
+      END IF;
       SELECT l.* INTO v_listing FROM public.listings l WHERE l.id = v_oi.listing_id;
-      IF FOUND AND (v_listing.is_food OR lower(COALESCE(v_listing.kind, '')) = 'service') THEN
+      IF FOUND AND (COALESCE(v_listing.is_food, false) OR lower(COALESCE(v_listing.kind, '')) = 'service') THEN
         RAISE EXCEPTION 'FOOD_OR_SERVICE_NOT_RESTOCKABLE';
       END IF;
       v_plan := v_plan || jsonb_build_array(
@@ -1468,7 +1571,7 @@ $$;
 REVOKE ALL ON FUNCTION public.admin_approve_refund_restock_atomic(uuid, boolean, jsonb) FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION public.admin_approve_refund_restock_atomic(uuid, boolean, jsonb) TO authenticated;
 
--- 5.6 Durable Provider Outcome Recorder (P0.4 / P0.5 — service_role only)
+-- 5.6 Durable Provider Outcome Recorder (P0.12: immutable once definitive; idempotent on identical replay; rejects conflicts)
 CREATE OR REPLACE FUNCTION public.record_provider_attempt_outcome_atomic(
   p_attempt_token uuid,
   p_provider_outcome text,
@@ -1482,6 +1585,7 @@ SET search_path = public, pg_temp
 AS $$
 DECLARE
   v_attempt public.financial_execution_attempts;
+  v_clean_ref text := NULLIF(trim(COALESCE(p_simulation_ref, '')), '');
   v_now timestamptz := clock_timestamp();
 BEGIN
   IF p_attempt_token IS NULL OR p_provider_outcome IS NULL THEN
@@ -1497,25 +1601,53 @@ BEGIN
     RETURN false;
   END IF;
 
-  IF v_attempt.status = 'finalized' THEN
-    RETURN true;
-  END IF;
-
   IF (v_attempt.entity_type = 'refund' AND p_provider_outcome NOT IN ('succeeded', 'failed', 'reconciliation_required'))
      OR (v_attempt.entity_type = 'withdrawal' AND p_provider_outcome NOT IN ('paid', 'failed', 'reconciliation_required')) THEN
     RAISE EXCEPTION 'INVALID_PROVIDER_OUTCOME';
   END IF;
 
+  -- Require valid simulation ref prefix for definitive simulated successes
+  IF p_provider_outcome = 'succeeded' AND v_attempt.simulation_mode
+     AND (v_clean_ref IS NULL OR v_clean_ref NOT LIKE 'SIM-RFD-%') THEN
+    RAISE EXCEPTION 'INVALID_REFUND_REF';
+  END IF;
+  IF p_provider_outcome = 'paid' AND v_attempt.simulation_mode
+     AND (v_clean_ref IS NULL OR v_clean_ref NOT LIKE 'SIM-TRF-%') THEN
+    RAISE EXCEPTION 'INVALID_TRANSFER_REF';
+  END IF;
+
+  -- P0.12 Immutability: definitive recorded success CANNOT become failure, uncertainty, or a different ref!
+  IF v_attempt.provider_outcome IN ('succeeded', 'paid') THEN
+    IF p_provider_outcome = v_attempt.provider_outcome
+       AND v_clean_ref IS NOT DISTINCT FROM v_attempt.simulation_ref THEN
+      RETURN true; -- Idempotent identical replay
+    END IF;
+    RAISE EXCEPTION 'CONFLICTING_PROVIDER_OUTCOME';
+  END IF;
+
+  -- P0.12 Immutability: definitive recorded failure CANNOT become success or uncertainty for the same attempt!
+  IF v_attempt.provider_outcome = 'failed' THEN
+    IF p_provider_outcome = 'failed' THEN
+      RETURN true; -- Idempotent identical replay
+    END IF;
+    RAISE EXCEPTION 'CONFLICTING_PROVIDER_OUTCOME';
+  END IF;
+
+  IF v_attempt.status = 'finalized' THEN
+    RETURN true;
+  END IF;
+
+  -- Unrecorded (NULL) or uncertain ('reconciliation_required') may transition to trusted definitive outcome
   UPDATE public.financial_execution_attempts a
   SET provider_outcome = p_provider_outcome,
-      simulation_ref = COALESCE(NULLIF(trim(p_simulation_ref), ''), a.simulation_ref),
+      simulation_ref = COALESCE(v_clean_ref, a.simulation_ref),
       failure_or_uncertainty_reason = COALESCE(NULLIF(trim(p_reason), ''), a.failure_or_uncertainty_reason),
       status = CASE
         WHEN p_provider_outcome IN ('succeeded', 'paid') THEN 'provider_succeeded'
         WHEN p_provider_outcome = 'failed' THEN 'provider_failed'
         ELSE 'provider_uncertain'
       END,
-      provider_recorded_at = v_now
+      provider_recorded_at = COALESCE(a.provider_recorded_at, v_now)
   WHERE a.id = v_attempt.id;
 
   RETURN true;
@@ -1588,8 +1720,15 @@ BEGIN
     RAISE EXCEPTION 'PAYMENT_UNVERIFIED';
   END IF;
 
-  IF v_dispute.status <> 'resolved' OR v_dispute.resolution_type NOT IN ('full_refund', 'partial_refund') THEN
+  IF v_dispute.status <> 'resolved'
+     OR v_dispute.resolution_type NOT IN ('full_refund', 'partial_refund')
+     OR v_refund.refund_type <> v_dispute.resolution_type
+     OR v_refund.refund_amount_sen <> v_dispute.refund_amount_sen THEN
     RAISE EXCEPTION 'INVALID_DISPUTE_STATE';
+  END IF;
+
+  IF v_order.status <> 'disputed' THEN
+    RAISE EXCEPTION 'ORDER_NOT_DISPUTED';
   END IF;
 
   IF v_refund.refund_amount_sen <= 0 OR v_refund.refund_amount_sen > v_order.subtotal_sen THEN
@@ -1652,6 +1791,7 @@ DECLARE
   v_refund public.order_refunds;
   v_dispute public.order_disputes;
   v_order public.orders;
+  v_attempt public.financial_execution_attempts;
   v_now timestamptz := clock_timestamp();
   v_next_order_status text;
   v_clean_ref text := trim(COALESCE(p_refund_ref, ''));
@@ -1670,6 +1810,7 @@ BEGIN
   WHERE r.id = p_refund_id;
   IF NOT FOUND THEN RAISE EXCEPTION 'REFUND_NOT_FOUND'; END IF;
 
+  -- Strict lock order: profiles -> orders -> order_disputes -> order_refunds -> financial_execution_attempts
   PERFORM 1 FROM public.profiles p WHERE p.id = v_order.seller_id FOR UPDATE;
   SELECT o.* INTO v_order FROM public.orders o WHERE o.id = v_order.id FOR UPDATE;
   SELECT d.* INTO v_dispute FROM public.order_disputes d
@@ -1686,15 +1827,40 @@ BEGIN
     RETURN 'stale_attempt';
   END IF;
 
+  -- P0.12: Lock & validate corresponding execution attempt (entity_type, entity_id, token, logical_tx_id)
+  SELECT a.* INTO v_attempt
+  FROM public.financial_execution_attempts a
+  WHERE a.attempt_token = p_attempt_token
+  FOR UPDATE;
+
+  IF NOT FOUND
+     OR v_attempt.entity_type <> 'refund'
+     OR v_attempt.entity_id <> v_refund.id
+     OR v_attempt.logical_tx_id <> v_refund.idempotency_key THEN
+    RAISE EXCEPTION 'ATTEMPT_EVIDENCE_MISMATCH';
+  END IF;
+
   IF NOT public.is_order_payment_verified(v_order.id) THEN
     RAISE EXCEPTION 'PAYMENT_UNVERIFIED';
   END IF;
 
+  IF v_dispute.status <> 'resolved'
+     OR v_refund.refund_type <> v_dispute.resolution_type
+     OR v_refund.refund_amount_sen <> v_dispute.refund_amount_sen
+     OR v_order.status <> 'disputed' THEN
+    RAISE EXCEPTION 'INVALID_DISPUTE_STATE';
+  END IF;
+
   IF p_outcome = 'failed' THEN
+    -- P0.12: Require definitive persisted provider failure; NEVER fabricate provider_recorded_at!
+    IF v_attempt.provider_recorded_at IS NULL OR v_attempt.provider_outcome <> 'failed' THEN
+      RAISE EXCEPTION 'UNVERIFIED_PROVIDER_FAILURE';
+    END IF;
+
     UPDATE public.order_refunds r
     SET status = 'failed',
         attempt_token = NULL,
-        failure_reason = COALESCE(NULLIF(trim(p_failure_reason), ''), 'Simulated refund provider failure'),
+        failure_reason = COALESCE(NULLIF(trim(p_failure_reason), ''), v_attempt.failure_or_uncertainty_reason, 'Simulated refund provider failure'),
         updated_at = v_now
     WHERE r.id = v_refund.id;
 
@@ -1704,36 +1870,42 @@ BEGIN
 
     UPDATE public.financial_execution_attempts a
     SET status = 'finalized',
-        provider_outcome = 'failed',
-        failure_or_uncertainty_reason = COALESCE(NULLIF(trim(p_failure_reason), ''), a.failure_or_uncertainty_reason),
-        provider_recorded_at = COALESCE(a.provider_recorded_at, v_now),
         finalized_at = v_now
-    WHERE a.attempt_token = p_attempt_token;
+    WHERE a.id = v_attempt.id;
 
     RETURN 'failed';
   END IF;
 
   IF p_outcome = 'reconciliation_required' THEN
-    -- Keep attempt_token intact so durable recovery worker can finalize once provider outcome is known!
+    -- Never downgrade a definitive recorded success or failure to uncertain!
+    IF v_attempt.provider_outcome IN ('succeeded', 'failed') THEN
+      RAISE EXCEPTION 'CONFLICTING_PROVIDER_OUTCOME';
+    END IF;
+
     UPDATE public.order_refunds r
     SET status = 'reconciliation_required',
-        reconciliation_reason = COALESCE(NULLIF(trim(p_failure_reason), ''), 'Uncertain refund provider response'),
+        reconciliation_reason = COALESCE(NULLIF(trim(p_failure_reason), ''), v_attempt.failure_or_uncertainty_reason, 'Uncertain refund provider response'),
         updated_at = v_now
     WHERE r.id = v_refund.id;
 
     UPDATE public.financial_execution_attempts a
     SET status = 'provider_uncertain',
         provider_outcome = 'reconciliation_required',
-        failure_or_uncertainty_reason = COALESCE(NULLIF(trim(p_failure_reason), ''), a.failure_or_uncertainty_reason),
-        provider_recorded_at = COALESCE(a.provider_recorded_at, v_now)
-    WHERE a.attempt_token = p_attempt_token;
+        failure_or_uncertainty_reason = COALESCE(NULLIF(trim(p_failure_reason), ''), a.failure_or_uncertainty_reason)
+    WHERE a.id = v_attempt.id;
 
     RETURN 'reconciliation_required';
   END IF;
 
-  -- SUCCEEDED: require trusted simulated provider ref format
+  -- SUCCEEDED: require trusted persisted provider success & matching simulation_ref (NEVER fabricate provider_recorded_at!)
   IF length(v_clean_ref) = 0 OR (v_refund.simulation_mode AND v_clean_ref NOT LIKE 'SIM-RFD-%') THEN
     RAISE EXCEPTION 'INVALID_REFUND_REF';
+  END IF;
+
+  IF v_attempt.provider_recorded_at IS NULL
+     OR v_attempt.provider_outcome <> 'succeeded'
+     OR v_attempt.simulation_ref IS DISTINCT FROM v_clean_ref THEN
+    RAISE EXCEPTION 'UNVERIFIED_PROVIDER_SUCCESS';
   END IF;
 
   UPDATE public.order_refunds r
@@ -1752,11 +1924,8 @@ BEGIN
 
   UPDATE public.financial_execution_attempts a
   SET status = 'finalized',
-      provider_outcome = 'succeeded',
-      simulation_ref = v_clean_ref,
-      provider_recorded_at = COALESCE(a.provider_recorded_at, v_now),
       finalized_at = v_now
-  WHERE a.attempt_token = p_attempt_token;
+  WHERE a.id = v_attempt.id;
 
   INSERT INTO public.financial_adjustments (order_id, refund_id, dispute_id, seller_id, kind, amount_sen, note, created_by, created_at)
   VALUES
@@ -2164,6 +2333,7 @@ SET search_path = public, pg_temp
 AS $$
 DECLARE
   v_wdr public.payout_requests;
+  v_attempt public.financial_execution_attempts;
   v_alloc_sum integer := 0;
   v_now timestamptz := clock_timestamp();
   v_clean_ref text := trim(COALESCE(p_transfer_ref, ''));
@@ -2179,6 +2349,7 @@ BEGIN
   SELECT pr.* INTO v_wdr FROM public.payout_requests pr WHERE pr.id = p_withdrawal_id;
   IF NOT FOUND THEN RAISE EXCEPTION 'WITHDRAWAL_NOT_FOUND'; END IF;
 
+  -- Strict lock order: profiles -> payout_requests -> financial_execution_attempts
   PERFORM 1 FROM public.profiles p WHERE p.id = v_wdr.seller_id FOR UPDATE;
   SELECT pr.* INTO v_wdr FROM public.payout_requests pr WHERE pr.id = p_withdrawal_id FOR UPDATE;
 
@@ -2191,11 +2362,29 @@ BEGIN
     RETURN 'stale_attempt';
   END IF;
 
+  -- P0.12: Lock & validate corresponding execution attempt (entity_type, entity_id, token, logical_tx_id)
+  SELECT a.* INTO v_attempt
+  FROM public.financial_execution_attempts a
+  WHERE a.attempt_token = p_attempt_token
+  FOR UPDATE;
+
+  IF NOT FOUND
+     OR v_attempt.entity_type <> 'withdrawal'
+     OR v_attempt.entity_id <> v_wdr.id
+     OR v_attempt.logical_tx_id <> v_wdr.idempotency_key THEN
+    RAISE EXCEPTION 'ATTEMPT_EVIDENCE_MISMATCH';
+  END IF;
+
   IF p_outcome = 'failed' THEN
+    -- P0.12: NEVER release reserved funds without definitive recorded provider failure!
+    IF v_attempt.provider_recorded_at IS NULL OR v_attempt.provider_outcome <> 'failed' THEN
+      RAISE EXCEPTION 'UNVERIFIED_PROVIDER_FAILURE';
+    END IF;
+
     UPDATE public.payout_requests pr
     SET status = 'failed',
         attempt_token = NULL,
-        failure_reason = COALESCE(NULLIF(trim(p_failure_reason), ''), 'Simulated bank transfer failed'),
+        failure_reason = COALESCE(NULLIF(trim(p_failure_reason), ''), v_attempt.failure_or_uncertainty_reason, 'Simulated bank transfer failed'),
         updated_at = v_now
     WHERE pr.id = v_wdr.id;
 
@@ -2205,11 +2394,8 @@ BEGIN
 
     UPDATE public.financial_execution_attempts a
     SET status = 'finalized',
-        provider_outcome = 'failed',
-        failure_or_uncertainty_reason = COALESCE(NULLIF(trim(p_failure_reason), ''), a.failure_or_uncertainty_reason),
-        provider_recorded_at = COALESCE(a.provider_recorded_at, v_now),
         finalized_at = v_now
-    WHERE a.attempt_token = p_attempt_token;
+    WHERE a.id = v_attempt.id;
 
     PERFORM public.safe_insert_notification(
       v_wdr.seller_id,
@@ -2224,25 +2410,34 @@ BEGIN
   END IF;
 
   IF p_outcome = 'reconciliation_required' THEN
-    -- Keep attempt_token AND reserved allocations intact until provider outcome is confirmed!
+    IF v_attempt.provider_outcome IN ('paid', 'failed') THEN
+      RAISE EXCEPTION 'CONFLICTING_PROVIDER_OUTCOME';
+    END IF;
+
     UPDATE public.payout_requests pr
     SET status = 'reconciliation_required',
-        reconciliation_reason = COALESCE(NULLIF(trim(p_failure_reason), ''), 'Uncertain transfer outcome'),
+        reconciliation_reason = COALESCE(NULLIF(trim(p_failure_reason), ''), v_attempt.failure_or_uncertainty_reason, 'Uncertain transfer outcome'),
         updated_at = v_now
     WHERE pr.id = v_wdr.id;
 
     UPDATE public.financial_execution_attempts a
     SET status = 'provider_uncertain',
         provider_outcome = 'reconciliation_required',
-        failure_or_uncertainty_reason = COALESCE(NULLIF(trim(p_failure_reason), ''), a.failure_or_uncertainty_reason),
-        provider_recorded_at = COALESCE(a.provider_recorded_at, v_now)
-    WHERE a.attempt_token = p_attempt_token;
+        failure_or_uncertainty_reason = COALESCE(NULLIF(trim(p_failure_reason), ''), a.failure_or_uncertainty_reason)
+    WHERE a.id = v_attempt.id;
 
     RETURN 'reconciliation_required';
   END IF;
 
   IF length(v_clean_ref) = 0 OR (v_wdr.simulation_mode AND v_clean_ref NOT LIKE 'SIM-TRF-%') THEN
     RAISE EXCEPTION 'INVALID_TRANSFER_REF';
+  END IF;
+
+  -- P0.12: Require trusted persisted provider success & matching transfer_ref (NEVER fabricate provider_recorded_at!)
+  IF v_attempt.provider_recorded_at IS NULL
+     OR v_attempt.provider_outcome <> 'paid'
+     OR v_attempt.simulation_ref IS DISTINCT FROM v_clean_ref THEN
+    RAISE EXCEPTION 'UNVERIFIED_PROVIDER_SUCCESS';
   END IF;
 
   -- P0.4: Validate exact allocated total before marking paid!
@@ -2270,11 +2465,8 @@ BEGIN
 
   UPDATE public.financial_execution_attempts a
   SET status = 'finalized',
-      provider_outcome = 'paid',
-      simulation_ref = v_clean_ref,
-      provider_recorded_at = COALESCE(a.provider_recorded_at, v_now),
       finalized_at = v_now
-  WHERE a.attempt_token = p_attempt_token;
+  WHERE a.id = v_attempt.id;
 
   PERFORM public.safe_insert_notification(
     v_wdr.seller_id,

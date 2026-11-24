@@ -224,37 +224,102 @@ test("P0.5: deterministic provider refs survive replay & fail closed in producti
   }
 });
 
-test("P0.4 & P0.5: interruption/restart recovery finalizes persisted success/failure and HOLDS uncertain funds", async () => {
-  // Simulate server crash AFTER provider outcome persisted, BEFORE finalization:
-  //   1. Withdrawal A: provider succeeded (SIM-TRF-...) -> crash -> recovery finalizes PAID once
-  //   2. Withdrawal B: provider failed -> crash -> recovery finalizes FAILED & releases allocations once
-  //   3. Withdrawal C: provider timeout / no recorded outcome -> recovery MUST HOLD (never release!)
-  //   4. Refund D: provider succeeded (SIM-RFD-...) -> crash -> recovery finalizes SUCCEEDED once
+test("P0.4 & P0.5 & P0.14: all 7 interrupted-processing recovery scenarios execute cleanly", async () => {
+  const nowMs = Date.parse("2026-11-24T01:05:00Z");
+  const bankProvider = new SimulatedBankPayoutProvider();
+  const refundProvider = new SimulatedRefundProvider();
+
+  // State across all 7 scenarios:
+  //   1. wClaimCrash:  Crash after claim, before provider execution (stale started > 60s)
+  //   2. rExecCrash:   Crash after simulated provider execution, before outcome persistence (stale started > 60s)
+  //   3. wPersistCrash: Crash after outcome persistence, before finalization
+  //   4. wInFlight:    Concurrent normal processing (< 60s old started -> active_in_flight, NOT raced!)
+  //   5. (Duplicate sweep verified on Pass 2 -> zero duplicate writes/releases!)
+  //   6. wDefFail:     Definitive provider failure -> restores withdrawal allocations once
+  //   7. wUncertain:   Truly uncertain outcome (`reconciliation_required`) -> retains reservation
   const dbState = {
-    wA: { status: "processing", allocations: "reserved", ref: null },
-    wB: { status: "processing", allocations: "reserved", ref: null },
-    wC: { status: "reconciliation_required", allocations: "reserved", ref: null },
-    rD: { status: "processing", ref: null },
+    wClaimCrash: { status: "processing", allocations: "reserved", ref: null, recordedOutcome: null },
+    rExecCrash: { status: "processing", ref: null, recordedOutcome: null },
+    wPersistCrash: { status: "processing", allocations: "reserved", ref: null, recordedOutcome: "paid" },
+    wInFlight: { status: "processing", allocations: "reserved", ref: null, recordedOutcome: null },
+    wDefFail: { status: "processing", allocations: "reserved", ref: null, recordedOutcome: "failed" },
+    wUncertain: { status: "reconciliation_required", allocations: "reserved", ref: null, recordedOutcome: "reconciliation_required" },
   };
+  let providerReexecCalls = 0;
   let finalizeCalls = 0;
 
   const entities = [
     {
       entityType: "withdrawal",
-      entityId: "wA",
-      code: "WDR-2611-AAAAAA",
-      logicalTxId: "wdr-a",
+      entityId: "wClaimCrash",
+      code: "WDR-2611-CLAIM1",
+      logicalTxId: "wdr-claim-1",
       status: "processing",
-      attemptToken: "tok-a",
+      attemptToken: "tok-claim1",
+      amountSen: 1000,
+      sellerId: "s1",
+      maskedBankSummary: "Maybank · ****5678",
       latestAttempt: {
         entityType: "withdrawal",
-        entityId: "wA",
-        logicalTxId: "wdr-a",
-        attemptToken: "tok-a",
+        entityId: "wClaimCrash",
+        logicalTxId: "wdr-claim-1",
+        attemptToken: "tok-claim1",
         attemptNumber: 1,
+        simulationMode: true,
+        status: "started",
+        providerOutcome: null,
+        simulationRef: null,
+        failureOrUncertaintyReason: null,
+        startedAt: "2026-11-24T01:00:00Z", // 5 min old -> stale
+        providerRecordedAt: null,
+        finalizedAt: null,
+      },
+    },
+    {
+      entityType: "refund",
+      entityId: "rExecCrash",
+      code: "RFD-2611-EXEC02",
+      logicalTxId: "rfd-exec-2",
+      status: "processing",
+      attemptToken: "tok-exec2",
+      amountSen: 500,
+      orderId: "ord-2",
+      latestAttempt: {
+        entityType: "refund",
+        entityId: "rExecCrash",
+        logicalTxId: "rfd-exec-2",
+        attemptToken: "tok-exec2",
+        attemptNumber: 1,
+        simulationMode: true,
+        status: "started",
+        providerOutcome: null,
+        simulationRef: null,
+        failureOrUncertaintyReason: null,
+        startedAt: "2026-11-24T01:00:00Z", // 5 min old -> stale
+        providerRecordedAt: null,
+        finalizedAt: null,
+      },
+    },
+    {
+      entityType: "withdrawal",
+      entityId: "wPersistCrash",
+      code: "WDR-2611-PERS03",
+      logicalTxId: "wdr-pers-3",
+      status: "processing",
+      attemptToken: "tok-pers3",
+      amountSen: 1470,
+      sellerId: "s1",
+      maskedBankSummary: "Maybank · ****5678",
+      latestAttempt: {
+        entityType: "withdrawal",
+        entityId: "wPersistCrash",
+        logicalTxId: "wdr-pers-3",
+        attemptToken: "tok-pers3",
+        attemptNumber: 1,
+        simulationMode: true,
         status: "provider_succeeded",
         providerOutcome: "paid",
-        simulationRef: "SIM-TRF-2611-AAAAAA-12345678",
+        simulationRef: "SIM-TRF-2611-PERS03-12345678",
         failureOrUncertaintyReason: null,
         startedAt: "2026-11-24T01:00:00Z",
         providerRecordedAt: "2026-11-24T01:00:02Z",
@@ -263,17 +328,47 @@ test("P0.4 & P0.5: interruption/restart recovery finalizes persisted success/fai
     },
     {
       entityType: "withdrawal",
-      entityId: "wB",
-      code: "WDR-2611-BBBBBB",
-      logicalTxId: "wdr-b",
+      entityId: "wInFlight",
+      code: "WDR-2611-LIVE04",
+      logicalTxId: "wdr-live-4",
       status: "processing",
-      attemptToken: "tok-b",
+      attemptToken: "tok-live4",
+      amountSen: 500,
+      sellerId: "s1",
+      maskedBankSummary: "Maybank · ****5678",
       latestAttempt: {
         entityType: "withdrawal",
-        entityId: "wB",
-        logicalTxId: "wdr-b",
-        attemptToken: "tok-b",
+        entityId: "wInFlight",
+        logicalTxId: "wdr-live-4",
+        attemptToken: "tok-live4",
         attemptNumber: 1,
+        simulationMode: true,
+        status: "started",
+        providerOutcome: null,
+        simulationRef: null,
+        failureOrUncertaintyReason: null,
+        startedAt: "2026-11-24T01:04:45Z", // 15s old -> active in-flight!
+        providerRecordedAt: null,
+        finalizedAt: null,
+      },
+    },
+    {
+      entityType: "withdrawal",
+      entityId: "wDefFail",
+      code: "WDR-2611-FAIL06",
+      logicalTxId: "wdr-fail-6",
+      status: "processing",
+      attemptToken: "tok-fail6",
+      amountSen: 800,
+      sellerId: "s1",
+      maskedBankSummary: "Maybank · ****5678",
+      latestAttempt: {
+        entityType: "withdrawal",
+        entityId: "wDefFail",
+        logicalTxId: "wdr-fail-6",
+        attemptToken: "tok-fail6",
+        attemptNumber: 1,
+        simulationMode: true,
         status: "provider_failed",
         providerOutcome: "failed",
         simulationRef: null,
@@ -285,97 +380,111 @@ test("P0.4 & P0.5: interruption/restart recovery finalizes persisted success/fai
     },
     {
       entityType: "withdrawal",
-      entityId: "wC",
-      code: "WDR-2611-CCCCCC",
-      logicalTxId: "wdr-c",
+      entityId: "wUncertain",
+      code: "WDR-2611-UNCT07",
+      logicalTxId: "wdr-unct-7",
       status: "reconciliation_required",
-      attemptToken: "tok-c",
+      attemptToken: "tok-unct7",
+      amountSen: 900,
+      sellerId: "s1",
+      maskedBankSummary: "Maybank · ****5678",
       latestAttempt: {
         entityType: "withdrawal",
-        entityId: "wC",
-        logicalTxId: "wdr-c",
-        attemptToken: "tok-c",
+        entityId: "wUncertain",
+        logicalTxId: "wdr-unct-7",
+        attemptToken: "tok-unct7",
         attemptNumber: 1,
+        simulationMode: true,
         status: "provider_uncertain",
         providerOutcome: "reconciliation_required",
         simulationRef: null,
         failureOrUncertaintyReason: "Gateway timeout",
-        startedAt: "2026-11-20T01:00:00Z", // Even 4 days old, elapsed time NEVER releases!
+        startedAt: "2026-11-20T01:00:00Z",
         providerRecordedAt: "2026-11-20T01:00:05Z",
-        finalizedAt: null,
-      },
-    },
-    {
-      entityType: "refund",
-      entityId: "rD",
-      code: "RFD-2611-DDDDDD",
-      logicalTxId: "rfd-d",
-      status: "processing",
-      attemptToken: "tok-d",
-      latestAttempt: {
-        entityType: "refund",
-        entityId: "rD",
-        logicalTxId: "rfd-d",
-        attemptToken: "tok-d",
-        attemptNumber: 1,
-        status: "provider_succeeded",
-        providerOutcome: "succeeded",
-        simulationRef: "SIM-RFD-2611-DDDDDD-87654321",
-        failureOrUncertaintyReason: null,
-        startedAt: "2026-11-24T01:00:00Z",
-        providerRecordedAt: "2026-11-24T01:00:02Z",
         finalizedAt: null,
       },
     },
   ];
 
-  // Verify unsafe uncertain release is classified as hold_uncertain
-  assert.equal(classifyPersistedRecoveryEvidence(entities[2]), "hold_uncertain");
+  // Verify Scenario 4 (concurrent normal processing) and Scenario 7 (uncertain) classifications
+  assert.equal(classifyPersistedRecoveryEvidence(entities[3], nowMs), "active_in_flight");
+  assert.equal(classifyPersistedRecoveryEvidence(entities[5], nowMs), "hold_uncertain");
+
+  // Pre-compute what Scenario 2's provider returned BEFORE the crash so we prove deterministic match
+  const preCrashRefundRef = refundProvider.deriveDeterministicRef("RFD-2611-EXEC02", "rfd-exec-2");
 
   const store = {
     async listPendingEntities() {
       return entities;
     },
-    async finalizeFromPersistedEvidence(entityType, entityId) {
+    async executeAndRecordSimulatedProvider(entity) {
+      providerReexecCalls += 1;
+      if (entity.entityType === "withdrawal") {
+        const r = await bankProvider.executeDisbursement({
+          withdrawalCode: entity.code,
+          sellerId: entity.sellerId ?? "",
+          amountSen: entity.amountSen,
+          idempotencyKey: entity.logicalTxId,
+          bankName: "Maybank",
+          accountLast4: "5678",
+        });
+        dbState[entity.entityId].recordedOutcome = r.outcome;
+        dbState[entity.entityId].ref = r.transferRef ?? null;
+        return { outcome: r.outcome, simulationRef: r.transferRef ?? null, reason: null };
+      }
+      const r = await refundProvider.executeRefund({
+        refundCode: entity.code,
+        orderId: entity.orderId ?? "",
+        amountSen: entity.amountSen,
+        idempotencyKey: entity.logicalTxId,
+      });
+      dbState[entity.entityId].recordedOutcome = r.outcome;
+      dbState[entity.entityId].ref = r.refundRef ?? null;
+      return { outcome: r.outcome, simulationRef: r.refundRef ?? null, reason: null };
+    },
+    async finalizeFromPersistedEvidence(_entityType, entityId) {
       finalizeCalls += 1;
-      if (entityId === "wA") {
-        dbState.wA.status = "paid";
-        dbState.wA.allocations = "paid";
-        dbState.wA.ref = "SIM-TRF-2611-AAAAAA-12345678";
-        entities[0].status = "paid";
+      const idx = entities.findIndex((e) => e.entityId === entityId);
+      if (entityId === "wClaimCrash" || entityId === "wPersistCrash") {
+        dbState[entityId].status = "paid";
+        dbState[entityId].allocations = "paid";
+        entities[idx].status = "paid";
         return "paid";
       }
-      if (entityId === "wB") {
-        dbState.wB.status = "failed";
-        dbState.wB.allocations = "released";
-        entities[1].status = "failed";
-        return "failed";
-      }
-      if (entityId === "rD") {
-        dbState.rD.status = "succeeded";
-        dbState.rD.ref = "SIM-RFD-2611-DDDDDD-87654321";
-        entities[3].status = "succeeded";
+      if (entityId === "rExecCrash") {
+        dbState.rExecCrash.status = "succeeded";
+        entities[idx].status = "succeeded";
         return "succeeded";
+      }
+      if (entityId === "wDefFail") {
+        dbState.wDefFail.status = "failed";
+        dbState.wDefFail.allocations = "released";
+        entities[idx].status = "failed";
+        return "failed";
       }
       return "held_uncertain";
     },
   };
 
-  // Pass 1 (after simulated crash/restart)
-  const res1 = await runDurableRecoverySweep(store);
-  assert.equal(res1.find((x) => x.entityId === "wA")?.result, "paid");
-  assert.equal(res1.find((x) => x.entityId === "wB")?.result, "failed");
-  assert.equal(res1.find((x) => x.entityId === "wC")?.result, "held_uncertain");
-  assert.equal(res1.find((x) => x.entityId === "rD")?.result, "succeeded");
-  assert.equal(dbState.wA.allocations, "paid");
-  assert.equal(dbState.wB.allocations, "released");
-  assert.equal(dbState.wC.allocations, "reserved", "Uncertain withdrawal MUST remain reserved");
-  assert.equal(finalizeCalls, 3);
+  // Sweep 1 (post-crash recovery)
+  const res1 = await runDurableRecoverySweep(store, { nowMs });
+  assert.equal(res1.find((x) => x.entityId === "wClaimCrash")?.result, "paid");
+  assert.equal(res1.find((x) => x.entityId === "rExecCrash")?.result, "succeeded");
+  assert.equal(dbState.rExecCrash.ref, preCrashRefundRef, "Crash after provider exec recovers exact deterministic ref");
+  assert.equal(res1.find((x) => x.entityId === "wPersistCrash")?.result, "paid");
+  assert.equal(res1.find((x) => x.entityId === "wInFlight")?.result, "active_in_flight");
+  assert.equal(res1.find((x) => x.entityId === "wDefFail")?.result, "failed");
+  assert.equal(res1.find((x) => x.entityId === "wUncertain")?.result, "held_uncertain");
+  assert.equal(dbState.wDefFail.allocations, "released");
+  assert.equal(dbState.wUncertain.allocations, "reserved", "Uncertain withdrawal MUST retain reservation");
+  assert.equal(providerReexecCalls, 2);
+  assert.equal(finalizeCalls, 4);
 
-  // Pass 2 (idempotent replay — ZERO additional finalization calls!)
-  const res2 = await runDurableRecoverySweep(store);
-  assert.equal(finalizeCalls, 3, "Replay must not duplicate finalizations or releases");
-  assert.equal(res2.find((x) => x.entityId === "wC")?.result, "held_uncertain");
+  // Sweep 2 (Scenario 5: duplicate recovery execution -> ZERO duplicate provider calls or finalizations!)
+  const res2 = await runDurableRecoverySweep(store, { nowMs });
+  assert.equal(providerReexecCalls, 2);
+  assert.equal(finalizeCalls, 4);
+  assert.equal(res2.find((x) => x.entityId === "wUncertain")?.result, "held_uncertain");
 });
 
 // -----------------------------------------------------------------------------
@@ -502,6 +611,57 @@ test("P0.8 & P0.9: restock separation, food/damaged/quantity guards, lock order,
     SQL,
     /RETURNS public\.order_refunds/,
     "Participant RPCs must return explicit safe columns, never raw order_refunds rows"
+  );
+});
+
+// -----------------------------------------------------------------------------
+// 7b. P0.11, P0.12 & P0.13 — Column Grant, Immutable Provider Evidence & Two-Phase Restock Locks
+// -----------------------------------------------------------------------------
+test("P0.11, P0.12 & P0.13: protection_expires_at grant, immutable provider evidence, and two-phase restock locks", () => {
+  // P0.11: explicit column-level SELECT grant on orders.protection_expires_at (no table-level GRANT SELECT ON public.orders!)
+  assert.match(SQL, /GRANT SELECT \(protection_expires_at\) ON public\.orders TO authenticated;/);
+  assert.doesNotMatch(SQL, /GRANT SELECT ON public\.orders TO authenticated/i);
+
+  // P0.12: immutable provider evidence & zero fabrication of provider_recorded_at in finalizers
+  assert.match(SQL, /CONFLICTING_PROVIDER_OUTCOME/);
+  assert.match(SQL, /ATTEMPT_EVIDENCE_MISMATCH/);
+  assert.match(SQL, /UNVERIFIED_PROVIDER_FAILURE/);
+  assert.match(SQL, /UNVERIFIED_PROVIDER_SUCCESS/);
+  assert.match(SQL, /v_refund\.refund_amount_sen <> v_dispute\.refund_amount_sen/);
+  const finalizeRefundBlock = SQL.slice(
+    SQL.indexOf("FUNCTION public.finalize_order_refund_atomic"),
+    SQL.indexOf("SECTION 6: Seller Bank Account Upsert")
+  );
+  assert.doesNotMatch(
+    finalizeRefundBlock,
+    /provider_recorded_at\s*=/,
+    "finalize_order_refund_atomic must NEVER fabricate provider_recorded_at"
+  );
+  const finalizeWdrBlock = SQL.slice(
+    SQL.indexOf("FUNCTION public.finalize_seller_withdrawal_atomic"),
+    SQL.indexOf("DROP FUNCTION IF EXISTS public.admin_release_failed_withdrawal_atomic")
+  );
+  assert.doesNotMatch(
+    finalizeWdrBlock,
+    /provider_recorded_at\s*=/,
+    "finalize_seller_withdrawal_atomic must NEVER fabricate provider_recorded_at"
+  );
+
+  // P0.13: two-phase listing -> variant locking, duplicate item rejection, multi-item explicit qty, food snapshot & has_variants
+  assert.match(SQL, /DUPLICATE_RESTOCK_ORDER_ITEM/);
+  assert.match(SQL, /EXPLICIT_MULTI_ITEM_RESTOCK_REQUIRED/);
+  assert.match(SQL, /COALESCE\(oi\.is_food, false\) AS snapshot_is_food/);
+  assert.match(SQL, /COALESCE\(v_listing\.has_variants, false\)/);
+  const restockExecBlock = SQL.slice(
+    SQL.indexOf("FUNCTION public.execute_approved_refund_restock_internal"),
+    SQL.indexOf("FUNCTION public.admin_approve_refund_restock_atomic")
+  );
+  const lockListingsIdx = restockExecBlock.indexOf("FROM public.listings l");
+  const lockVariantsIdx = restockExecBlock.indexOf("FROM public.listing_variants lv");
+  const loopIdx = restockExecBlock.indexOf("FOR v_plan_item IN");
+  assert.ok(
+    lockListingsIdx > 0 && lockVariantsIdx > lockListingsIdx && loopIdx > lockVariantsIdx,
+    "Restock executor MUST lock ALL listings first, ALL variants second, then mutate in loop"
   );
 });
 

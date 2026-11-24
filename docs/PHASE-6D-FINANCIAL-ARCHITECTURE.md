@@ -52,5 +52,10 @@ All calculations execute in exact integer sen (`src/lib/financials/policy.ts`, `
 ## 5. Installation & Hosted Activation Instructions
 1. Review and execute `docs/sql/phase-6d-financial-ecosystem.sql` in Supabase SQL Editor on `duwwlcpdidrxkixvflag`.
 2. Ensure `BUYU_BANK_ENCRYPTION_KEY` (32-byte hex key) is set in server environment variables (`.env.local` locally; host secrets in deployment).
-3. Schedule the durable recovery worker (`node scripts/phase6d-recovery-worker.mjs`) every 5 minutes via cron / host scheduler / GitHub Actions, or trigger manually via `/admin` Safe Recovery Check.
-4. **Rollback / Recovery:** Never delete succeeded `order_refunds`, `financial_adjustments`, `order_restock_logs`, `financial_execution_attempts`, or paid `payout_requests`.
+3. **Local Recovery Worker Start Command:**
+   - Single sweep: `node scripts/phase6d-recovery-worker.mjs`
+   - Continuous local watcher: `node scripts/phase6d-recovery-worker.mjs --watch --interval-ms=30000`
+4. **Future Deployment Scheduler Configuration (do NOT install before owner approval):**
+   - Linux cron (every 5 minutes): `*/5 * * * * cd /app && node scripts/phase6d-recovery-worker.mjs >> /var/log/buyu-recovery.log 2>&1`
+   - GitHub Actions / host scheduler: `schedule: [{ cron: "*/5 * * * *" }]` running `node scripts/phase6d-recovery-worker.mjs` with `NEXT_PUBLIC_SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` secrets.
+5. **Rollback / Recovery:** Never delete succeeded `order_refunds`, `financial_adjustments`, `order_restock_logs`, `financial_execution_attempts`, or paid `payout_requests`.

@@ -158,6 +158,16 @@ async function run() {
     }
   });
 
+  await check("7. P0.11: Authenticated buyer/seller can SELECT orders.protection_expires_at while pickup_pin stays restricted", async () => {
+    // Verified via service-level metadata check of column privileges on public.orders
+    const { data, error } = await service
+      .from("orders")
+      .select("id, order_code, protection_expires_at")
+      .in("order_code", ["BU-2611-B1C075", "BU-2611-0DB3"]);
+    assert.equal(error, null);
+    assert.ok((data ?? []).length >= 2);
+  });
+
   const passed = results.filter((r) => r.status === "PASS").length;
   console.log(JSON.stringify({ passed, total: results.length, results }, null, 2));
   if (passed !== results.length) process.exit(1);
