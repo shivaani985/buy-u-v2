@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Eye, EyeOff } from "lucide-react";
+import { Eye, EyeOff, Lock } from "lucide-react";
 
 interface PasswordInputProps {
   id: string;
@@ -18,7 +18,7 @@ export function PasswordInput({
   name,
   label,
   autoComplete = "current-password",
-  placeholder = "Enter password",
+  placeholder = "Enter your password",
   required = true,
   minLength,
 }: PasswordInputProps) {
@@ -28,11 +28,12 @@ export function PasswordInput({
     <div>
       <label
         htmlFor={id}
-        className="block text-xs font-bold uppercase tracking-wider text-[#14121A]"
+        className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-[#3C3744] mb-1.5"
       >
-        {label}
+        <Lock className="h-3.5 w-3.5 text-[#4E2A84]" aria-hidden="true" />
+        <span>{label}</span>
       </label>
-      <div className="mt-1.5 flex items-center border border-[#14121A] bg-white focus-within:border-[#4E2A84]">
+      <div className="relative rounded-xl border border-[#D5D0E0] bg-[#FAF9FD] transition-all duration-150 focus-within:border-[#4E2A84] focus-within:bg-white focus-within:ring-2 focus-within:ring-[#4E2A84]/20">
         <input
           id={id}
           name={name}
@@ -41,14 +42,14 @@ export function PasswordInput({
           placeholder={placeholder}
           required={required}
           minLength={minLength}
-          className="w-full bg-transparent px-3.5 py-2.5 text-sm text-[#14121A] placeholder:text-[#5B5668] focus:outline-none"
+          className="w-full bg-transparent px-4 py-3 pr-11 text-sm text-[#14121A] placeholder:text-[#8E889B] outline-none"
         />
         <button
           type="button"
           onClick={() => setVisible((prev) => !prev)}
           aria-label={visible ? `Hide ${label.toLowerCase()}` : `Show ${label.toLowerCase()}`}
           aria-pressed={visible}
-          className="flex h-10 w-10 shrink-0 items-center justify-center text-[#4A4656] hover:text-[#4E2A84]"
+          className="absolute right-2 top-1/2 flex h-8 w-8 -translate-y-1/2 cursor-pointer items-center justify-center rounded-lg text-[#6B6578] transition-all hover:bg-black/5 hover:text-[#4E2A84] active:scale-95"
         >
           {visible ? (
             <EyeOff className="h-4 w-4" aria-hidden="true" />

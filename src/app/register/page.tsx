@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { redirect } from "next/navigation";
-import { AuthFormShell } from "@/components/auth/AuthFormShell";
+import { AuthLayout } from "@/components/auth/AuthLayout";
 import { RegisterForm } from "@/components/auth/RegisterForm";
 import { getSessionSummary } from "@/lib/supabase/server";
 
@@ -17,17 +17,16 @@ export default async function RegisterPage() {
   }
 
   return (
-    <AuthFormShell
-      title="Join"
-      accentWord="UMSKAL"
-      subtitle="Create your Buy-U account with your official UMS email. Email verification is required before member access is enabled."
-      accentColor="teal"
+    <AuthLayout
+      title="Create your"
+      accentWord="Buy-U account"
+      subtitle="Register with your official Universiti Malaysia Sabah student or staff email to join the UMSKAL campus marketplace."
       footer={
         <p>
-          Already have a verified UMS account?{" "}
+          Already have an account?{" "}
           <Link
             href="/login"
-            className="font-bold text-[#007D80] hover:underline"
+            className="font-bold text-[#4E2A84] hover:underline"
           >
             Sign in
           </Link>
@@ -35,6 +34,6 @@ export default async function RegisterPage() {
       }
     >
       <RegisterForm />
-    </AuthFormShell>
+    </AuthLayout>
   );
 }

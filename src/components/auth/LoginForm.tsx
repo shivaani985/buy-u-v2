@@ -2,7 +2,7 @@
 
 import { useActionState } from "react";
 import Link from "next/link";
-import { AlertCircle, LogIn } from "lucide-react";
+import { AlertCircle, LogIn, Mail } from "lucide-react";
 import { signInMember, type AuthActionState } from "@/app/auth/actions";
 import { PasswordInput } from "./PasswordInput";
 
@@ -29,9 +29,9 @@ export function LoginForm({ nextPath, initialError }: LoginFormProps) {
       {errorMessage ? (
         <div
           role="alert"
-          className="flex items-start gap-2.5 border border-[#4E2A84] bg-[#F8F4FC] p-3.5 text-sm text-[#14121A]"
+          className="flex items-start gap-2.5 rounded-xl border border-[#F3B3B3] bg-[#FEF2F2] p-3.5 text-sm text-[#991B1B]"
         >
-          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-[#4E2A84]" aria-hidden="true" />
+          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-[#DC2626]" aria-hidden="true" />
           <span>{errorMessage}</span>
         </div>
       ) : null}
@@ -39,9 +39,10 @@ export function LoginForm({ nextPath, initialError }: LoginFormProps) {
       <div>
         <label
           htmlFor="login-email"
-          className="block text-xs font-bold uppercase tracking-wider text-[#14121A]"
+          className="mb-1.5 flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-[#3C3744]"
         >
-          UMS Email Address
+          <Mail className="h-3.5 w-3.5 text-[#4E2A84]" aria-hidden="true" />
+          <span>UMS Email Address</span>
         </label>
         <input
           id="login-email"
@@ -49,8 +50,8 @@ export function LoginForm({ nextPath, initialError }: LoginFormProps) {
           type="email"
           autoComplete="email"
           required
-          placeholder="student@iluv.ums.edu.my or staff@ums.edu.my"
-          className="mt-1.5 w-full border border-[#14121A] bg-white px-3.5 py-2.5 text-sm text-[#14121A] placeholder:text-[#5B5668] focus:border-[#4E2A84]"
+          placeholder="name@iluv.ums.edu.my or name@ums.edu.my"
+          className="w-full rounded-xl border border-[#D5D0E0] bg-[#FAF9FD] px-4 py-3 text-sm text-[#14121A] placeholder:text-[#8E889B] outline-none transition-all duration-150 focus:border-[#4E2A84] focus:bg-white focus:ring-2 focus:ring-[#4E2A84]/20"
         />
       </div>
 
@@ -59,12 +60,13 @@ export function LoginForm({ nextPath, initialError }: LoginFormProps) {
         name="password"
         label="Password"
         autoComplete="current-password"
+        placeholder="Enter your password"
       />
 
-      <div className="flex items-center justify-end">
+      <div className="flex items-center justify-end pt-0.5">
         <Link
           href="/forgot-password"
-          className="text-xs font-bold text-[#1D70B8] hover:text-[#4E2A84] hover:underline"
+          className="text-xs font-bold text-[#008285] transition-colors hover:text-[#4E2A84] hover:underline"
         >
           Forgot password?
         </Link>
@@ -73,7 +75,7 @@ export function LoginForm({ nextPath, initialError }: LoginFormProps) {
       <button
         type="submit"
         disabled={pending}
-        className="inline-flex w-full items-center justify-center gap-2 bg-[#4E2A84] px-5 py-3 text-sm font-bold text-white hover:bg-[#381C63] disabled:opacity-60 press-feedback editorial-cut-tr"
+        className="inline-flex w-full cursor-pointer items-center justify-center gap-2 rounded-xl bg-[#4E2A84] px-5 py-3.5 text-sm font-bold text-white shadow-md shadow-[#4E2A84]/15 transition-all duration-150 hover:bg-[#3D1E6B] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60"
       >
         <LogIn className="h-4 w-4" aria-hidden="true" />
         <span>{pending ? "Signing in..." : "Sign in to Buy-U"}</span>

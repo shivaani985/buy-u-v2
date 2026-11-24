@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { redirect } from "next/navigation";
-import { AuthFormShell } from "@/components/auth/AuthFormShell";
+import { AuthLayout } from "@/components/auth/AuthLayout";
 import { LoginForm } from "@/components/auth/LoginForm";
 import { sanitizeNextPath } from "@/lib/auth/validation";
 import { getSessionSummary } from "@/lib/supabase/server";
@@ -24,11 +24,10 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
   }
 
   return (
-    <AuthFormShell
+    <AuthLayout
       title="Sign in to"
       accentWord="Buy-U"
-      subtitle="Use your official Universiti Malaysia Sabah student (@iluv.ums.edu.my) or staff (@ums.edu.my) account to browse live UMSKAL listings."
-      accentColor="purple"
+      subtitle="Use your official Universiti Malaysia Sabah student (@iluv.ums.edu.my) or staff (@ums.edu.my) account to access the Buy-U marketplace."
       footer={
         <p>
           New to Buy-U?{" "}
@@ -45,6 +44,6 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
         nextPath={nextPath}
         initialError={typeof sp.error === "string" ? sp.error : undefined}
       />
-    </AuthFormShell>
+    </AuthLayout>
   );
 }

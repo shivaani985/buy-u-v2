@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { AuthFormShell } from "@/components/auth/AuthFormShell";
+import { AuthLayout } from "@/components/auth/AuthLayout";
 import { ResetPasswordForm } from "@/components/auth/ResetPasswordForm";
 import { getSessionSummary } from "@/lib/supabase/server";
 
@@ -13,11 +13,10 @@ export default async function ResetPasswordPage() {
   const session = await getSessionSummary();
 
   return (
-    <AuthFormShell
+    <AuthLayout
       title="Choose a new"
       accentWord="Password"
-      subtitle="Enter a strong new password (at least 8 characters) to complete account recovery."
-      accentColor="purple"
+      subtitle="Enter a strong new password (at least 8 characters) to complete your account recovery."
       footer={
         <p>
           Need a fresh link?{" "}
@@ -35,17 +34,17 @@ export default async function ResetPasswordPage() {
       ) : (
         <div
           role="alert"
-          className="border border-[#4E2A84] bg-[#F8F4FC] p-4 text-sm text-[#14121A]"
+          className="rounded-xl border border-[#F3B3B3] bg-[#FEF2F2] p-4 text-sm text-[#991B1B]"
         >
-          <p className="font-bold text-[#4E2A84]">
+          <p className="font-bold text-[#991B1B]">
             Recovery session required
           </p>
-          <p className="mt-1 text-[#4A4656]">
+          <p className="mt-1 text-xs text-[#7F1D1D] leading-relaxed">
             Open the password recovery link sent to your UMS email inbox so your
             session is verified before updating your password.
           </p>
         </div>
       )}
-    </AuthFormShell>
+    </AuthLayout>
   );
 }
