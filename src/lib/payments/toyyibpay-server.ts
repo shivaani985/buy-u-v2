@@ -85,7 +85,8 @@ async function postToyyibPayForm(
       `ToyyibPay Sandbox is not configured (${config.missing.join(", ")}).`
     );
   }
-  if (!config.baseUrl.startsWith("https://dev.toyyibpay.com")) {
+  const sandboxUrl = new URL(config.baseUrl);
+  if (sandboxUrl.origin !== "https://dev.toyyibpay.com" || sandboxUrl.username || sandboxUrl.password) {
     throw new ToyyibPayDefiniteError("Refusing non-sandbox ToyyibPay base URL.");
   }
 
@@ -244,13 +245,15 @@ export async function ensureSandboxBillForOrder(input: {
   const attemptToken = claim?.attempt_token ?? null;
 
   if (action === "reuse_bill" && claim?.bill_code && claim?.bill_url) {
+    const resumeError = await getBillResumeError(claim.bill_code, order.order_code, order.payment_deadline);
     return {
-      ok: true,
+      ok: !resumeError,
+      error: resumeError,
       orderId: order.id,
       orderCode: order.order_code,
       billCode: claim.bill_code,
-      billUrl: claim.bill_url,
-      reused: true,
+      billUrl: resumeError ? null : claim.bill_url,
+      reused: !resumeError,
     };
   }
 
@@ -486,13 +489,15 @@ export async function ensureSandboxBillForCheckoutSession(input: {
   const attemptToken = claim?.attempt_token ?? null;
 
   if (action === "reuse_bill" && claim?.bill_code && claim?.bill_url) {
+    const resumeError = await getBillResumeError(claim.bill_code, session.checkout_code, session.payment_deadline);
     return {
-      ok: true,
+      ok: !resumeError,
+      error: resumeError,
       checkoutSessionId: session.id,
       checkoutCode: session.checkout_code,
       billCode: claim.bill_code,
-      billUrl: claim.bill_url,
-      reused: true,
+      billUrl: resumeError ? null : claim.bill_url,
+      reused: !resumeError,
     };
   }
 
@@ -637,6 +642,28 @@ export async function ensureSandboxBillForCheckoutSession(input: {
   }
 }
 
+/**
+ * The bill-slot RPC has already released its transaction before this request.
+ * Verify a reusable bill before sending the buyer back to FPX.
+ */
+async function getBillResumeError(billCode: string, reference: string, deadline: string | null) {
+  const result = await verifyAndReconcileBillPayment({ billCode, expectedOrderCode: reference });
+  if (result.outcome === "late_payment_reconciliation") {
+    return "Payment under review. Please do not make another payment.";
+  }
+  if (result.outcome === "confirmed_paid" || result.outcome === "already_paid") {
+    return "Payment has already been verified. View your orders for the latest status.";
+  }
+  if (result.outcome === "expired" || (deadline && Date.now() >= Date.parse(deadline))) {
+    return "Payment window has expired.";
+  }
+  if (result.canResumeBill && result.ok) return undefined;
+  if (result.ok && result.outcome === "pending") {
+    return "An existing payment is awaiting confirmation. Check Payment Status before trying again.";
+  }
+  return "The existing payment could not be checked. Try again before making another payment.";
+}
+
 export interface ReconcileBillOutcome {
   ok: boolean;
   outcome:
@@ -646,12 +673,23 @@ export interface ReconcileBillOutcome {
     | "failed"
     | "pending"
     | "expired"
+    | "unavailable"
     | "rejected";
   checkoutSessionId?: string;
   checkoutCode?: string;
   orderId?: string;
   orderCode?: string;
+  canResumeBill?: boolean;
   message: string;
+}
+
+function getTerminalPaymentState(state: { paymentStatus?: string | null; paid: boolean; expired: boolean }) {
+  if (state.paymentStatus === "late_payment_review") {
+    return { outcome: "late_payment_reconciliation", message: "Payment under review. Please do not make another payment." } as const;
+  }
+  if (state.paid) return { outcome: "already_paid", message: "Payment already confirmed." } as const;
+  if (state.expired) return { outcome: "expired", message: "Payment window has expired." } as const;
+  return null;
 }
 
 /**
@@ -702,17 +740,14 @@ export async function verifyAndReconcileBillPayment(input: {
     let transactions: ToyyibPayTransactionRecord[];
     try {
       transactions = await fetchToyyibPayBillTransactions(billCode);
-    } catch (err) {
+    } catch {
       return {
         ok: false,
-        outcome: "pending",
+        outcome: "unavailable",
         checkoutSessionId: sessionRow.id,
         checkoutCode: sessionRow.checkout_code,
         orderCode: sessionRow.checkout_code,
-        message:
-          err instanceof Error
-            ? `Verification pending: ${err.message}`
-            : "Could not verify transaction with ToyyibPay right now.",
+        message: "Could not verify the transaction with ToyyibPay right now. Please try again.",
       };
     }
 
@@ -728,6 +763,12 @@ export async function verifyAndReconcileBillPayment(input: {
       null;
 
     if (!chosenTx) {
+      const terminal = getTerminalPaymentState({
+        paymentStatus: sessionRow.payment_status,
+        paid: sessionRow.status === "paid" && sessionRow.payment_status === "paid" && Boolean(sessionRow.paid_at),
+        expired: ["expired", "cancelled"].includes(sessionRow.status),
+      });
+      if (terminal) return { ok: true, ...terminal, checkoutSessionId: sessionRow.id, orderCode: sessionRow.checkout_code };
       if (
         sessionRow.status === "expired" ||
         (sessionRow.payment_deadline &&
@@ -748,6 +789,7 @@ export async function verifyAndReconcileBillPayment(input: {
         checkoutSessionId: sessionRow.id,
         checkoutCode: sessionRow.checkout_code,
         orderCode: sessionRow.checkout_code,
+        canResumeBill: true,
         message: "Waiting for ToyyibPay FPX confirmation.",
       };
     }
@@ -789,7 +831,7 @@ export async function verifyAndReconcileBillPayment(input: {
     }
 
     if (decision.action === "mark_failed") {
-      const { data: failOutcome } = await service.rpc(
+      const { data: failOutcome, error: failError } = await service.rpc(
         "mark_checkout_payment_failed_atomic",
         {
           p_checkout_session_id: sessionRow.id,
@@ -798,19 +840,22 @@ export async function verifyAndReconcileBillPayment(input: {
             input.rawCallback ?? (chosenTx as unknown as Record<string, unknown>),
         }
       );
-      if (String(failOutcome ?? "") === "ignored_terminal") {
-        return {
-          ok: true,
-          outcome: "already_paid",
-          checkoutSessionId: sessionRow.id,
-          checkoutCode: sessionRow.checkout_code,
-          orderCode: sessionRow.checkout_code,
-          message: "Checkout already reached a terminal paid or reconciliation state.",
-        };
+      if (failError) return { ok: false, outcome: "unavailable", message: "Payment status could not be updated." };
+      if (failOutcome === "ignored_terminal") {
+        const { data: fresh } = await service.from("checkout_sessions").select("status,payment_status,paid_at")
+          .eq("id", sessionRow.id).maybeSingle();
+        const terminal = fresh && getTerminalPaymentState({
+          paymentStatus: fresh.payment_status,
+          paid: fresh.status === "paid" && fresh.payment_status === "paid" && Boolean(fresh.paid_at),
+          expired: ["expired", "cancelled"].includes(fresh.status) || fresh.payment_status === "expired",
+        });
+        if (terminal) return { ok: true, ...terminal, checkoutSessionId: sessionRow.id, orderCode: sessionRow.checkout_code };
+        return { ok: false, outcome: "unavailable", message: "Payment status changed. Check again." };
       }
       return {
         ok: true,
         outcome: "failed",
+        canResumeBill: failOutcome === "marked_failed" || failOutcome === "already_failed",
         checkoutSessionId: sessionRow.id,
         checkoutCode: sessionRow.checkout_code,
         orderCode: sessionRow.checkout_code,
@@ -883,7 +928,7 @@ export async function verifyAndReconcileBillPayment(input: {
         checkoutCode: sessionRow.checkout_code,
         orderCode: sessionRow.checkout_code,
         message:
-          "Payment arrived after checkout expiry. Logged for admin refund reconciliation without deducting stock.",
+          "Payment under review. Please do not make another payment.",
       };
     }
 
@@ -901,7 +946,7 @@ export async function verifyAndReconcileBillPayment(input: {
 
   const { data: paymentRow, error: payErr } = await service
     .from("payments")
-    .select("id, order_id, bill_code, amount_sen, status, transaction_ref")
+    .select("id, order_id, bill_code, amount_sen, status, transaction_ref, verified_at")
     .eq("bill_code", billCode)
     .maybeSingle();
 
@@ -935,16 +980,13 @@ export async function verifyAndReconcileBillPayment(input: {
   let transactions: ToyyibPayTransactionRecord[];
   try {
     transactions = await fetchToyyibPayBillTransactions(billCode);
-  } catch (err) {
+  } catch {
     return {
       ok: false,
-      outcome: "pending",
+      outcome: "unavailable",
       orderId: orderRow.id,
       orderCode: orderRow.order_code,
-      message:
-        err instanceof Error
-          ? `Verification pending: ${err.message}`
-          : "Could not verify transaction with ToyyibPay right now.",
+      message: "Could not verify the transaction with ToyyibPay right now. Please try again.",
     };
   }
 
@@ -961,6 +1003,12 @@ export async function verifyAndReconcileBillPayment(input: {
     null;
 
   if (!chosenTx) {
+    const terminal = getTerminalPaymentState({
+      paymentStatus: paymentRow.status,
+      paid: paymentRow.status === "paid" && Boolean(paymentRow.verified_at && orderRow.paid_at),
+      expired: ["expired", "cancelled"].includes(orderRow.status),
+    });
+    if (terminal) return { ok: true, ...terminal, orderId: orderRow.id, orderCode: orderRow.order_code };
     if (
       orderRow.status === "expired" ||
       (orderRow.payment_deadline &&
@@ -979,6 +1027,7 @@ export async function verifyAndReconcileBillPayment(input: {
       outcome: "pending",
       orderId: orderRow.id,
       orderCode: orderRow.order_code,
+      canResumeBill: true,
       message: "Waiting for ToyyibPay FPX confirmation.",
     };
   }
@@ -1018,7 +1067,7 @@ export async function verifyAndReconcileBillPayment(input: {
   }
 
   if (decision.action === "mark_failed") {
-    const { data: failOutcome } = await service.rpc(
+    const { data: failOutcome, error: failError } = await service.rpc(
       "mark_order_payment_failed_atomic",
       {
         p_order_id: orderRow.id,
@@ -1027,18 +1076,24 @@ export async function verifyAndReconcileBillPayment(input: {
           input.rawCallback ?? (chosenTx as unknown as Record<string, unknown>),
       }
     );
-    if (String(failOutcome ?? "") === "ignored_terminal") {
-      return {
-        ok: true,
-        outcome: "already_paid",
-        orderId: orderRow.id,
-        orderCode: orderRow.order_code,
-        message: "Order already reached a terminal paid or reconciliation state.",
-      };
+    if (failError) return { ok: false, outcome: "unavailable", message: "Payment status could not be updated." };
+    if (failOutcome === "ignored_terminal") {
+      const [{ data: latestPayment }, { data: latestOrder }] = await Promise.all([
+        service.from("payments").select("status,verified_at").eq("id", paymentRow.id).maybeSingle(),
+        service.from("orders").select("status,paid_at").eq("id", orderRow.id).maybeSingle(),
+      ]);
+      const terminal = latestOrder && latestPayment && getTerminalPaymentState({
+        paymentStatus: latestPayment.status,
+        paid: latestPayment.status === "paid" && Boolean(latestPayment.verified_at && latestOrder.paid_at),
+        expired: ["expired", "cancelled"].includes(latestOrder.status),
+      });
+      if (terminal) return { ok: true, ...terminal, orderId: orderRow.id, orderCode: orderRow.order_code };
+      return { ok: false, outcome: "unavailable", message: "Payment status changed. Check again." };
     }
     return {
       ok: true,
       outcome: "failed",
+      canResumeBill: failOutcome === "marked_failed" || failOutcome === "already_failed",
       orderId: orderRow.id,
       orderCode: orderRow.order_code,
       message: decision.reason,
@@ -1106,7 +1161,7 @@ export async function verifyAndReconcileBillPayment(input: {
       orderId: orderRow.id,
       orderCode: orderRow.order_code,
       message:
-        "Payment arrived after order expiry. Logged for admin refund reconciliation without deducting stock.",
+        "Payment under review. Please do not make another payment.",
     };
   }
 

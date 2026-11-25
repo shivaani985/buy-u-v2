@@ -2,15 +2,17 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
+import { createRequire } from "node:module";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import ts from "typescript";
 import {
   getOrderStatusBadge,
   getOrderTimelineSteps,
-  getSellerEarningsLedgerState,
+  getOrderPresentation,
   isValidPickupPinFormat,
-  matchesSellerOrderFilter,
-  matchesSellerOrderSearch,
   normalizePickupPinInput,
-  SELLER_ORDER_FILTER_TABS,
+  ORDER_STATUS_TABS,
 } from "../src/lib/orders/lifecycle.ts";
 import { computeSellerFinancials } from "../src/lib/seller/financials.ts";
 
@@ -140,7 +142,7 @@ test("2. Fixed seller transaction labels & earnings ledger transitions (paid -> 
   assert.equal(fin.availableForPayoutSen, 980);
 
   const labelByCode = new Map(fin.transactions.map((t) => [t.orderCode, t.statusLabel]));
-  assert.equal(labelByCode.get("BU-2611-B1C075"), "Paid — Awaiting Handover");
+  assert.equal(labelByCode.get("BU-2611-B1C075"), "Paid — In Progress");
   assert.equal(labelByCode.get("BU-2611-HO0001"), "Awaiting Receipt Confirmation");
   assert.equal(labelByCode.get("BU-2611-CP0001"), "Completed");
   assert.equal(labelByCode.get("BU-2611-DP0001"), "Disputed");
@@ -172,54 +174,80 @@ test("3. Pending payment transaction label is Awaiting Payment", () => {
   assert.equal(fin.transactions[0]?.statusLabel, "Awaiting Payment");
 });
 
-test("4. Seller order filters, search, badges, timeline & earnings ledger state", () => {
-  assert.equal(SELLER_ORDER_FILTER_TABS.length, 6);
-  assert.equal(matchesSellerOrderFilter("pending_payment", "awaiting_payment"), true);
-  assert.equal(matchesSellerOrderFilter("paid", "awaiting_handover"), true);
-  assert.equal(matchesSellerOrderFilter("handed_over", "awaiting_receipt"), true);
-  assert.equal(matchesSellerOrderFilter("completed", "completed"), true);
-  assert.equal(matchesSellerOrderFilter("disputed", "disputed_refunded"), true);
-  assert.equal(matchesSellerOrderFilter("refunded", "disputed_refunded"), true);
-
-  const sample = {
-    orderCode: "BU-2611-B1C075",
-    buyerName: "Examiner Staff",
-    collectionAreaName: "Cafe UMSKAL",
-    items: [{ title: "QA Notebook RM15" }],
-  };
-  assert.equal(matchesSellerOrderSearch(sample, "b1c075"), true);
-  assert.equal(matchesSellerOrderSearch(sample, "examiner"), true);
-  assert.equal(matchesSellerOrderSearch(sample, "cafe"), true);
-  assert.equal(matchesSellerOrderSearch(sample, "notebook"), true);
-  assert.equal(matchesSellerOrderSearch(sample, "nonexistent"), false);
-
-  assert.equal(getOrderStatusBadge("paid").label, "Paid — Awaiting Handover");
+test("4. Order status tabs, deadlines and timeline reflect the unified lifecycle", () => {
+  const paidAt = "2026-11-24T06:50:00Z";
+  const deadline = "2026-11-24T07:00:00Z";
+  const now = Date.parse(deadline);
+  assert.equal(ORDER_STATUS_TABS.length, 6);
+  assert.equal(getOrderPresentation({ status: "pending_payment", paymentDeadline: deadline }, now - 1).tab, "to-pay");
+  assert.equal(getOrderPresentation({ status: "pending_payment", paymentDeadline: deadline }, now).tab, "cancelled");
+  const late = getOrderPresentation({ status: "expired", paymentStatus: "late_payment_review" }, now);
+  assert.equal(late.tab, "refund-dispute");
+  assert.equal(late.badge.label, "Payment under review");
+  assert.equal(getOrderPresentation({ status: "paid" }, now).tab, "in-progress");
+  assert.equal(getOrderPresentation({ status: "handed_over" }, now).tab, "in-progress");
+  assert.equal(getOrderPresentation({ status: "completed" }, now).tab, "completed");
+  assert.equal(getOrderPresentation({ status: "completed", hasFinancialIssue: true }, now).tab, "refund-dispute");
+  assert.equal(getOrderPresentation({ status: "paid", refundStatus: "succeeded" }, now).tab, "in-progress");
+  assert.equal(getOrderPresentation({ status: "completed", refundStatus: "succeeded" }, now).tab, "completed");
+  assert.equal(getOrderPresentation({ status: "disputed", refundStatus: "awaiting_return" }, now).badge.label, "Refund awaiting return");
+  assert.equal(getOrderStatusBadge("paid").label, "Awaiting Collection");
+  assert.equal(getOrderStatusBadge("paid", null, true).label, "Awaiting Service");
   assert.equal(getOrderStatusBadge("handed_over").label, "Awaiting Receipt Confirmation");
   assert.equal(getOrderStatusBadge("expired").label, "Payment Expired");
-  assert.equal(getOrderStatusBadge("completed").label, "Completed");
 
-  const steps = getOrderTimelineSteps({
-    status: "handed_over",
+  const input = {
     createdAt: "2026-11-24T06:48:00Z",
-    paidAt: "2026-11-24T06:50:00Z",
-    handedOverAt: "2026-11-24T07:10:00Z",
+    paidAt,
     completedAt: null,
-  });
-  assert.deepEqual(
-    steps.map((s) => [s.key, s.done]),
-    [
-      ["placed", true],
-      ["paid", true],
-      ["handed_over", true],
-      ["completed", false],
-    ]
-  );
+    paymentDeadline: deadline,
+  };
+  const steps = getOrderTimelineSteps({ ...input, status: "paid" }, now);
+  assert.deepEqual(steps.map(({ key, done }) => [key, done]), [
+    ["placed", true], ["paid", true], ["in_progress", true], ["completed", false],
+  ]);
+  assert.equal(steps[1].timestamp, paidAt);
+  assert.equal(steps[2].timestamp, paidAt);
+  assert.equal(steps[3].timestamp, null);
+  assert.equal(getOrderTimelineSteps({ ...input, status: "refunded", completedAt: deadline }, now)[3].timestamp, deadline);
 
-  assert.equal(getSellerEarningsLedgerState("paid").state, "pending_settlement");
-  assert.equal(getSellerEarningsLedgerState("handed_over").state, "pending_settlement");
-  assert.equal(getSellerEarningsLedgerState("completed").state, "available_for_payout");
-  assert.equal(getSellerEarningsLedgerState("completed", true).state, "frozen");
-  assert.equal(getSellerEarningsLedgerState("disputed").state, "frozen");
+  const pending = { ...input, status: "pending_payment", paidAt: null };
+  assert.equal(getOrderTimelineSteps(pending, now - 1)[0].active, true);
+  assert.equal(getOrderTimelineSteps(pending, now).some((step) => step.active), false);
+  assert.equal(getOrderTimelineSteps(pending, now - 1, "late_payment_review").some((step) => step.active), false);
+});
+
+test("Order timeline server markup marks exactly one current step from the order snapshot", () => {
+  const source = fs.readFileSync(path.join(REPO_ROOT, "src/components/orders/OrderTimeline.tsx"), "utf8");
+  const { outputText } = ts.transpileModule(source, {
+    compilerOptions: { jsx: ts.JsxEmit.ReactJSX, module: ts.ModuleKind.CommonJS },
+  });
+  const require = createRequire(import.meta.url);
+  const compiled = {};
+  new Function("require", "exports", outputText)(
+    (id) => id === "@/lib/orders/lifecycle" ? { getOrderTimelineSteps } : require(id),
+    compiled,
+  );
+  const order = {
+    status: "paid",
+    createdAt: "2026-11-24T16:40:00Z",
+    paidAt: "2026-11-24T16:50:00Z",
+    completedAt: null,
+    paymentDeadline: "2026-11-24T17:00:00Z",
+  };
+  const render = (snapshot, snapshotAt) =>
+    renderToStaticMarkup(createElement(compiled.OrderTimeline, { order: snapshot, snapshotAt }));
+  const current = (markup) => [...markup.matchAll(/<li([^>]*)>/g)]
+    .map(([, attributes]) => attributes.includes('aria-current="step"'));
+  const beforeDeadline = render(order, Date.parse(order.paymentDeadline) - 1);
+  assert.deepEqual(current(beforeDeadline), [false, false, true, false]);
+  assert.equal(render({ ...order }, Date.parse(order.paymentDeadline)), beforeDeadline);
+  assert.match(beforeDeadline, /25 Nov[^<]*12:50/i);
+
+  const completed = render({ ...order, status: "completed", completedAt: "2026-11-24T17:01:00Z" }, Date.parse(order.paymentDeadline));
+  assert.deepEqual(current(completed), [false, false, false, true]);
+  assert.match(completed, /25 Nov[^<]*1:01/i);
+  assert.equal((completed.match(/<svg\b/g) ?? []).length, 4);
 });
 
 test("5. Phase 6C SQL migration safety & security invariants", () => {

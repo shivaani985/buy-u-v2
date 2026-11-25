@@ -381,8 +381,8 @@ export async function getSellerHubData(
 
   const error = storefrontRes.error?.message || listingsRes.error?.message;
   const newOrderCount = !ordersRes.error
-    ? ((ordersRes.data ?? []) as Array<{ status: string }>).filter(
-        (o) => o.status === "paid" || o.status === "ready_for_pickup"
+    ? ((ordersRes.data ?? []) as RawSellerOrder[]).filter(
+        (o) => o.status === "paid" && Boolean(o.paid_at)
       ).length
     : 0;
 
@@ -745,7 +745,7 @@ export async function getSellerListingForEdit(
 }
 
 /**
- * Counts paid seller orders awaiting preparation or handover (`paid` / `ready_for_pickup`).
+ * Counts paid seller orders awaiting completion.
  */
 export async function getSellerNewOrderCount(
   session: AuthSessionSummary
@@ -760,7 +760,8 @@ export async function getSellerNewOrderCount(
       .from("orders")
       .select("id", { count: "exact", head: true })
       .eq("seller_id", userId)
-      .in("status", ["paid", "ready_for_pickup"]);
+      .eq("status", "paid")
+      .not("paid_at", "is", null);
 
     if (error || typeof count !== "number") return 0;
     return Math.max(0, count);

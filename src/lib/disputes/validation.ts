@@ -121,6 +121,7 @@ export function evaluateBuyerDisputeEligibility(input: {
   status: string;
   paidAt: string | null;
   completedAt: string | null;
+  protectionExpiresAt?: string | null;
   hasActiveDispute: boolean;
   hasPendingRefundExecution?: boolean;
   nowMs?: number;
@@ -152,10 +153,10 @@ export function evaluateBuyerDisputeEligibility(input: {
       };
     }
     const nowMs = input.nowMs ?? Date.now();
-    if (!isWithinBuyerProtectionWindow(input.completedAt, nowMs)) {
+    if (!isWithinBuyerProtectionWindow(input.completedAt, nowMs, input.protectionExpiresAt)) {
       return {
         eligible: false,
-        reason: `The 3-day (${BUYER_PROTECTION_HOURS}-hour) post-completion buyer protection window has ended.`,
+        reason: "The buyer protection window has ended.",
       };
     }
     return { eligible: true };

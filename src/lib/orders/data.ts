@@ -1,3 +1,4 @@
+import { readOrderPages, readOrderRelations } from "@/lib/orders/read";
 import { evaluateBuyerEligibility, type BuyerEligibilityResult } from "@/lib/buyer/validation";
 import {
   getLatestDisputesByOrderIds,
@@ -20,6 +21,8 @@ export interface BuyerOrderItemView {
   imageUrl: string | null;
   isService: boolean;
   serviceMode: string | null;
+  pickupNote: string | null;
+  pickupWindowStart: string | null;
   serviceRequirements: string | null;
   serviceAttachmentPaths: string[];
 }
@@ -28,6 +31,8 @@ export interface BuyerOrderPaymentView {
   billCode: string;
   billUrl: string | null;
   status: string;
+  transactionRef: string | null;
+  verifiedAt: string | null;
 }
 
 export interface BuyerOrderRefundView {
@@ -71,8 +76,9 @@ export interface BuyerOrderView {
   handedOverAt: string | null;
   completedAt: string | null;
   createdAt: string;
-  /** Strictly buyer-only pickup PIN (never queried or exposed on seller routes). */
-  pickupPin: string | null;
+  protectionExpiresAt: string | null;
+  paymentVerified: boolean;
+  checkout: Omit<BuyerPendingCheckoutView, "orders"> | null;
   latestPayment: BuyerOrderPaymentView | null;
   dispute: OrderDisputeSummaryView | null;
   refund: BuyerOrderRefundView | null;
@@ -87,6 +93,8 @@ export interface BuyerPendingCheckoutView {
   source: string;
   status: string;
   paymentStatus: string;
+  transactionRef: string | null;
+  paidAt: string | null;
   combinedSubtotalSen: number;
   fpxFeeSen: number;
   totalPaidSen: number;
@@ -102,20 +110,24 @@ export interface BuyerOrdersPageData {
   pendingCheckouts: BuyerPendingCheckoutView[];
   orders: BuyerOrderView[];
   error?: string;
+  serverNow: number;
 }
 
 export async function getBuyerOrdersData(
-  session: AuthSessionSummary
+  session: AuthSessionSummary,
+  target?: { orderId: string } | { checkoutId: string }
 ): Promise<BuyerOrdersPageData> {
+  const serverNow = Date.now();
   const eligibility = evaluateBuyerEligibility(session);
   if (!eligibility.eligible || !eligibility.userId) {
-    return { eligibility, pendingCheckouts: [], orders: [] };
+    return { serverNow, eligibility, pendingCheckouts: [], orders: [] };
   }
 
   const env = getPublicSupabaseEnv();
   const supabase = await createSupabaseServerClient();
   if (!env || !supabase) {
     return {
+      serverNow,
       eligibility,
       pendingCheckouts: [],
       orders: [],
@@ -123,17 +135,19 @@ export async function getBuyerOrdersData(
     };
   }
 
-  const { data: rawOrders, error: ordersErr } = await supabase
+  let query = supabase
     .from("orders")
     .select(
-      "id,order_code,source,checkout_session_id,seller_id,status,subtotal_sen,fpx_fee_sen,total_paid_sen,collection_area_name,payment_deadline,paid_at,handed_over_at,completed_at,created_at"
+      "id,order_code,source,checkout_session_id,seller_id,status,subtotal_sen,fpx_fee_sen,total_paid_sen,collection_area_name,payment_deadline,paid_at,handed_over_at,completed_at,protection_expires_at,created_at"
     )
     .eq("buyer_id", eligibility.userId)
-    .order("created_at", { ascending: false })
-    .limit(50);
+    .order("created_at", { ascending: false }).order("id", { ascending: false });
+  if (target) query = "orderId" in target ? query.eq("id", target.orderId) : query.eq("checkout_session_id", target.checkoutId);
+  const { data: rawOrders, error: ordersErr } = await readOrderPages((start, end) => query.range(start, end));
 
   if (ordersErr) {
     return {
+      serverNow,
       eligibility,
       pendingCheckouts: [],
       orders: [],
@@ -156,11 +170,12 @@ export async function getBuyerOrdersData(
     paid_at: string | null;
     handed_over_at: string | null;
     completed_at: string | null;
+    protection_expires_at: string | null;
     created_at: string;
   }>;
 
   if (orderRows.length === 0) {
-    return { eligibility, pendingCheckouts: [], orders: [] };
+    return { serverNow, eligibility, pendingCheckouts: [], orders: [] };
   }
 
   const orderIds = orderRows.map((o) => o.id);
@@ -171,74 +186,46 @@ export async function getBuyerOrdersData(
         .filter((id): id is string => Boolean(id))
     )
   );
-  const paidOrderIds = orderRows
-    .filter((o) => o.status === "paid")
-    .map((o) => o.id);
   const sellerIds = Array.from(new Set(orderRows.map((o) => o.seller_id)));
   const service = getServerServiceClient();
 
-  const [itemsRes, profilesRes, storefrontsRes, paymentsRes, pinsRes, sessionsRes, disputesByOrder, refundsRes, reviewsRes] =
+  const [itemsRes, profilesRes, storefrontsRes, paymentsRes, sessionsRes, disputesByOrder, refundsRes, reviewsRes] =
     await Promise.all([
-      supabase
-        .from("order_items")
-        .select(
-          "id,order_id,listing_id,title_snapshot,variant_snapshot,unit_sen,quantity,image_path,is_service,service_mode,service_requirements,service_attachment_paths"
-        )
-        .in("order_id", orderIds),
-      supabase
-        .from("public_profiles")
-        .select("id,display_name")
-        .in("id", sellerIds),
-      supabase
-        .from("storefronts")
-        .select("seller_id,shop_name")
-        .in("seller_id", sellerIds),
+      readOrderRelations(orderIds, (batch, start, end) => supabase.from("order_items")
+        .select("id,order_id,listing_id,title_snapshot,variant_snapshot,unit_sen,quantity,image_path,is_service,service_mode,service_requirements,service_attachment_paths,pickup_note,pickup_window_start")
+        .in("order_id", batch).order("id").range(start, end)),
+      readOrderRelations(sellerIds, (batch, start, end) => supabase.from("public_profiles")
+        .select("id,display_name").in("id", batch).order("id").range(start, end)),
+      readOrderRelations(sellerIds, (batch, start, end) => supabase.from("storefronts")
+        .select("seller_id,shop_name").in("seller_id", batch).order("seller_id").range(start, end)),
       service
-        ? service
-            .from("payments")
-            .select("order_id,bill_code,bill_url,status,created_at")
-            .in("order_id", orderIds)
-            .order("created_at", { ascending: false })
+        ? readOrderRelations(orderRows.filter((row) => !row.checkout_session_id).map((row) => row.id),
+            (batch, start, end) => service.from("payments")
+              .select("order_id,bill_code,bill_url,status,transaction_ref,verified_at,created_at")
+              .in("order_id", batch).order("created_at", { ascending: false }).order("id").range(start, end))
         : Promise.resolve({ data: [] }),
-      paidOrderIds.length > 0
-        ? supabase.rpc("get_buyer_order_pickup_pins", {
-            p_order_ids: paidOrderIds,
-          })
-        : Promise.resolve({ data: [] }),
-      checkoutSessionIds.length > 0
-        ? supabase
-            .from("checkout_sessions")
-            .select(
-              "id,checkout_code,source,status,payment_status,combined_subtotal_sen,fpx_fee_sen,total_paid_sen,payment_deadline,bill_code,bill_url,created_at"
-            )
-            .in("id", checkoutSessionIds)
-            .eq("buyer_id", eligibility.userId)
-            .order("created_at", { ascending: false })
-        : Promise.resolve({ data: [] }),
+      readOrderRelations(checkoutSessionIds, (batch, start, end) => supabase.from("checkout_sessions")
+        .select("id,checkout_code,source,status,payment_status,combined_subtotal_sen,fpx_fee_sen,total_paid_sen,payment_deadline,bill_code,bill_url,transaction_ref,paid_at,created_at")
+        .in("id", batch).eq("buyer_id", eligibility.userId).order("id").range(start, end)),
       getLatestDisputesByOrderIds(orderIds),
-      supabase
-        .from("order_refunds")
-        .select(
-          "id,order_id,refund_code,refund_type,refund_amount_sen,status,refund_ref,return_required,return_status,return_instructions,completed_at"
-        )
-        .in("order_id", orderIds)
-        .order("created_at", { ascending: false }),
-      supabase
-        .from("reviews")
-        .select("id,order_id,listing_id,rating,comment,seller_response,hidden,created_at")
-        .eq("buyer_id", eligibility.userId)
-        .in("order_id", orderIds)
-        .order("created_at", { ascending: false })
-        .then(async (res) => {
-          if (!res.error) return res;
-          return supabase
-            .from("reviews")
-            .select("id,order_id,listing_id,rating,comment,hidden,created_at")
-            .eq("buyer_id", eligibility.userId)
-            .in("order_id", orderIds)
-            .order("created_at", { ascending: false });
-        }),
+      readOrderRelations(orderIds, (batch, start, end) => supabase.from("order_refunds")
+        .select("id,order_id,refund_code,refund_type,refund_amount_sen,status,refund_ref,return_required,return_status,return_instructions,completed_at")
+        .in("order_id", batch).order("created_at", { ascending: false }).order("id").range(start, end)),
+      readOrderRelations(orderIds, async (batch, start, end) => {
+        const reviews = await supabase.from("reviews")
+          .select("id,order_id,listing_id,rating,comment,seller_response,hidden,created_at")
+          .eq("buyer_id", eligibility.userId).in("order_id", batch).order("created_at", { ascending: false }).order("id").range(start, end);
+        if (!reviews.error) return reviews;
+        const fallback = await supabase.from("reviews")
+          .select("id,order_id,listing_id,rating,comment,hidden,created_at")
+          .eq("buyer_id", eligibility.userId).in("order_id", batch).order("created_at", { ascending: false }).order("id").range(start, end);
+        return { ...fallback, data: fallback.data?.map((review) => ({ ...review, seller_response: null })) ?? null };
+      }),
     ]);
+
+  if (itemsRes.error || sessionsRes.error) {
+    return { serverNow, eligibility, pendingCheckouts: [], orders: [], error: "Could not load your order items or payments right now." };
+  }
 
   const reviewsByOrder = new Map<string, BuyerOrderReviewView[]>();
   if (!reviewsRes.error && reviewsRes.data) {
@@ -300,30 +287,28 @@ export async function getBuyerOrdersData(
     }
   }
 
-  const pinByOrder = new Map<string, string>();
-  for (const row of (pinsRes.data ?? []) as Array<{
-    order_id: string;
-    pickup_pin: string | null;
-  }>) {
-    if (row.pickup_pin) pinByOrder.set(row.order_id, row.pickup_pin);
-  }
-
   const latestPaymentByOrder = new Map<string, BuyerOrderPaymentView>();
+  const verifiedLegacyOrders = new Set<string>();
   for (const p of (paymentsRes.data ?? []) as Array<{
     order_id: string;
     bill_code: string;
     bill_url: string | null;
     status: string;
+    transaction_ref: string | null;
+    verified_at: string | null;
   }>) {
-    if (
-      !latestPaymentByOrder.has(p.order_id) &&
-      p.bill_code &&
-      !p.bill_code.startsWith("creating:")
-    ) {
+    const verified = p.status === "paid" && Boolean(p.verified_at);
+    if (verified) verifiedLegacyOrders.add(p.order_id);
+    const current = latestPaymentByOrder.get(p.order_id);
+    if (p.bill_code && !p.bill_code.startsWith("creating:") &&
+        (!current || (current.status !== "paid" && (verified ||
+          (p.status === "late_payment_review" && current.status !== "late_payment_review"))))) {
       latestPaymentByOrder.set(p.order_id, {
         billCode: p.bill_code,
         billUrl: p.bill_url,
         status: p.status,
+        transactionRef: p.transaction_ref,
+        verifiedAt: p.verified_at,
       });
     }
   }
@@ -340,6 +325,8 @@ export async function getBuyerOrdersData(
     image_path: string | null;
     is_service?: boolean | null;
     service_mode?: string | null;
+    pickup_note?: string | null;
+    pickup_window_start?: string | null;
     service_requirements?: string | null;
     service_attachment_paths?: string[] | null;
   }>) {
@@ -360,6 +347,8 @@ export async function getBuyerOrdersData(
       imageUrl: resolvePublicStorageUrl("listings", row.image_path, env.url),
       isService: Boolean(row.is_service),
       serviceMode: row.service_mode ?? null,
+      pickupNote: row.pickup_note ?? null,
+      pickupWindowStart: row.pickup_window_start ?? null,
       serviceRequirements: row.service_requirements ?? null,
       serviceAttachmentPaths: Array.isArray(row.service_attachment_paths)
         ? row.service_attachment_paths
@@ -382,8 +371,45 @@ export async function getBuyerOrdersData(
     if (s.shop_name?.trim()) sellerNameMap.set(s.seller_id, s.shop_name.trim());
   }
 
+  const checkouts = new Map<string, Omit<BuyerPendingCheckoutView, "orders">>();
+  for (const s of (sessionsRes.data ?? []) as Array<{
+    id: string;
+    checkout_code: string;
+    source: string;
+    status: string;
+    payment_status: string;
+    combined_subtotal_sen: number;
+    fpx_fee_sen: number;
+    total_paid_sen: number;
+    payment_deadline: string;
+    bill_code: string | null;
+    bill_url: string | null;
+    created_at: string;
+    transaction_ref: string | null;
+    paid_at: string | null;
+  }>) {
+    checkouts.set(s.id, {
+      id: s.id,
+      checkoutCode: s.checkout_code,
+      source: s.source,
+      status: s.status,
+      paymentStatus: s.payment_status,
+      transactionRef: s.transaction_ref,
+      paidAt: s.paid_at,
+      combinedSubtotalSen: Number(s.combined_subtotal_sen),
+      fpxFeeSen: Number(s.fpx_fee_sen),
+      totalPaidSen: Number(s.total_paid_sen),
+      paymentDeadline: s.payment_deadline,
+      billCode: s.bill_code && !s.bill_code.startsWith("creating:") ? s.bill_code : null,
+      billUrl: s.bill_url,
+      createdAt: s.created_at,
+    });
+  }
+
   const allOrders: BuyerOrderView[] = orderRows.map((o) => {
     const items = itemsByOrder.get(o.id) ?? [];
+    const checkout = o.checkout_session_id ? checkouts.get(o.checkout_session_id) ?? null : null;
+    const latestPayment = latestPaymentByOrder.get(o.id) ?? null;
     return {
       id: o.id,
       orderCode: o.order_code,
@@ -401,8 +427,12 @@ export async function getBuyerOrdersData(
       handedOverAt: o.handed_over_at,
       completedAt: o.completed_at,
       createdAt: o.created_at,
-      pickupPin: pinByOrder.get(o.id) ?? null,
-      latestPayment: latestPaymentByOrder.get(o.id) ?? null,
+      protectionExpiresAt: o.protection_expires_at,
+      checkout,
+      paymentVerified: Boolean(o.paid_at && (o.checkout_session_id
+        ? checkout?.status === "paid" && checkout.paymentStatus === "paid" && checkout.paidAt
+        : verifiedLegacyOrders.has(o.id))),
+      latestPayment,
       dispute: disputesByOrder.get(o.id) ?? null,
       refund: refundByOrder.get(o.id) ?? null,
       reviews: reviewsByOrder.get(o.id) ?? [],
@@ -411,56 +441,21 @@ export async function getBuyerOrdersData(
     };
   });
 
-  const pendingCheckouts: BuyerPendingCheckoutView[] = [];
-  const groupedPendingSessionIds = new Set<string>();
-
-  for (const s of (sessionsRes.data ?? []) as Array<{
-    id: string;
-    checkout_code: string;
-    source: string;
-    status: string;
-    payment_status: string;
-    combined_subtotal_sen: number;
-    fpx_fee_sen: number;
-    total_paid_sen: number;
-    payment_deadline: string;
-    bill_code: string | null;
-    bill_url: string | null;
-    created_at: string;
-  }>) {
-    if (
-      s.status === "pending_payment" ||
-      s.payment_status === "late_payment_review"
-    ) {
-      const childOrders = allOrders.filter((o) => o.checkoutSessionId === s.id);
-      if (childOrders.length > 0) {
-        groupedPendingSessionIds.add(s.id);
-        pendingCheckouts.push({
-          id: s.id,
-          checkoutCode: s.checkout_code,
-          source: s.source,
-          status: s.status,
-          paymentStatus: s.payment_status,
-          combinedSubtotalSen: Number(s.combined_subtotal_sen ?? 0),
-          fpxFeeSen: Number(s.fpx_fee_sen ?? 100),
-          totalPaidSen: Number(s.total_paid_sen ?? 0),
-          paymentDeadline: s.payment_deadline,
-          billCode:
-            s.bill_code && !s.bill_code.startsWith("creating:")
-              ? s.bill_code
-              : null,
-          billUrl: s.bill_url,
-          createdAt: s.created_at,
-          orders: childOrders,
-        });
-      }
-    }
+  if (target && "orderId" in target) {
+    return { serverNow: Date.now(), eligibility, pendingCheckouts: [], orders: allOrders };
   }
 
-  // Show individual seller orders for paid/completed/expired checkouts and legacy standalone orders
-  const orders = allOrders.filter(
-    (o) => !o.checkoutSessionId || !groupedPendingSessionIds.has(o.checkoutSessionId)
+  const pendingCheckouts: BuyerPendingCheckoutView[] = [];
+  const groupedCheckoutIds = new Set<string>();
+  for (const checkout of checkouts.values()) {
+    if (checkout.status === "paid" && checkout.paymentStatus !== "late_payment_review") continue;
+    const children = allOrders.filter((order) => order.checkoutSessionId === checkout.id);
+    if (children.length === 0) continue;
+    groupedCheckoutIds.add(checkout.id);
+    pendingCheckouts.push({ ...checkout, orders: children });
+  }
+  const orders = allOrders.filter((order) =>
+    !order.checkoutSessionId || !groupedCheckoutIds.has(order.checkoutSessionId)
   );
-
-  return { eligibility, pendingCheckouts, orders };
+  return { serverNow: Date.now(), eligibility, pendingCheckouts, orders };
 }

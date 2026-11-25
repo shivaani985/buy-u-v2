@@ -1,3 +1,4 @@
+import { readOrderRelations } from "@/lib/orders/read";
 import {
   buildPrivateDisputeEvidenceUrl,
   type DisputeStatus,
@@ -128,11 +129,12 @@ export async function getLatestDisputesByOrderIds(
   const supabase = await createSupabaseServerClient();
   if (!supabase) return map;
 
-  const { data } = await supabase
+  const { data } = await readOrderRelations(orderIds, (batch, start, end) => supabase
     .from("order_disputes")
     .select(SAFE_DISPUTE_SELECT)
-    .in("order_id", orderIds)
-    .order("created_at", { ascending: false });
+    .in("order_id", batch)
+    .order("created_at", { ascending: false }).order("id")
+    .range(start, end));
 
   for (const row of (data ?? []) as RawDisputeRow[]) {
     if (!map.has(row.order_id)) {

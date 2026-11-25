@@ -40,9 +40,17 @@ body {
   color: #ffffff;
 }
 
-:focus-visible {
-  outline: 2px solid #4e2a84;
-  outline-offset: 2px;
+@layer base {
+  :focus-visible {
+    outline: 2px solid #4e2a84;
+    outline-offset: 2px;
+  }
+
+  input:focus-visible,
+  textarea:focus-visible,
+  select:focus-visible {
+    outline: none;
+  }
 }
 
 .font-editorial {

@@ -369,6 +369,8 @@ export async function submitVerifiedReviewAction(input: {
   }
 
   revalidatePath("/orders");
+  revalidatePath("/orders/[orderId]", "page");
+  revalidatePath("/seller/orders/[orderId]", "page");
   revalidatePath("/requests");
   revalidatePath("/seller/analytics");
   return { ok: true, message: "Verified review published. Thank you for helping the UMS community." };
@@ -407,6 +409,8 @@ export async function editVerifiedReviewAction(input: {
   }
 
   revalidatePath("/orders");
+  revalidatePath("/orders/[orderId]", "page");
+  revalidatePath("/seller/orders/[orderId]", "page");
   revalidatePath("/requests");
   revalidatePath("/seller/analytics");
   return { ok: true, message: "Verified review updated." };
@@ -426,6 +430,8 @@ export async function respondToReviewAction(input: {
   });
   if (error) return { ok: false, message: "Could not save response right now." };
   revalidatePath("/seller/analytics");
+  revalidatePath("/orders/[orderId]", "page");
+  revalidatePath("/seller/orders/[orderId]", "page");
   return { ok: true, message: "Public seller response saved." };
 }
 

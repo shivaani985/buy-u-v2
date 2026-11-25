@@ -13,7 +13,12 @@ async function parseIncomingCallbackBody(
     return json && typeof json === "object" ? (json as Record<string, unknown>) : {};
   }
 
-  // ToyyibPay sends webhooks as application/x-www-form-urlencoded or multipart/form-data
+  if (contentType.includes("multipart/form-data")) {
+    const form = await request.formData().catch(() => null);
+    return form ? Object.fromEntries([...form].filter(([, value]) => typeof value === "string")) : {};
+  }
+
+  // Standard form-encoded callback.
   const text = await request.text().catch(() => "");
   const params = new URLSearchParams(text);
   const out: Record<string, unknown> = {};
@@ -44,6 +49,10 @@ export async function POST(request: Request) {
     expectedOrderCode: envelope.orderCode,
     rawCallback: raw,
   });
+
+  if (result.outcome === "unavailable") {
+    return NextResponse.json({ ok: false, outcome: result.outcome }, { status: 503 });
+  }
 
   if (result.outcome === "rejected") {
     return NextResponse.json(

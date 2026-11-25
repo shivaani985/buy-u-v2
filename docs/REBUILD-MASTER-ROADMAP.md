@@ -55,3 +55,13 @@
 - Never expose `SUPABASE_SERVICE_ROLE_KEY` or payment secrets in `NEXT_PUBLIC_*` or browser code.
 - Never derive student, staff, or admin privileges from editable client `user_metadata`.
 - Never reset tables or rerun Migrations 001–006 against `duwwlcpdidrxkixvflag` without explicit approval.
+
+## 6. Future Admin Payment Reconciliation
+
+The orders experience detects and displays late ToyyibPay payments as **Payment under review**. Dedicated admin resolution, checkout activation and automatic refunds remain deferred.
+
+- Add a Payment Reconciliation queue within Admin Financials.
+- Re-verify the gateway transaction and validate the checkout and current inventory eligibility.
+- Define safe activation of eligible late-paid checkouts and checkout-level refund resolution.
+- Define multi-seller reconciliation and exceptional FPX fee refund policies.
+- Notify affected buyers and sellers when a case is resolved and record admin actions in the audit log.

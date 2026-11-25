@@ -115,7 +115,7 @@ export default async function SellerAnalyticsPage({
   const newOrderCount = (dataset?.orders ?? []).filter(
     (o) =>
       o.seller_id === sellerId &&
-      (o.status === "paid" || o.status === "ready_for_pickup")
+      o.status === "paid" && Boolean(o.paid_at)
   ).length;
 
   return (

@@ -2,7 +2,8 @@
 
 import { revalidatePath } from "next/cache";
 import { evaluateBuyerEligibility } from "@/lib/buyer/validation";
-import { isValidPickupPinFormat } from "@/lib/orders/lifecycle";
+import { getBuyerOrdersData } from "@/lib/orders/data";
+import { isBlockingRefundStatus, isValidPickupPinFormat } from "@/lib/orders/lifecycle";
 import { evaluateSellerEligibility } from "@/lib/seller/validation";
 import {
   createSupabaseServerClient,
@@ -15,6 +16,7 @@ const UUID_RE =
 export interface VerifyPickupPinResult {
   ok: boolean;
   outcome:
+    | "completed"
     | "handed_over"
     | "already_handed_over"
     | "already_completed"
@@ -74,7 +76,7 @@ export async function verifySellerPickupPinAction(
     return {
       ok: false,
       outcome: "invalid_pin_format",
-      message: "Enter the buyer's exact 6-digit numeric pickup PIN.",
+      message: "Enter the buyer's exact 6-digit completion PIN.",
     };
   }
 
@@ -116,7 +118,7 @@ export async function verifySellerPickupPinAction(
     return {
       ok: false,
       outcome: "error",
-      message: "Could not verify pickup PIN right now. Please try again.",
+      message: "Could not verify the completion PIN right now. Please try again.",
     };
   }
 
@@ -141,8 +143,12 @@ export async function verifySellerPickupPinAction(
   revalidatePath("/seller/orders");
   revalidatePath("/seller");
   revalidatePath("/orders");
+  revalidatePath(`/orders/${orderId}`);
+  revalidatePath(`/seller/orders/${orderId}`);
 
   switch (row.outcome) {
+    case "completed":
+      return { ok: true, outcome: "completed", message: "Order completed. Buyer protection has started." };
     case "handed_over":
       return {
         ok: true,
@@ -194,7 +200,7 @@ export async function verifySellerPickupPinAction(
       return {
         ok: false,
         outcome: "order_disputed",
-        message: "This order has an active dispute and cannot be handed over.",
+        message: "This order has an active dispute and cannot be completed.",
       };
     case "payment_unverified":
       return {
@@ -206,19 +212,19 @@ export async function verifySellerPickupPinAction(
       return {
         ok: false,
         outcome: "invalid_status",
-        message: "This order is not awaiting handover.",
+        message: "This order is not eligible for completion.",
       };
     case "pin_unavailable":
       return {
         ok: false,
         outcome: "pin_unavailable",
-        message: "No active pickup PIN is available for this order.",
+        message: "No active completion PIN is available for this order.",
       };
     default:
       return {
         ok: false,
         outcome: "error",
-        message: "Enter the buyer's exact 6-digit numeric pickup PIN.",
+        message: "Enter the buyer's exact 6-digit completion PIN.",
       };
   }
 }
@@ -291,6 +297,8 @@ export async function confirmOrderReceiptAction(
   }
 
   revalidatePath("/orders");
+  revalidatePath(`/orders/${orderId}`);
+  revalidatePath(`/seller/orders/${orderId}`);
   revalidatePath("/seller/orders");
   revalidatePath("/seller");
 
@@ -301,7 +309,7 @@ export async function confirmOrderReceiptAction(
         outcome: "completed",
         completedAt: row.completed_at,
         message:
-          "Receipt confirmed! Your order is now complete and the seller's earnings are available for payout.",
+          "Receipt confirmed. Your order is complete and buyer protection has started.",
       };
     case "already_completed":
       return {
@@ -336,4 +344,41 @@ export async function confirmOrderReceiptAction(
         message: "Could not confirm receipt for this order.",
       };
   }
+}
+
+/** Explicit capability, rather than inferring the backend from an order status. */
+export async function getOrderCompletionMode(): Promise<"unified" | "legacy" | "unavailable"> {
+  const supabase = await createSupabaseServerClient();
+  if (!supabase) return "unavailable";
+  const { data, error } = await supabase.rpc("get_order_completion_mode");
+  if (!error && data === "unified_pin_v1") return "unified";
+  return error?.code === "PGRST202" || error?.code === "42883" ? "legacy" : "unavailable";
+}
+
+export async function revealOrderCompletionPinAction(orderId: string, acknowledged: boolean) {
+  const unavailable = { pin: null, error: "The completion PIN is unavailable for this order." };
+  if (!UUID_RE.test(orderId) || acknowledged !== true) return unavailable;
+  const session = await getSessionSummary();
+  if (!evaluateBuyerEligibility(session).eligible) return unavailable;
+  const supabase = await createSupabaseServerClient();
+  if (!supabase) return unavailable;
+
+  const { data, error } = await supabase.rpc("reveal_order_completion_pin", {
+    p_order_id: orderId, p_acknowledged: true,
+  });
+  if (!error) return typeof data === "string" && isValidPickupPinFormat(data) ? { pin: data } : unavailable;
+  if (error.code !== "PGRST202" && error.code !== "42883") return unavailable;
+
+  // The legacy RPC still checks buyer ownership and the paid status. This
+  // branch also checks payment proof and financial holds for older databases.
+  const { orders } = await getBuyerOrdersData(session, { orderId });
+  const order = orders[0];
+  if (!order || order.status !== "paid" || !order.paymentVerified ||
+      ["open", "under_review"].includes(order.dispute?.status ?? "") ||
+      ["pending_execution", "failed"].includes(order.dispute?.refundExecutionStatus ?? "") ||
+      isBlockingRefundStatus(order.refund?.status)) return unavailable;
+
+  const legacy = await supabase.rpc("get_buyer_order_pickup_pins", { p_order_ids: [orderId] });
+  const pin = legacy.data?.find((row: { order_id: string }) => row.order_id === orderId)?.pickup_pin;
+  return typeof pin === "string" && isValidPickupPinFormat(pin) ? { pin } : unavailable;
 }

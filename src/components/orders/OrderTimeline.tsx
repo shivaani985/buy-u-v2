@@ -1,13 +1,10 @@
 import { Check } from "lucide-react";
-import { getOrderTimelineSteps } from "@/lib/orders/lifecycle";
+import { getOrderTimelineSteps, type OrderTimelineSnapshot } from "@/lib/orders/lifecycle";
 
 interface OrderTimelineProps {
-  status: string;
-  createdAt: string;
-  paidAt: string | null;
-  handedOverAt: string | null;
-  completedAt: string | null;
-  isService?: boolean;
+  order: OrderTimelineSnapshot;
+  snapshotAt: number;
+  paymentStatus?: string | null;
 }
 
 function formatStepTime(iso: string | null): string | null {
@@ -23,26 +20,8 @@ function formatStepTime(iso: string | null): string | null {
   }).format(d);
 }
 
-export function OrderTimeline({
-  status,
-  createdAt,
-  paidAt,
-  handedOverAt,
-  completedAt,
-  isService = false,
-}: OrderTimelineProps) {
-  const s = status.toLowerCase();
-  if (s === "expired" || s === "cancelled" || s === "canceled" || s === "refunded") {
-    return null;
-  }
-
-  const steps = getOrderTimelineSteps({
-    status,
-    createdAt,
-    paidAt,
-    handedOverAt,
-    completedAt,
-  });
+export function OrderTimeline({ order, snapshotAt, paymentStatus }: OrderTimelineProps) {
+  const steps = getOrderTimelineSteps(order, snapshotAt, paymentStatus);
 
   return (
     <ol
@@ -52,7 +31,7 @@ export function OrderTimeline({
       {steps.map((step, idx) => {
         const ts = formatStepTime(step.timestamp);
         return (
-          <li key={step.key} className="flex items-start gap-2">
+          <li key={step.key} aria-current={step.active ? "step" : undefined} className="flex items-start gap-2">
             <span
               className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[10px] font-bold ${
                 step.done
@@ -75,9 +54,7 @@ export function OrderTimeline({
                       : "text-[#8B869B]"
                 }`}
               >
-                {isService && step.key === "handed_over"
-                  ? "Service Delivered"
-                  : step.label}
+                {step.label}
               </p>
               {ts ? (
                 <p className="mt-0.5 truncate text-[10.5px] text-[#6B6779]">

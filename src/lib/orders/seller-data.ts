@@ -1,3 +1,8 @@
+import { readOrderPages, readOrderRelations } from "@/lib/orders/read";
+import { isAuthoritativeOrderPaymentVerified } from "@/lib/financials/policy";
+import { isBlockingRefundStatus } from "@/lib/orders/lifecycle";
+import { getServerServiceClient } from "@/lib/supabase/service";
+import { getLatestDisputesByOrderIds, type OrderDisputeSummaryView } from "@/lib/disputes/data";
 import { resolvePublicStorageUrl } from "@/lib/format";
 import { formatVariationOptionLabel } from "@/lib/seller/variations";
 import {
@@ -18,6 +23,8 @@ export interface SellerOrderItemView {
   imageUrl: string | null;
   isService: boolean;
   serviceMode: string | null;
+  pickupNote: string | null;
+  pickupWindowStart: string | null;
   serviceRequirements: string | null;
   serviceAttachmentPaths: string[];
 }
@@ -38,10 +45,19 @@ export interface SellerOrderView {
   paidAt: string | null;
   handedOverAt: string | null;
   completedAt: string | null;
+  protectionExpiresAt: string | null;
   createdAt: string;
   pinFailedAttempts: number;
   pinLockedUntil: string | null;
   hasActiveDispute: boolean;
+  paymentVerified: boolean;
+  paymentStatus: string | null;
+  transactionRef: string | null;
+  adjustedNetSen: number | null;
+  allocatedSen: number | null;
+  dispute: OrderDisputeSummaryView | null;
+  refund: { id: string; status: string; amountSen: number; returnStatus: string; returnRequired: boolean } | null;
+  reviews: Array<{ id: string; rating: number; comment: string; sellerResponse: string | null }>;
   items: SellerOrderItemView[];
   isServiceOrder: boolean;
 }
@@ -50,6 +66,7 @@ export interface SellerOrdersPageData {
   eligibility: SellerEligibilityResult;
   orders: SellerOrderView[];
   error?: string;
+  serverNow: number;
 }
 
 const ACTIVE_DISPUTE_STATUSES = new Set(["open", "under_review"]);
@@ -58,35 +75,40 @@ const ACTIVE_DISPUTE_STATUSES = new Set(["open", "under_review"]);
  * Fetches seller-owned orders strictly WITHOUT `pickup_pin` or `raw_callback`.
  */
 export async function getSellerOrdersData(
-  session: AuthSessionSummary
+  session: AuthSessionSummary,
+  orderId?: string
 ): Promise<SellerOrdersPageData> {
+  const serverNow = Date.now();
   const eligibility = evaluateSellerEligibility(session);
   const sellerId = session.profile?.id;
   if (!eligibility.eligible || !sellerId) {
-    return { eligibility, orders: [] };
+    return { serverNow, eligibility, orders: [] };
   }
 
   const env = getPublicSupabaseEnv();
   const supabase = await createSupabaseServerClient();
   if (!env || !supabase) {
     return {
+      serverNow,
       eligibility,
       orders: [],
       error: "Supabase client is not configured.",
     };
   }
 
-  const { data: rawOrders, error: ordersErr } = await supabase
+  let orderQuery = supabase
     .from("orders")
     .select(
-      "id,order_code,source,checkout_session_id,buyer_id,status,subtotal_sen,commission_sen,seller_net_sen,collection_area_name,payment_deadline,paid_at,handed_over_at,completed_at,created_at,pin_failed_attempts,pin_locked_until"
+      "id,order_code,source,checkout_session_id,buyer_id,status,subtotal_sen,commission_sen,seller_net_sen,collection_area_name,payment_deadline,paid_at,handed_over_at,completed_at,protection_expires_at,created_at,pin_failed_attempts,pin_locked_until"
     )
     .eq("seller_id", sellerId)
-    .order("created_at", { ascending: false })
-    .limit(100);
+    .order("created_at", { ascending: false }).order("id", { ascending: false });
+  if (orderId) orderQuery = orderQuery.eq("id", orderId);
+  const { data: rawOrders, error: ordersErr } = await readOrderPages((start, end) => orderQuery.range(start, end));
 
   if (ordersErr) {
     return {
+      serverNow,
       eligibility,
       orders: [],
       error: "Could not load your seller orders right now.",
@@ -108,34 +130,54 @@ export async function getSellerOrdersData(
     paid_at: string | null;
     handed_over_at: string | null;
     completed_at: string | null;
+    protection_expires_at: string | null;
     created_at: string;
     pin_failed_attempts: number | null;
     pin_locked_until: string | null;
   }>;
 
   if (rows.length === 0) {
-    return { eligibility, orders: [] };
+    return { serverNow, eligibility, orders: [] };
   }
 
   const orderIds = rows.map((r) => r.id);
+  const service = getServerServiceClient();
+  const checkoutIds = [...new Set(rows.flatMap((row) => row.checkout_session_id ?? []))];
+  const legacyIds = rows.filter((row) => !row.checkout_session_id).map((row) => row.id);
   const buyerIds = Array.from(new Set(rows.map((r) => r.buyer_id)));
 
-  const [itemsRes, buyersRes, disputesRes] = await Promise.all([
-    supabase
-      .from("order_items")
-      .select(
-        "id,order_id,listing_id,title_snapshot,variant_snapshot,unit_sen,quantity,image_path,is_service,service_mode,service_requirements,service_attachment_paths"
-      )
-      .in("order_id", orderIds),
-    supabase
-      .from("public_profiles")
-      .select("id,display_name")
-      .in("id", buyerIds),
-    supabase
-      .from("order_disputes")
-      .select("order_id,status,refund_execution_status")
-      .in("order_id", orderIds),
+  const [itemsRes, buyersRes, disputesRes, refundsRes, disputeDetails, reviewsRes, checkoutsRes, paymentsRes, adjustmentsRes, allocationsRes] = await Promise.all([
+    readOrderRelations(orderIds, (batch, start, end) => supabase.from("order_items")
+      .select("id,order_id,listing_id,title_snapshot,variant_snapshot,unit_sen,quantity,image_path,is_service,service_mode,service_requirements,service_attachment_paths,pickup_note,pickup_window_start")
+      .in("order_id", batch).order("id").range(start, end)),
+    readOrderRelations(buyerIds, (batch, start, end) => supabase.from("public_profiles")
+      .select("id,display_name").in("id", batch).order("id").range(start, end)),
+    readOrderRelations(orderIds, (batch, start, end) => supabase.from("order_disputes")
+      .select("order_id,status,refund_execution_status").in("order_id", batch).order("id").range(start, end)),
+    readOrderRelations(orderIds, (batch, start, end) => supabase.from("order_refunds")
+      .select("id,order_id,status,refund_amount_sen,return_status,return_required").in("order_id", batch)
+      .order("created_at", { ascending: false }).order("id").range(start, end)),
+    orderId ? getLatestDisputesByOrderIds([orderId]) : Promise.resolve(null),
+    orderId ? supabase.from("reviews").select("id,rating,comment,seller_response").eq("order_id", orderId).eq("hidden", false)
+      : Promise.resolve({ data: [] }),
+    service ? readOrderRelations(checkoutIds, (batch, start, end) => service.from("checkout_sessions")
+      .select("id,buyer_id,status,payment_status,paid_at").in("id", batch).order("id").range(start, end))
+      : Promise.resolve({ data: [] }),
+    service ? readOrderRelations(legacyIds, (batch, start, end) => service.from("payments")
+      .select("order_id,status,verified_at,transaction_ref").in("order_id", batch)
+      .order("created_at", { ascending: false }).order("id").range(start, end))
+      : Promise.resolve({ data: [] }),
+    service && orderId
+      ? service.from("financial_adjustments").select("amount_sen").eq("order_id", orderId).eq("kind", "seller_earnings_deduction")
+      : Promise.resolve({ data: null }),
+    service && orderId
+      ? service.from("payout_allocations").select("allocated_sen").eq("order_id", orderId).in("status", ["reserved", "paid"])
+      : Promise.resolve({ data: null }),
   ]);
+
+  if (itemsRes.error || disputesRes.error || refundsRes.error) {
+    return { serverNow, eligibility, orders: [], error: "Could not load your order items or financial status right now." };
+  }
 
   const itemsByOrder = new Map<string, SellerOrderItemView[]>();
   for (const row of (itemsRes.data ?? []) as Array<{
@@ -149,6 +191,8 @@ export async function getSellerOrdersData(
     image_path: string | null;
     is_service?: boolean | null;
     service_mode?: string | null;
+    pickup_note?: string | null;
+    pickup_window_start?: string | null;
     service_requirements?: string | null;
     service_attachment_paths?: string[] | null;
   }>) {
@@ -169,6 +213,8 @@ export async function getSellerOrdersData(
       imageUrl: resolvePublicStorageUrl("listings", row.image_path, env.url),
       isService: Boolean(row.is_service),
       serviceMode: row.service_mode ?? null,
+      pickupNote: row.pickup_note ?? null,
+      pickupWindowStart: row.pickup_window_start ?? null,
       serviceRequirements: row.service_requirements ?? null,
       serviceAttachmentPaths: Array.isArray(row.service_attachment_paths)
         ? row.service_attachment_paths
@@ -193,13 +239,19 @@ export async function getSellerOrdersData(
   }>) {
     const ds = (d.status ?? "").toLowerCase();
     const exec = (d.refund_execution_status ?? "").toLowerCase();
-    if (ACTIVE_DISPUTE_STATUSES.has(ds) || exec === "pending_execution") {
+    if (ACTIVE_DISPUTE_STATUSES.has(ds) || exec === "pending_execution" || exec === "failed") {
       activeDisputeOrders.add(d.order_id);
     }
   }
 
   const orders: SellerOrderView[] = rows.map((o) => {
     const items = itemsByOrder.get(o.id) ?? [];
+    const refund = refundsRes.data?.find((row) => row.order_id === o.id);
+    const refundBlocked = refundsRes.data?.some((row) => row.order_id === o.id && isBlockingRefundStatus(row.status));
+    const checkout = checkoutsRes.data?.find((row) => row.id === o.checkout_session_id && row.buyer_id === o.buyer_id);
+    const payments = paymentsRes.data?.filter((row) => row.order_id === o.id) ?? [];
+    const paidPayment = payments.find((row) => row.status === "paid" && row.verified_at);
+    const latestPayment = paidPayment ?? payments.find((row) => row.status === "late_payment_review") ?? payments[0];
     return {
       id: o.id,
       orderCode: o.order_code,
@@ -216,15 +268,27 @@ export async function getSellerOrdersData(
       paidAt: o.paid_at,
       handedOverAt: o.handed_over_at,
       completedAt: o.completed_at,
+      protectionExpiresAt: o.protection_expires_at,
       createdAt: o.created_at,
       pinFailedAttempts: Number(o.pin_failed_attempts ?? 0),
       pinLockedUntil: o.pin_locked_until,
       hasActiveDispute:
-        o.status.toLowerCase() === "disputed" || activeDisputeOrders.has(o.id),
+        o.status.toLowerCase() === "disputed" || activeDisputeOrders.has(o.id) || Boolean(refundBlocked),
+      paymentVerified: isAuthoritativeOrderPaymentVerified({ order: o, checkoutSession: checkout, legacyPayment: paidPayment }),
+      paymentStatus: checkout?.payment_status ?? latestPayment?.status ?? null,
+      transactionRef: o.checkout_session_id ? null : latestPayment?.transaction_ref ?? null,
+      adjustedNetSen: adjustmentsRes.data ? Math.max(0, o.seller_net_sen - adjustmentsRes.data.reduce((sum, row) => sum + row.amount_sen, 0)) : null,
+      allocatedSen: allocationsRes.data?.reduce((sum, row) => sum + row.allocated_sen, 0) ?? null,
+      dispute: disputeDetails?.get(o.id) ?? null,
+      refund: refund ? { id: refund.id, status: refund.status, amountSen: refund.refund_amount_sen,
+        returnStatus: refund.return_status, returnRequired: refund.return_required } : null,
+      reviews: (reviewsRes.data ?? []).map((row) => ({
+        id: row.id, rating: row.rating, comment: row.comment, sellerResponse: row.seller_response,
+      })),
       items,
       isServiceOrder: items.some((it) => it.isService),
     };
   });
 
-  return { eligibility, orders };
+  return { serverNow: Date.now(), eligibility, orders };
 }

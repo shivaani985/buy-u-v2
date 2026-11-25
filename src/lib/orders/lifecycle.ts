@@ -1,35 +1,68 @@
-export type SellerOrderFilterKey =
-  | "all"
-  | "awaiting_payment"
-  | "awaiting_handover"
-  | "awaiting_receipt"
-  | "completed"
-  | "disputed_refunded";
-
 export interface OrderStatusBadge {
   label: string;
   toneClass: string;
 }
 
 export interface OrderTimelineStep {
-  key: "placed" | "paid" | "handed_over" | "completed";
+  key: "placed" | "paid" | "in_progress" | "completed";
   label: string;
   done: boolean;
   active: boolean;
   timestamp: string | null;
 }
 
-export const SELLER_ORDER_FILTER_TABS: Array<{
-  key: SellerOrderFilterKey;
-  label: string;
-}> = [
-  { key: "all", label: "All Orders" },
-  { key: "awaiting_payment", label: "Awaiting Payment" },
-  { key: "awaiting_handover", label: "Awaiting Handover" },
-  { key: "awaiting_receipt", label: "Awaiting Receipt Confirmation" },
+export const ORDER_STATUS_TABS = [
+  { key: "all", label: "All" },
+  { key: "to-pay", label: "To Pay" },
+  { key: "in-progress", label: "In Progress" },
   { key: "completed", label: "Completed" },
-  { key: "disputed_refunded", label: "Disputed / Refunded" },
-];
+  { key: "refund-dispute", label: "Refund & Dispute" },
+  { key: "cancelled", label: "Cancelled" },
+] as const;
+
+export type OrderTab = (typeof ORDER_STATUS_TABS)[number]["key"];
+export type OrderTypeFilter = "all" | "products" | "services";
+
+export const LATE_PAYMENT_GUIDANCE =
+  "Your payment requires further verification. Please do not make another payment while your transaction is under review.";
+
+export function getOrderPresentation(input: {
+  status: string;
+  paymentStatus?: string | null;
+  paymentDeadline?: string | null;
+  hasFinancialIssue?: boolean;
+  refundStatus?: string | null;
+  isService?: boolean;
+}, now: number) {
+  const { paymentStatus, paymentDeadline, hasFinancialIssue, refundStatus, isService } = input;
+  let status = input.status;
+  if (status === "pending_payment" && paymentDeadline && Date.parse(paymentDeadline) <= now) {
+    status = "expired";
+  }
+  const tab: Exclude<OrderTab, "all"> =
+    paymentStatus === "late_payment_review" || hasFinancialIssue || isBlockingRefundStatus(refundStatus) || status === "disputed" || status === "refunded"
+      ? "refund-dispute"
+      : status === "pending_payment" ? "to-pay"
+      : status === "paid" || status === "handed_over" ? "in-progress"
+      : status === "completed" ? "completed"
+      : "cancelled";
+  const badge = getOrderStatusBadge(status, paymentStatus, isService);
+  if (paymentStatus !== "late_payment_review" && status !== "refunded" && tab === "refund-dispute") {
+    if (isBlockingRefundStatus(refundStatus)) {
+      badge.label = refundStatus === "awaiting_return" ? "Refund awaiting return"
+        : refundStatus === "failed" || refundStatus === "reconciliation_required" ? "Refund under review"
+        : "Refund pending";
+      badge.toneClass = "bg-amber-50 text-amber-900 border-amber-200";
+    } else if (hasFinancialIssue) {
+      badge.label = "Disputed";
+    }
+  }
+  return { status, tab, badge };
+}
+
+export function isBlockingRefundStatus(status?: string | null) {
+  return ["pending_execution", "awaiting_return", "processing", "failed", "reconciliation_required"].includes(status ?? "");
+}
 
 export function normalizePickupPinInput(raw: string): string {
   return raw.replace(/\D/g, "").slice(0, 6);
@@ -41,11 +74,12 @@ export function isValidPickupPinFormat(pin: string): boolean {
 
 export function getOrderStatusBadge(
   status: string,
-  paymentStatus?: string | null
+  paymentStatus?: string | null,
+  isService = false
 ): OrderStatusBadge {
   if (paymentStatus === "late_payment_review") {
     return {
-      label: "Late Payment · Refund Review",
+      label: "Payment under review",
       toneClass: "bg-[#FEF3E6] text-[#B54708] border-[#F6D6B0]",
     };
   }
@@ -53,7 +87,7 @@ export function getOrderStatusBadge(
     case "completed":
       return {
         label: "Completed",
-        toneClass: "bg-[#E6F6F6] text-[#006A6D] border-[#B8E3E4]",
+        toneClass: "bg-[#ECFDF3] text-[#027A48] border-[#ABEFC6]",
       };
     case "handed_over":
       return {
@@ -62,7 +96,7 @@ export function getOrderStatusBadge(
       };
     case "paid":
       return {
-        label: "Paid — Awaiting Handover",
+        label: isService ? "Awaiting Service" : "Awaiting Collection",
         toneClass: "bg-[#E6F6F6] text-[#008285] border-[#B8E3E4]",
       };
     case "pending_payment":
@@ -99,108 +133,29 @@ export function getOrderStatusBadge(
   }
 }
 
-export function getOrderTimelineSteps(input: {
+export interface OrderTimelineSnapshot {
   status: string;
   createdAt: string;
   paidAt: string | null;
-  handedOverAt: string | null;
   completedAt: string | null;
-}): OrderTimelineStep[] {
-  const s = input.status.toLowerCase();
-  const isCompleted = s === "completed";
-  const isHandedOver = isCompleted || s === "handed_over";
-  const isPaid =
-    isHandedOver ||
-    s === "paid" ||
-    s === "disputed" ||
-    Boolean(input.paidAt);
+  paymentDeadline: string | null;
+}
 
+export function getOrderTimelineSteps(
+  snapshot: OrderTimelineSnapshot,
+  snapshotAt: number,
+  paymentStatus?: string | null,
+): OrderTimelineStep[] {
+  const { status, createdAt, paidAt, completedAt, paymentDeadline } = snapshot;
+  const reviewing = paymentStatus === "late_payment_review";
+  const awaitingPayment = status === "pending_payment"
+    && (!paymentDeadline || Date.parse(paymentDeadline) > snapshotAt);
+  const paid = Boolean(paidAt);
+  const completed = Boolean(completedAt);
   return [
-    {
-      key: "placed",
-      label: "Placed",
-      done: true,
-      active: s === "pending_payment",
-      timestamp: input.createdAt,
-    },
-    {
-      key: "paid",
-      label: "Paid",
-      done: isPaid,
-      active: s === "paid",
-      timestamp: input.paidAt,
-    },
-    {
-      key: "handed_over",
-      label: "Handed Over",
-      done: isHandedOver,
-      active: s === "handed_over",
-      timestamp: input.handedOverAt,
-    },
-    {
-      key: "completed",
-      label: "Completed",
-      done: isCompleted,
-      active: isCompleted,
-      timestamp: input.completedAt,
-    },
+    { key: "placed", label: "Placed", done: true, active: !reviewing && awaitingPayment, timestamp: createdAt },
+    { key: "paid", label: "Paid", done: paid, active: false, timestamp: paidAt },
+    { key: "in_progress", label: "In Progress", done: paid, active: !reviewing && (status === "paid" || status === "handed_over"), timestamp: paidAt },
+    { key: "completed", label: "Completed", done: completed, active: !reviewing && status === "completed", timestamp: completedAt },
   ];
-}
-
-export function matchesSellerOrderFilter(
-  status: string,
-  filter: SellerOrderFilterKey
-): boolean {
-  const s = status.toLowerCase();
-  switch (filter) {
-    case "all":
-      return true;
-    case "awaiting_payment":
-      return s === "pending_payment";
-    case "awaiting_handover":
-      return s === "paid";
-    case "awaiting_receipt":
-      return s === "handed_over";
-    case "completed":
-      return s === "completed";
-    case "disputed_refunded":
-      return s === "disputed" || s === "refunded";
-  }
-}
-
-export function matchesSellerOrderSearch(
-  order: {
-    orderCode: string;
-    buyerName: string;
-    collectionAreaName: string;
-    items: Array<{ title: string }>;
-  },
-  rawQuery: string
-): boolean {
-  const q = rawQuery.trim().toLowerCase();
-  if (!q) return true;
-  if (order.orderCode.toLowerCase().includes(q)) return true;
-  if (order.buyerName.toLowerCase().includes(q)) return true;
-  if (order.collectionAreaName.toLowerCase().includes(q)) return true;
-  return order.items.some((item) => item.title.toLowerCase().includes(q));
-}
-
-export function getSellerEarningsLedgerState(
-  status: string,
-  hasActiveDispute = false
-): {
-  state: "pending_settlement" | "available_for_payout" | "frozen" | "none";
-  label: string;
-} {
-  const s = status.toLowerCase();
-  if (s === "disputed" || hasActiveDispute) {
-    return { state: "frozen", label: "Frozen (Dispute)" };
-  }
-  if (s === "completed") {
-    return { state: "available_for_payout", label: "Available for Payout" };
-  }
-  if (s === "paid" || s === "handed_over") {
-    return { state: "pending_settlement", label: "Pending Settlement" };
-  }
-  return { state: "none", label: "Not Settled" };
 }

@@ -308,6 +308,8 @@ export async function buyerReportReturnAction(
     return { ok: false, message: "Could not mark item returned right now." };
   }
   revalidatePath("/orders");
+  revalidatePath("/orders/[orderId]", "page");
+  revalidatePath("/seller/orders/[orderId]", "page");
   revalidatePath("/seller/disputes");
   revalidatePath("/admin");
   return {
@@ -350,6 +352,8 @@ export async function confirmReturnReceiptAction(input: {
     return { ok: false, message: "Could not confirm return receipt." };
   }
   revalidatePath("/orders");
+  revalidatePath("/orders/[orderId]", "page");
+  revalidatePath("/seller/orders/[orderId]", "page");
   revalidatePath("/seller/disputes");
   revalidatePath("/admin");
   return {
@@ -385,6 +389,8 @@ export async function adminConfigureRefundReturnAction(input: {
   }
   revalidatePath("/admin");
   revalidatePath("/orders");
+  revalidatePath("/orders/[orderId]", "page");
+  revalidatePath("/seller/orders/[orderId]", "page");
   revalidatePath("/seller/disputes");
   return {
     ok: true,
@@ -546,6 +552,8 @@ export async function adminExecuteRefundAction(
 
   revalidatePath("/admin");
   revalidatePath("/orders");
+  revalidatePath("/orders/[orderId]", "page");
+  revalidatePath("/seller/orders/[orderId]", "page");
   revalidatePath("/seller/disputes");
   revalidatePath("/seller/orders");
   revalidatePath("/seller");
@@ -600,6 +608,8 @@ export async function adminRunSafeRecoveryAction(input: {
   revalidatePath("/seller/withdrawals");
   revalidatePath("/seller");
   revalidatePath("/orders");
+  revalidatePath("/orders/[orderId]", "page");
+  revalidatePath("/seller/orders/[orderId]", "page");
 
   if (data === "paid" || data === "succeeded") {
     return {

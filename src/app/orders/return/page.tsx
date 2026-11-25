@@ -1,15 +1,13 @@
+import { LATE_PAYMENT_GUIDANCE } from "@/lib/orders/lifecycle";
 import type { Metadata } from "next";
 import Link from "next/link";
 import {
   AlertCircle,
   CheckCircle2,
   Clock,
-  KeyRound,
   Lock,
-  MapPin,
   RefreshCw,
   ShieldAlert,
-  Store,
   XCircle,
 } from "lucide-react";
 import { evaluateBuyerEligibility } from "@/lib/buyer/validation";
@@ -51,14 +49,7 @@ function formatDeadlineMyt(iso: string | null): string | null {
   }).format(d);
 }
 
-interface ReturnSellerOrderCard {
-  id: string;
-  orderCode: string;
-  sellerName: string;
-  subtotalSen: number;
-  collectionAreaName: string;
-  pickupPin: string | null;
-}
+
 
 export default async function OrderPaymentReturnPage({
   searchParams,
@@ -207,7 +198,7 @@ export default async function OrderPaymentReturnPage({
     expectedOrderCode: orderCodeParam || expectedRefCode,
   });
 
-  // Load consolidated summary + individual seller order cards + buyer-only PINs
+  // Load the owned checkout summary after server verification
   let referenceCode = expectedRefCode;
   let totalPaidSen = 0;
   let fpxFeeSen = 100;
@@ -216,123 +207,41 @@ export default async function OrderPaymentReturnPage({
     verification.outcome === "confirmed_paid" ||
     verification.outcome === "already_paid";
   let isExpired = verification.outcome === "expired";
-  const isLateReview = verification.outcome === "late_payment_reconciliation";
+  let isLateReview = verification.outcome === "late_payment_reconciliation";
   const isFailed = verification.outcome === "failed";
 
-  let sellerOrderRows: Array<{
-    id: string;
-    order_code: string;
-    seller_id: string;
-    status: string;
-    subtotal_sen: number;
-    collection_area_name: string | null;
-  }> = [];
-
+  let paidOrderCount = 0;
   if (ownedCheckoutId) {
-    const [{ data: freshSession }, { data: childOrders }] = await Promise.all([
-      supabase
-        .from("checkout_sessions")
-        .select(
-          "checkout_code, status, combined_subtotal_sen, fpx_fee_sen, total_paid_sen, payment_deadline"
-        )
-        .eq("id", ownedCheckoutId)
-        .eq("buyer_id", eligibility.userId)
-        .single(),
-      supabase
-        .from("orders")
-        .select(
-          "id, order_code, seller_id, status, subtotal_sen, collection_area_name"
-        )
-        .eq("checkout_session_id", ownedCheckoutId)
-        .eq("buyer_id", eligibility.userId)
-        .order("created_at", { ascending: true }),
+    const [{ data: checkout }, { count }] = await Promise.all([
+      supabase.from("checkout_sessions")
+        .select("checkout_code,status,payment_status,paid_at,fpx_fee_sen,total_paid_sen,payment_deadline")
+        .eq("id", ownedCheckoutId).eq("buyer_id", eligibility.userId).single(),
+      supabase.from("orders").select("id", { count: "exact", head: true })
+        .eq("checkout_session_id", ownedCheckoutId).eq("buyer_id", eligibility.userId).not("paid_at", "is", null),
     ]);
-
-    if (freshSession) {
-      referenceCode = freshSession.checkout_code;
-      totalPaidSen = Number(freshSession.total_paid_sen ?? 0);
-      fpxFeeSen = Number(freshSession.fpx_fee_sen ?? 100);
-      paymentDeadline = freshSession.payment_deadline;
-      if (freshSession.status === "paid") isPaid = true;
-      if (freshSession.status === "expired") isExpired = true;
+    if (checkout) {
+      referenceCode = checkout.checkout_code;
+      totalPaidSen = Number(checkout.total_paid_sen);
+      fpxFeeSen = Number(checkout.fpx_fee_sen);
+      paymentDeadline = checkout.payment_deadline;
+      isPaid = checkout.status === "paid" && checkout.payment_status === "paid" && Boolean(checkout.paid_at);
+      isLateReview = isLateReview || checkout.payment_status === "late_payment_review";
+      isExpired = isExpired || checkout.status === "expired";
+      paidOrderCount = count ?? 0;
     }
-    sellerOrderRows = (childOrders ?? []) as typeof sellerOrderRows;
   } else if (ownedLegacyOrderId) {
-    const { data: legacyOrder } = await supabase
-      .from("orders")
-      .select(
-        "id, order_code, seller_id, status, subtotal_sen, fpx_fee_sen, total_paid_sen, collection_area_name, payment_deadline"
-      )
-      .eq("id", ownedLegacyOrderId)
-      .eq("buyer_id", eligibility.userId)
-      .single();
-
-    if (legacyOrder) {
-      referenceCode = legacyOrder.order_code;
-      totalPaidSen = Number(legacyOrder.total_paid_sen ?? 0);
-      fpxFeeSen = Number(legacyOrder.fpx_fee_sen ?? 100);
-      paymentDeadline = legacyOrder.payment_deadline;
-      if (
-        ["paid", "ready_for_pickup", "completed"].includes(legacyOrder.status)
-      ) {
-        isPaid = true;
-      }
-      if (legacyOrder.status === "expired") isExpired = true;
-      sellerOrderRows = [legacyOrder];
+    const { data: order } = await supabase.from("orders")
+      .select("order_code,status,paid_at,fpx_fee_sen,total_paid_sen,payment_deadline")
+      .eq("id", ownedLegacyOrderId).eq("buyer_id", eligibility.userId).single();
+    if (order) {
+      referenceCode = order.order_code;
+      totalPaidSen = Number(order.total_paid_sen);
+      fpxFeeSen = Number(order.fpx_fee_sen);
+      paymentDeadline = order.payment_deadline;
+      isExpired = isExpired || order.status === "expired";
+      paidOrderCount = isPaid ? 1 : 0;
     }
   }
-
-  const sellerIds = Array.from(new Set(sellerOrderRows.map((o) => o.seller_id)));
-  const orderIds = sellerOrderRows.map((o) => o.id);
-
-  const [profilesRes, storefrontsRes, pinsRes] = await Promise.all([
-    sellerIds.length > 0
-      ? supabase
-          .from("public_profiles")
-          .select("id,display_name")
-          .in("id", sellerIds)
-      : Promise.resolve({ data: [] }),
-    sellerIds.length > 0
-      ? supabase
-          .from("storefronts")
-          .select("seller_id,shop_name")
-          .in("seller_id", sellerIds)
-      : Promise.resolve({ data: [] }),
-    isPaid && orderIds.length > 0
-      ? supabase.rpc("get_buyer_order_pickup_pins", { p_order_ids: orderIds })
-      : Promise.resolve({ data: [] }),
-  ]);
-
-  const sellerNameMap = new Map<string, string>();
-  for (const p of (profilesRes.data ?? []) as Array<{
-    id: string;
-    display_name: string | null;
-  }>) {
-    if (p.display_name?.trim()) sellerNameMap.set(p.id, p.display_name.trim());
-  }
-  for (const s of (storefrontsRes.data ?? []) as Array<{
-    seller_id: string;
-    shop_name: string | null;
-  }>) {
-    if (s.shop_name?.trim()) sellerNameMap.set(s.seller_id, s.shop_name.trim());
-  }
-
-  const pinByOrder = new Map<string, string>();
-  for (const row of (pinsRes.data ?? []) as Array<{
-    order_id: string;
-    pickup_pin: string | null;
-  }>) {
-    if (row.pickup_pin) pinByOrder.set(row.order_id, row.pickup_pin);
-  }
-
-  const orderCards: ReturnSellerOrderCard[] = sellerOrderRows.map((o) => ({
-    id: o.id,
-    orderCode: o.order_code,
-    sellerName: sellerNameMap.get(o.seller_id) ?? "UMSKAL Seller",
-    subtotalSen: Number(o.subtotal_sen ?? 0),
-    collectionAreaName: o.collection_area_name?.trim() || "UMSKAL Campus",
-    pickupPin: pinByOrder.get(o.id) ?? null,
-  }));
 
   const deadlineLabel = formatDeadlineMyt(paymentDeadline);
 
@@ -369,17 +278,17 @@ export default async function OrderPaymentReturnPage({
               </p>
               <h1 className="mt-1 text-xl font-extrabold tracking-[-0.02em] text-[#14121A] sm:text-2xl">
                 {isPaid
-                  ? "Payment Confirmed"
+                  ? "Payment Successful"
                   : isLateReview
-                    ? "Late Payment Under Refund Review"
+                    ? "Payment under review"
                     : isFailed
                       ? "Payment Failed or Cancelled"
                       : isExpired
-                        ? "Payment Window Expired"
+                        ? "Payment Expired"
                         : "Verifying Payment with Bank"}
               </h1>
               <p className="mt-1.5 text-sm leading-relaxed text-[#4A4656]">
-                {verification.message}
+                {isLateReview ? LATE_PAYMENT_GUIDANCE : isPaid ? "Verified orders are now in progress. Contact your sellers to arrange collection or service delivery." : verification.message}
               </p>
             </div>
           </div>
@@ -397,7 +306,7 @@ export default async function OrderPaymentReturnPage({
             </div>
             <div>
               <dt className="text-xs font-medium text-[#6B6779]">
-                Total Paid (Once)
+                {isPaid ? "Total paid" : "Checkout amount"}
               </dt>
               <dd className="mt-0.5 font-extrabold text-[#4E2A84]">
                 {formatSenToRm(totalPaidSen)}
@@ -422,70 +331,9 @@ export default async function OrderPaymentReturnPage({
             </div>
           ) : null}
 
-          {/* Individual Seller Orders & Independent Private Pickup PINs */}
-          {orderCards.length > 0 ? (
-            <div className="space-y-3">
-              <h2 className="text-xs font-bold uppercase tracking-wider text-[#6B6779]">
-                {orderCards.length === 1
-                  ? "Seller Order & Campus Pickup"
-                  : `Individual Seller Orders (${orderCards.length} separate pickups)`}
-              </h2>
-
-              {orderCards.map((card) => (
-                <div
-                  key={card.id}
-                  className="rounded-xl border border-[#E6E3EE] bg-[#FAF9FC] p-4"
-                >
-                  <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
-                    <div className="flex items-center gap-2">
-                      <Store
-                        className="h-4 w-4 text-[#4E2A84]"
-                        aria-hidden="true"
-                      />
-                      <span className="font-bold text-[#14121A]">
-                        {card.sellerName}
-                      </span>
-                      <span className="text-xs font-semibold text-[#6B6779]">
-                        #{card.orderCode}
-                      </span>
-                    </div>
-                    <span className="font-extrabold text-[#4E2A84]">
-                      {formatSenToRm(card.subtotalSen)}
-                    </span>
-                  </div>
-
-                  <p className="mt-1.5 inline-flex items-center gap-1.5 text-xs text-[#4A4656]">
-                    <MapPin
-                      className="h-3.5 w-3.5 text-[#4E2A84]"
-                      aria-hidden="true"
-                    />
-                    <span>Collection: {card.collectionAreaName}</span>
-                  </p>
-
-                  {isPaid && card.pickupPin ? (
-                    <div className="mt-3 rounded-lg border border-[#D8EAEB] bg-[#F4FAFA] px-3.5 py-2.5">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="inline-flex items-center gap-1.5 text-xs font-bold text-[#008285]">
-                          <KeyRound
-                            className="h-3.5 w-3.5"
-                            aria-hidden="true"
-                          />
-                          <span>Private Pickup PIN (buyer-only)</span>
-                        </span>
-                        <span className="font-mono text-lg font-extrabold tracking-[0.25em] text-[#14121A]">
-                          {card.pickupPin}
-                        </span>
-                      </div>
-                      <p className="mt-1 text-[11px] text-[#4A4656]">
-                        Show this PIN only in person to {card.sellerName} at{" "}
-                        {card.collectionAreaName}. Sellers cannot see your PIN.
-                      </p>
-                    </div>
-                  ) : null}
-                </div>
-              ))}
-            </div>
-          ) : null}
+          {isPaid && <p className="text-sm font-semibold text-ink-secondary">
+            {paidOrderCount} {paidOrderCount === 1 ? "order" : "orders"} paid
+          </p>}
 
           <div className="flex flex-wrap items-center gap-3 border-t border-[#ECEAF3] pt-5">
             <Link
@@ -494,6 +342,9 @@ export default async function OrderPaymentReturnPage({
             >
               View My Orders
             </Link>
+            {isPaid && <Link href="/marketplace" className="rounded-xl border border-border-crisp px-4 py-2.5 text-sm font-semibold hover:text-brand-purple">
+              Continue Shopping
+            </Link>}
             {!isPaid && !isExpired && !isLateReview ? (
               <Link
                 href={`/orders/return?billcode=${encodeURIComponent(billCode)}&order_id=${encodeURIComponent(referenceCode)}`}

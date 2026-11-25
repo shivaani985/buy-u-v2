@@ -165,7 +165,7 @@ export default async function SellerHubPage({
             .join(" · ") || undefined
         : undefined,
       tooltip:
-        "Verified paid orders awaiting handover/confirmation. Completed orders enter a 72-hour Buyer Protection Reserve before becoming withdrawable.",
+        "Verified paid orders awaiting completion. After completion, earnings are held through the stored buyer protection deadline.",
     },
     {
       label: "Available for Payout",

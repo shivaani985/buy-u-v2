@@ -824,14 +824,14 @@ test("Phase 6B.3 ToyyibPay Sandbox integration enforces server-only secrets, san
   assert.ok(callbackRoute.includes("verifyAndReconcileBillPayment"));
   assert.equal(callbackRoute.includes(".rpc("), false);
   assert.ok(returnPage.includes("verifyAndReconcileBillPayment"));
-  assert.ok(returnPage.includes('"get_buyer_order_pickup_pins"'));
+  assert.doesNotMatch(returnPage, /get_buyer_order_pickup_pins|pickupPin|pickup_pin/);
   assert.equal(returnPage.includes("confirm_order_payment_atomic"), false);
   assert.ok(serverMod.includes("/index.php/api/getBillTransactions"));
   assert.ok(serverMod.includes('"confirm_order_payment_atomic"'));
 
   // 4. DB-level PIN & raw_callback privacy + buyer-only PIN RPC (zero direct pickup_pin column selects)
   const ordersData = fs.readFileSync(path.resolve(root, "src/lib/orders/data.ts"), "utf8");
-  assert.ok(ordersData.includes('"get_buyer_order_pickup_pins"'));
+  assert.doesNotMatch(ordersData, /get_buyer_order_pickup_pins|pickupPin|pickup_pin/);
   assert.equal(ordersData.includes(",pickup_pin"), false);
   assert.equal(returnPage.includes(", pickup_pin"), false);
   for (const rel of ["src/lib/seller/data.ts", "src/app/seller/actions.ts"]) {

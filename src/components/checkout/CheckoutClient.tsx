@@ -102,13 +102,6 @@ export function CheckoutClient({
 
   // Reuse original key on retries of the same selection; generate a new key if selection changes
   const keyBySelectionRef = useRef<Record<string, string>>({});
-  if (!keyBySelectionRef.current[selectionSignature]) {
-    keyBySelectionRef.current[selectionSignature] =
-      typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
-        ? `cart-${crypto.randomUUID()}`
-        : `cart-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-  }
-  const idempotencyKey = keyBySelectionRef.current[selectionSignature]!;
 
   const [isPaying, setIsPaying] = useState(false);
   const [paymentError, setPaymentError] = useState<string | null>(null);
@@ -156,6 +149,13 @@ export function CheckoutClient({
     setPaymentError(null);
     setIsPaying(true);
     try {
+      if (!keyBySelectionRef.current[selectionSignature]) {
+        keyBySelectionRef.current[selectionSignature] =
+          typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+            ? `cart-${crypto.randomUUID()}`
+            : `cart-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+      }
+      const idempotencyKey = keyBySelectionRef.current[selectionSignature]!;
       const reviewedSet = new Set(submittedCartItemIds);
       const serviceDetails: Record<string, ServiceCheckoutDetailInput> = {};
       for (const [cartItemId, st] of Object.entries(serviceStates)) {
@@ -312,14 +312,14 @@ export function CheckoutClient({
       </nav>
 
       {/* Single Consolidated Bill Redirect Banner (fallback if browser pauses redirect) */}
-      {readyCheckout?.billUrl ? (
+      {readyCheckout?.checkoutSessionId ? (
         <section
           aria-label="ToyyibPay FPX payment bill ready"
           className="flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-[#4E2A84]/25 bg-white p-5 sm:p-6"
         >
           <div>
             <p className="text-xs font-bold uppercase tracking-wider text-[#4E2A84]">
-              Checkout #{readyCheckout.checkoutCode} · 15-Minute Hold Active
+              Checkout #{readyCheckout.checkoutCode}
             </p>
             <h2 className="mt-0.5 text-base font-extrabold text-[#14121A]">
               Redirecting to ToyyibPay Sandbox FPX (
@@ -333,13 +333,12 @@ export function CheckoutClient({
               checkout with a single RM 1.00 FPX fee.
             </p>
           </div>
-          <a
-            href={readyCheckout.billUrl}
-            className="inline-flex items-center gap-1.5 rounded-xl bg-[#4E2A84] px-4 py-2.5 text-xs font-bold text-white transition hover:bg-[#3F216B]"
+          <Link
+            href={`/orders/checkout/${readyCheckout.checkoutSessionId}`}
+            className="inline-flex min-h-11 items-center gap-1.5 rounded-xl bg-[#4E2A84] px-4 py-2.5 text-xs font-bold text-white transition hover:bg-[#3F216B]"
           >
-            <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
-            <span>Continue to ToyyibPay FPX</span>
-          </a>
+            View Payment Details
+          </Link>
         </section>
       ) : null}
 

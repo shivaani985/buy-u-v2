@@ -146,6 +146,8 @@ export async function openOrderDisputeAction(input: {
     | undefined;
 
   revalidatePath("/orders");
+  revalidatePath("/orders/[orderId]", "page");
+  revalidatePath("/seller/orders/[orderId]", "page");
   revalidatePath("/seller/orders");
   revalidatePath("/seller/disputes");
   revalidatePath("/seller");
@@ -218,6 +220,8 @@ export async function submitSellerDisputeResponseAction(input: {
 
   revalidatePath("/seller/disputes");
   revalidatePath("/orders");
+  revalidatePath("/orders/[orderId]", "page");
+  revalidatePath("/seller/orders/[orderId]", "page");
   revalidatePath("/admin");
 
   return {
@@ -256,6 +260,8 @@ export async function adminMarkDisputeUnderReviewAction(input: {
 
   revalidatePath("/admin");
   revalidatePath("/orders");
+  revalidatePath("/orders/[orderId]", "page");
+  revalidatePath("/seller/orders/[orderId]", "page");
   revalidatePath("/seller/disputes");
 
   return { ok: true, message: "Dispute moved to Under Review." };
@@ -301,6 +307,8 @@ export async function adminResolveDisputeAction(input: {
 
   revalidatePath("/admin");
   revalidatePath("/orders");
+  revalidatePath("/orders/[orderId]", "page");
+  revalidatePath("/seller/orders/[orderId]", "page");
   revalidatePath("/seller/disputes");
   revalidatePath("/seller/orders");
   revalidatePath("/seller");

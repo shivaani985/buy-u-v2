@@ -153,7 +153,7 @@ function mapTransactionStatus(
     return { label: "Awaiting Receipt Confirmation", tone: "pending" };
   }
   if (s === "paid") {
-    return { label: "Paid — Awaiting Handover", tone: "pending" };
+    return { label: "Paid — In Progress", tone: "pending" };
   }
   if (s === "disputed") {
     return { label: "Disputed", tone: "danger" };

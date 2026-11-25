@@ -384,6 +384,7 @@ export async function startCartToyyibPayCheckoutAction(input: {
 export async function retryCheckoutSandboxBillAction(
   checkoutSessionId: string
 ): Promise<UnifiedCheckoutActionResult> {
+  if (!isValidUuid(checkoutSessionId)) return { ok: false, error: "Invalid checkout reference." };
   const session = await getSessionSummary();
   const eligibility = evaluateBuyerEligibility(session);
   if (!eligibility.eligible || !eligibility.userId) {
@@ -465,6 +466,7 @@ export async function retryCheckoutSandboxBillAction(
 export async function retryOrderSandboxBillAction(
   orderId: string
 ): Promise<SingleBillActionResult> {
+  if (!isValidUuid(orderId)) return { ok: false, error: "Invalid order reference." };
   const session = await getSessionSummary();
   const eligibility = evaluateBuyerEligibility(session);
   if (!eligibility.eligible || !eligibility.userId) {
