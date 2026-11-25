@@ -3,7 +3,7 @@ import type { BuyerEligibilityResult } from "./validation";
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-const CART_ELIGIBLE_KINDS = new Set(["pre_loved", "business"]);
+const CART_ELIGIBLE_KINDS = new Set(["pre_loved", "business", "service"]);
 
 export type CartIssueCode =
   | "deleted"
@@ -11,6 +11,7 @@ export type CartIssueCode =
   | "unavailable"
   | "self_purchase"
   | "non_physical"
+  | "service_paused"
   | "variant_unavailable"
   | "out_of_stock"
   | "exceeds_stock";
@@ -41,6 +42,8 @@ export interface CartItemView {
   issueMessage: string | null;
   canAdjustToMax: boolean;
   isFood?: boolean;
+  isService?: boolean;
+  serviceMode?: string | null;
   availabilityMode?: string | null;
   pickupWindowStart?: string | null;
   pickupWindowEnd?: string | null;
@@ -80,6 +83,7 @@ export interface CartLineListingSnapshot {
   priceSen: number;
   quantity: number;
   reservedQuantity: number;
+  acceptingRequests?: boolean | null;
 }
 
 export interface CartLineVariantSnapshot {
@@ -203,11 +207,50 @@ export function evaluateCartLineState(input: {
     return {
       isValid: false,
       issueCode: "non_physical",
-      issueMessage: "Only physical products can be kept in the shopping cart.",
+      issueMessage: "This listing cannot be kept in the shopping cart.",
       unitPriceSen,
       availableStock,
       reservedQuantity,
       lineSubtotalSen: 0,
+      canAdjustToMax: false,
+    };
+  }
+
+  if (listing.kind === "service") {
+    if (listing.acceptingRequests === false) {
+      return {
+        isValid: false,
+        issueCode: "service_paused",
+        issueMessage: "This service is currently paused and cannot be purchased.",
+        unitPriceSen,
+        availableStock: 0,
+        reservedQuantity: 0,
+        lineSubtotalSen: 0,
+        canAdjustToMax: false,
+      };
+    }
+
+    if (qty < 1 || qty > 99) {
+      return {
+        isValid: false,
+        issueCode: "exceeds_stock",
+        issueMessage: "Service quantity must be between 1 and 99.",
+        unitPriceSen,
+        availableStock: 99,
+        reservedQuantity: 0,
+        lineSubtotalSen: 0,
+        canAdjustToMax: true,
+      };
+    }
+
+    return {
+      isValid: true,
+      issueCode: null,
+      issueMessage: null,
+      unitPriceSen,
+      availableStock: 99,
+      reservedQuantity: 0,
+      lineSubtotalSen: unitPriceSen * qty,
       canAdjustToMax: false,
     };
   }

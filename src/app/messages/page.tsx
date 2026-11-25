@@ -11,7 +11,12 @@ export const metadata: Metadata = {
 };
 
 interface MessagesPageProps {
-  searchParams: Promise<{ c?: string; listing?: string }>;
+  searchParams: Promise<{
+    c?: string;
+    listing?: string;
+    variant?: string;
+    bargain?: string;
+  }>;
 }
 
 export default async function MessagesPage({
@@ -119,6 +124,10 @@ export default async function MessagesPage({
           initialHasOlder={data.hasOlderMessages}
           activeListing={data.activeListing}
           hasExplicitConversationParam={Boolean(requestedConvId)}
+          initialOpenOffer={sp.bargain === "1"}
+          initialVariantId={
+            typeof sp.variant === "string" ? sp.variant.trim() : null
+          }
         />
       )}
     </div>

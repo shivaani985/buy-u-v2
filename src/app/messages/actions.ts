@@ -60,6 +60,10 @@ async function checkBlockedBidirectional(
 export async function startConversationAction(input: {
   sellerId: string;
   listingId?: string | null;
+  variantId?: string | null;
+  orderId?: string | null;
+  initialMessage?: string | null;
+  openBargain?: boolean;
 }): Promise<StartConversationResult> {
   const session = await getSessionSummary();
   const eligibility = evaluateMessagingEligibility(session);
@@ -77,11 +81,49 @@ export async function startConversationAction(input: {
   }
 
   const userId = eligibility.userId;
-  const peerId = (input.sellerId ?? "").trim();
+  const rawOrderId = (input.orderId ?? "").trim();
+  let validOrderId: string | null = null;
+  let peerId = (input.sellerId ?? "").trim();
 
-  const isBlocked = isValidUuid(peerId)
-    ? await checkBlockedBidirectional(supabase, userId, peerId)
-    : false;
+  // When an orderId is supplied, authorize participant membership and derive counterparty from the actual order
+  if (rawOrderId.length > 0) {
+    if (!isValidUuid(rawOrderId)) {
+      return { ok: false, error: "Invalid order reference." };
+    }
+    const { data: orderRow, error: orderErr } = await supabase
+      .from("orders")
+      .select("id,buyer_id,seller_id")
+      .eq("id", rawOrderId)
+      .maybeSingle();
+
+    const typedOrder = orderRow as {
+      id: string;
+      buyer_id: string;
+      seller_id: string;
+    } | null;
+
+    if (
+      orderErr ||
+      !typedOrder ||
+      (typedOrder.buyer_id !== userId && typedOrder.seller_id !== userId)
+    ) {
+      return {
+        ok: false,
+        error: "You are not authorized to open chat for this order.",
+      };
+    }
+
+    validOrderId = typedOrder.id;
+    peerId =
+      typedOrder.buyer_id === userId
+        ? typedOrder.seller_id
+        : typedOrder.buyer_id;
+  }
+
+  const isBlocked =
+    !validOrderId && isValidUuid(peerId)
+      ? await checkBlockedBidirectional(supabase, userId, peerId)
+      : false;
 
   const check = validateStartConversation({
     eligibility,
@@ -140,17 +182,46 @@ export async function startConversationAction(input: {
     return { ok: false, error: "Conversation could not be initialized." };
   }
 
+  const trimmedInitial = (input.initialMessage ?? "").trim();
+  if (trimmedInitial.length > 0) {
+    // Prevent duplicate automatic greetings when reopening an existing conversation for this order/listing
+    let msgQuery = supabase
+      .from("messages")
+      .select("id")
+      .eq("conversation_id", conversationId)
+      .limit(1);
+    if (validOrderId) {
+      msgQuery = msgQuery.eq("order_id", validOrderId);
+    } else if (input.listingId && isValidUuid(input.listingId)) {
+      msgQuery = msgQuery.eq("listing_id", input.listingId.trim());
+    }
+    const { data: existingMsgs } = await msgQuery;
+    if (!existingMsgs || existingMsgs.length === 0) {
+      await sendMessageAction({
+        conversationId,
+        body: trimmedInitial,
+        listingId: input.listingId ?? null,
+        orderId: validOrderId,
+      });
+    }
+  }
+
   revalidatePath("/messages");
 
   const listingParam =
     input.listingId && isValidUuid(input.listingId)
       ? `&listing=${encodeURIComponent(input.listingId.trim())}`
       : "";
+  const variantParam =
+    input.variantId && isValidUuid(input.variantId)
+      ? `&variant=${encodeURIComponent(input.variantId.trim())}`
+      : "";
+  const bargainParam = input.openBargain ? "&bargain=1" : "";
 
   return {
     ok: true,
     conversationId,
-    href: `/messages?c=${encodeURIComponent(conversationId)}${listingParam}`,
+    href: `/messages?c=${encodeURIComponent(conversationId)}${listingParam}${variantParam}${bargainParam}`,
   };
 }
 

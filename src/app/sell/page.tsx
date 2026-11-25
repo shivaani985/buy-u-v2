@@ -2,8 +2,11 @@ import type { Metadata } from "next";
 import { SellerGate } from "@/components/seller/SellerGate";
 import { SellerNav } from "@/components/seller/SellerNav";
 import { SellListingForm } from "@/components/seller/SellListingForm";
-import { getSellFormOptions } from "@/lib/seller/data";
-import { evaluateSellerEligibility } from "@/lib/seller/validation";
+import { getSellFormOptions, getSellerNewOrderCount } from "@/lib/seller/data";
+import {
+  evaluateSellerEligibility,
+  type SellListingKind,
+} from "@/lib/seller/validation";
 import { getSessionSummary } from "@/lib/supabase/server";
 
 export const metadata: Metadata = {
@@ -12,16 +15,44 @@ export const metadata: Metadata = {
     "Create and publish a campus listing or student service on Buy-U UMSKAL.",
 };
 
-export default async function SellPage() {
-  const session = await getSessionSummary();
+const VALID_SELL_TYPES = new Set<SellListingKind>([
+  "preloved",
+  "business",
+  "food",
+  "service",
+]);
+
+export default async function SellPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ type?: string }>;
+}) {
+  const [params, session] = await Promise.all([
+    searchParams,
+    getSessionSummary(),
+  ]);
   const eligibility = evaluateSellerEligibility(session);
 
   if (!eligibility.eligible) {
     return <SellerGate eligibility={eligibility} nextPath="/sell" />;
   }
 
-  const { categories, collectionAreas, storefront } =
-    await getSellFormOptions(session);
+  const rawType = (params.type ?? "").trim().toLowerCase() as SellListingKind;
+  const initialListingType: SellListingKind = VALID_SELL_TYPES.has(rawType)
+    ? rawType
+    : "preloved";
+
+  const [{ categories, collectionAreas, storefront }, newOrderCount] =
+    await Promise.all([
+      getSellFormOptions(session),
+      getSellerNewOrderCount(session),
+    ]);
+
+  const sellerDisplayName =
+    session.profile?.display_name ||
+    session.profile?.full_name ||
+    session.email?.split("@")[0] ||
+    "UMS Student";
 
   return (
     <div className="bg-white">
@@ -40,14 +71,16 @@ export default async function SellPage() {
         </div>
 
         <div className="mt-5">
-          <SellerNav />
+          <SellerNav newOrderCount={newOrderCount} />
         </div>
 
-        <div className="mt-6 max-w-4xl">
+        <div className="mt-6">
           <SellListingForm
             categories={categories}
             collectionAreas={collectionAreas}
             storefrontName={storefront?.shopName ?? null}
+            sellerDisplayName={sellerDisplayName}
+            initialListingType={initialListingType}
           />
         </div>
       </div>

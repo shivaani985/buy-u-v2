@@ -22,6 +22,7 @@ import {
   Zap,
 } from "lucide-react";
 import { initializeStorefrontAction } from "@/app/seller/actions";
+import { DeleteListingButton } from "@/components/seller/DeleteListingButton";
 import { SalesRangeSelect } from "@/components/seller/SalesRangeSelect";
 import { SellerGate } from "@/components/seller/SellerGate";
 import { SellerNav } from "@/components/seller/SellerNav";
@@ -109,6 +110,7 @@ export default async function SellerHubPage({
     getSellerHubData(session, range),
     getHeaderCounters(session),
   ]);
+  const newOrderCount = hub.newOrderCount;
 
   const displayName =
     session.profile?.display_name ||
@@ -204,7 +206,7 @@ export default async function SellerHubPage({
 
         {/* Shared Seller Navigation */}
         <div className="mt-4">
-          <SellerNav />
+          <SellerNav newOrderCount={newOrderCount} />
         </div>
 
         {hub.error ? (
@@ -516,6 +518,10 @@ export default async function SellerHubPage({
                                       />
                                     </Link>
                                   ) : null}
+                                  <DeleteListingButton
+                                    listingId={item.id}
+                                    listingTitle={item.title}
+                                  />
                                 </div>
                               </td>
                             </tr>
@@ -585,6 +591,10 @@ export default async function SellerHubPage({
                                     View
                                   </Link>
                                 ) : null}
+                                <DeleteListingButton
+                                  listingId={item.id}
+                                  listingTitle={item.title}
+                                />
                               </div>
                             </div>
                           </div>

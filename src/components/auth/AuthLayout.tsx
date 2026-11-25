@@ -10,17 +10,17 @@ interface AuthLayoutProps {
   footer?: React.ReactNode;
 }
 
-function TealUnderlineSwoosh() {
+function TealHeadlineSwoosh() {
   return (
     <svg
-      viewBox="0 0 240 18"
+      viewBox="0 0 220 14"
       fill="none"
       xmlns="http://www.w3.org/2000/svg"
-      className="h-3.5 w-44 sm:w-56 text-[#008285] select-none"
+      className="h-2.5 w-36 sm:w-48 text-[#008285] select-none"
       aria-hidden="true"
     >
       <path
-        d="M4 14C60 4 175 4 236 14C175 7 65 7 4 14Z"
+        d="M3 11C55 3 160 3 217 11C160 6 60 6 3 11Z"
         fill="currentColor"
       />
     </svg>
@@ -30,22 +30,14 @@ function TealUnderlineSwoosh() {
 function TopRightWaves() {
   return (
     <svg
-      viewBox="0 0 380 240"
+      viewBox="0 0 360 220"
       fill="none"
       xmlns="http://www.w3.org/2000/svg"
-      className="pointer-events-none absolute right-0 top-0 h-auto w-32 sm:w-64 md:w-80 lg:w-[380px] z-0 select-none opacity-80 sm:opacity-100"
+      className="pointer-events-none absolute right-0 top-0 z-0 h-auto w-32 sm:w-52 lg:w-[290px] xl:w-[340px] select-none"
       aria-hidden="true"
     >
-      {/* Outer teal wave curve */}
-      <path
-        d="M80 0C160 35 250 85 380 240V0H80Z"
-        fill="#008285"
-      />
-      {/* Inner purple wave curve */}
-      <path
-        d="M170 0C230 40 300 85 380 170V0H170Z"
-        fill="#4E2A84"
-      />
+      <path d="M70 0C155 30 245 85 360 220V0H70Z" fill="#008285" />
+      <path d="M165 0C225 36 290 80 360 160V0H165Z" fill="#4E2A84" />
     </svg>
   );
 }
@@ -53,21 +45,25 @@ function TopRightWaves() {
 function BottomLeftWaves() {
   return (
     <svg
-      viewBox="0 0 540 180"
+      viewBox="0 0 640 130"
       fill="none"
       xmlns="http://www.w3.org/2000/svg"
-      className="pointer-events-none absolute bottom-0 left-0 h-auto w-64 sm:w-80 md:w-96 lg:w-[520px] z-0 select-none"
+      className="pointer-events-none absolute bottom-0 left-0 z-10 hidden h-auto w-[46vw] max-w-[640px] select-none lg:block"
       aria-hidden="true"
     >
-      {/* Teal flowing wave */}
+      {/* Teal upper wave with subtle white separation */}
       <path
-        d="M0 80C100 45 200 70 330 120C410 150 480 165 540 170L540 180H0V80Z"
+        d="M0 32C125 22 255 68 415 102C495 118 570 124 640 126V130H0V32Z"
         fill="#008285"
+        stroke="#FFFFFF"
+        strokeWidth="3"
       />
-      {/* Deep purple grounding wave */}
+      {/* Deep purple lower wave with subtle white separation */}
       <path
-        d="M0 110C90 85 190 105 320 145C390 165 460 175 510 180H0V110Z"
+        d="M0 62C115 48 235 84 385 112C460 125 525 128 585 130H0V62Z"
         fill="#4E2A84"
+        stroke="#FFFFFF"
+        strokeWidth="3"
       />
     </svg>
   );
@@ -79,95 +75,27 @@ function BottomRightHibiscus() {
       viewBox="0 0 220 220"
       fill="none"
       xmlns="http://www.w3.org/2000/svg"
-      className="pointer-events-none absolute -bottom-4 -right-4 h-auto w-36 sm:w-48 md:w-56 lg:w-64 z-0 select-none opacity-95"
+      className="pointer-events-none absolute bottom-0 right-0 z-0 hidden h-auto w-28 sm:block sm:w-36 lg:w-44 xl:w-48 select-none opacity-90"
       aria-hidden="true"
     >
-      {/* Botanical Teal Leaves */}
-      <path
-        d="M110 170C95 155 80 165 60 180C75 190 95 188 110 170Z"
-        fill="#008285"
-      />
-      <path
-        d="M150 185C135 190 120 205 100 210C120 215 140 208 150 185Z"
-        fill="#008285"
-      />
-      <path
-        d="M70 180C55 170 40 185 25 200C45 205 60 195 70 180Z"
-        fill="#00A3A6"
-      />
-
-      {/* Hibiscus (Bunga Raya) Blossom */}
-      <g transform="translate(145, 145)">
-        {/* Petal 1 - Top Left */}
-        <path
-          d="M0 0 C-32 -32 -70 -26 -76 5 C-80 32 -42 48 0 0Z"
-          fill="#8056A8"
-        />
-        {/* Petal 2 - Top Right */}
-        <path
-          d="M0 0 C-16 -48 22 -75 48 -54 C75 -32 48 11 0 0Z"
-          fill="#744B9E"
-        />
-        {/* Petal 3 - Right */}
-        <path
-          d="M0 0 C32 -21 75 -5 75 27 C75 58 27 42 0 0Z"
-          fill="#6C4296"
-        />
-        {/* Petal 4 - Bottom */}
-        <path
-          d="M0 0 C21 32 11 75 -21 75 C-54 75 -38 27 0 0Z"
-          fill="#7E53A7"
-        />
-        {/* Petal 5 - Left */}
-        <path
-          d="M0 0 C-38 11 -70 21 -65 54 C-58 75 -16 48 0 0Z"
-          fill="#70479A"
-        />
-
-        {/* Delicate white petal vein contours */}
-        <path
-          d="M0 0 C-22 -16 -44 -13 -60 0"
-          stroke="#FFFFFF"
-          strokeWidth="1.5"
-          strokeOpacity="0.45"
-          strokeLinecap="round"
-        />
-        <path
-          d="M0 0 C-5 -27 11 -44 28 -38"
-          stroke="#FFFFFF"
-          strokeWidth="1.5"
-          strokeOpacity="0.45"
-          strokeLinecap="round"
-        />
-        <path
-          d="M0 0 C22 -5 48 5 54 22"
-          stroke="#FFFFFF"
-          strokeWidth="1.5"
-          strokeOpacity="0.45"
-          strokeLinecap="round"
-        />
-        <path
-          d="M0 0 C11 22 5 48 -11 54"
-          stroke="#FFFFFF"
-          strokeWidth="1.5"
-          strokeOpacity="0.45"
-          strokeLinecap="round"
-        />
-
-        {/* Golden pistil/stamen column */}
-        <path
-          d="M0 0 C-5 -16 -9 -38 -12 -52"
-          stroke="#FFD54F"
-          strokeWidth="2.5"
-          strokeLinecap="round"
-        />
-        {/* Pollen anthers */}
-        <circle cx="-12" cy="-52" r="2.5" fill="#FFC107" />
-        <circle cx="-16" cy="-48" r="2" fill="#FFC107" />
-        <circle cx="-8" cy="-49" r="2" fill="#FFC107" />
-        <circle cx="-13" cy="-43" r="1.8" fill="#FFC107" />
-        {/* Center deep purple core */}
-        <circle cx="0" cy="0" r="5" fill="#4E2A84" />
+      <path d="M115 175C100 160 85 170 65 185C80 195 100 193 115 175Z" fill="#008285" />
+      <path d="M155 190C140 195 125 210 105 215C125 220 145 213 155 190Z" fill="#008285" />
+      <path d="M75 185C60 175 45 190 30 205C50 210 65 200 75 185Z" fill="#00A3A6" />
+      <g transform="translate(150, 152)">
+        <path d="M0 0 C-30 -30 -66 -24 -72 5 C-76 30 -40 45 0 0Z" fill="#8056A8" />
+        <path d="M0 0 C-15 -45 21 -70 45 -50 C70 -30 45 10 0 0Z" fill="#744B9E" />
+        <path d="M0 0 C30 -20 70 -5 70 25 C70 54 25 40 0 0Z" fill="#6C4296" />
+        <path d="M0 0 C20 30 10 70 -20 70 C-50 70 -36 25 0 0Z" fill="#7E53A7" />
+        <path d="M0 0 C-36 10 -66 20 -61 50 C-55 70 -15 45 0 0Z" fill="#70479A" />
+        <path d="M0 0 C-20 -15 -42 -12 -56 0" stroke="#FFFFFF" strokeWidth="1.5" strokeOpacity="0.45" strokeLinecap="round" />
+        <path d="M0 0 C-5 -25 10 -42 26 -36" stroke="#FFFFFF" strokeWidth="1.5" strokeOpacity="0.45" strokeLinecap="round" />
+        <path d="M0 0 C20 -5 45 5 50 20" stroke="#FFFFFF" strokeWidth="1.5" strokeOpacity="0.45" strokeLinecap="round" />
+        <path d="M0 0 C10 20 5 45 -10 50" stroke="#FFFFFF" strokeWidth="1.5" strokeOpacity="0.45" strokeLinecap="round" />
+        <path d="M0 0 C-5 -15 -8 -36 -11 -49" stroke="#FFD54F" strokeWidth="2.5" strokeLinecap="round" />
+        <circle cx="-11" cy="-49" r="2.5" fill="#FFC107" />
+        <circle cx="-15" cy="-45" r="2" fill="#FFC107" />
+        <circle cx="-7" cy="-46" r="2" fill="#FFC107" />
+        <circle cx="0" cy="0" r="4.5" fill="#4E2A84" />
       </g>
     </svg>
   );
@@ -181,143 +109,176 @@ export function AuthLayout({
   footer,
 }: AuthLayoutProps) {
   return (
-    <div className="relative min-h-screen w-full overflow-x-hidden bg-[#FAF9FC] text-[#14121A] flex flex-col justify-between selection:bg-[#4E2A84] selection:text-white">
-      {/* Decorative Brand Vectors */}
-      <TopRightWaves />
-      <BottomLeftWaves />
-      <BottomRightHibiscus />
+    <div className="relative min-h-dvh w-full overflow-x-hidden bg-[#FAF9FC] text-[#14121A] flex flex-col lg:block selection:bg-[#4E2A84] selection:text-white">
+      {/* Desktop Edge-to-Edge Integrated Campus Background Layer */}
+      <div
+        className="pointer-events-none absolute inset-y-0 left-0 z-0 hidden w-[62%] overflow-hidden select-none lg:block"
+        aria-hidden="true"
+      >
+        <Image
+          src="/images/auth/umskal-campus.jpg"
+          alt="UMSKAL Campus Landmark and Administrative Tower"
+          fill
+          priority
+          sizes="62vw"
+          className="object-cover object-[35%_bottom]"
+        />
+        {/* Subtle upper-left sky contrast veil */}
+        <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(250,249,252,0.88)_0%,rgba(250,249,252,0.52)_22%,rgba(250,249,252,0)_48%)]" />
+        {/* Smooth horizontal fade into right canvas */}
+        <div className="absolute inset-0 bg-[linear-gradient(90deg,rgba(250,249,252,0)_58%,rgba(250,249,252,0.78)_84%,#FAF9FC_100%)]" />
+      </div>
 
-      {/* Main Responsive Grid Container */}
-      <main className="relative z-10 mx-auto flex w-full max-w-[1440px] flex-1 items-center px-4 py-6 sm:px-6 sm:py-8 lg:px-10 lg:py-6">
-        <div className="flex w-full flex-col items-center gap-8 lg:flex-row lg:items-center lg:justify-between lg:gap-10 xl:gap-16">
-          
-          {/* Left Column: Brand & Campus Landmark Composition (52-55% width on desktop) */}
-          <div className="flex w-full flex-col items-center text-center lg:w-[54%] lg:items-start lg:text-left">
-            
-            {/* Top Brand Tag */}
-            <div className="flex items-center gap-3.5">
-              <Link
-                href="/"
-                className="press-feedback inline-flex items-center focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4E2A84] rounded-lg"
-                aria-label="Buy-U Home"
-              >
+      {/* Desktop Fixed-Position Brand Logo & Promotional Headline Layered Above Sky */}
+      <div className="pointer-events-none absolute inset-y-0 left-0 z-20 hidden w-[53%] lg:block">
+        <div className="pointer-events-auto absolute left-[9%] top-[4.5%] flex items-center gap-3.5">
+          <Link
+            href="/"
+            className="press-feedback inline-flex items-center rounded-lg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4E2A84]"
+            aria-label="Buy-U Home"
+          >
+            <Image
+              src="/images/logo/buyu-logo-horizontal.png"
+              alt="Buy-U"
+              width={140}
+              height={46}
+              className="h-9 w-auto object-contain select-none"
+              priority
+            />
+          </Link>
+          <div className="h-7 w-px bg-[#C9C2D6]" aria-hidden="true" />
+          <div className="text-left">
+            <p className="text-xs font-semibold leading-tight tracking-tight text-[#14121A]">
+              Universiti Malaysia Sabah
+            </p>
+            <p className="text-[11px] font-medium leading-tight text-[#555062]">
+              Campus Marketplace
+            </p>
+          </div>
+        </div>
+
+        <div className="absolute left-[9%] top-[16.5%]">
+          <h2 className="text-[clamp(1.9rem,3vw,2.9rem)] font-extrabold leading-[1.08] tracking-tight text-[#4E2A84]">
+            Buy · Sell · Share
+          </h2>
+          <div className="mt-0.5 inline-flex flex-col items-start">
+            <span className="text-[clamp(1.9rem,3vw,2.9rem)] font-extrabold italic leading-[1.08] tracking-tight text-[#008285]">
+              at UMSKAL
+            </span>
+            <div className="mt-1">
+              <TealHeadlineSwoosh />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Mobile & Tablet Compact Campus Header */}
+      <div className="relative z-10 w-full overflow-hidden lg:hidden">
+        <div className="relative h-52 w-full sm:h-64">
+          <Image
+            src="/images/auth/umskal-campus.jpg"
+            alt="UMSKAL Campus Landmark and Administrative Tower"
+            fill
+            priority
+            sizes="100vw"
+            className="object-cover object-[40%_bottom] select-none"
+          />
+          <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(250,249,252,0.92)_0%,rgba(250,249,252,0.55)_42%,rgba(250,249,252,0.1)_80%,#FAF9FC_100%)]" />
+          <div className="relative z-10 flex flex-col justify-start px-5 pt-5">
+            <div className="flex items-center gap-2.5">
+              <Link href="/" aria-label="Buy-U Home" className="press-feedback inline-flex items-center">
                 <Image
                   src="/images/logo/buyu-logo-horizontal.png"
                   alt="Buy-U"
-                  width={140}
-                  height={46}
-                  className="h-9 sm:h-10 w-auto object-contain select-none"
+                  width={120}
+                  height={40}
+                  className="h-8 w-auto object-contain select-none"
                   priority
                 />
               </Link>
-              <div className="h-7 w-px bg-[#D6D0E0]" aria-hidden="true" />
-              <div className="text-left">
-                <p className="text-xs font-semibold text-[#14121A] leading-tight tracking-tight">
+              <div className="h-5 w-px bg-[#C9C2D6]" aria-hidden="true" />
+              <div>
+                <p className="text-[11px] font-semibold leading-tight text-[#14121A]">
                   Universiti Malaysia Sabah
                 </p>
-                <p className="text-[11px] font-medium text-[#6B6578] leading-tight">
+                <p className="text-[10px] font-medium leading-tight text-[#555062]">
                   Campus Marketplace
                 </p>
               </div>
             </div>
-
-            {/* Headline with Teal Arc Underline */}
-            <div className="mt-5 sm:mt-6">
-              <h2 className="text-3xl font-extrabold tracking-tight text-[#4E2A84] sm:text-4xl lg:text-[42px] xl:text-5xl">
+            <div className="mt-3">
+              <p className="text-2xl font-extrabold leading-tight tracking-tight text-[#4E2A84] sm:text-3xl">
                 Buy · Sell · Share
-              </h2>
-              <div className="mt-1 inline-flex flex-col items-center lg:items-start">
-                <span className="text-3xl font-extrabold tracking-tight italic text-[#008285] sm:text-4xl lg:text-[42px] xl:text-5xl">
-                  at UMSKAL
-                </span>
-                <div className="mt-1">
-                  <TealUnderlineSwoosh />
-                </div>
-              </div>
+              </p>
+              <p className="text-2xl font-extrabold italic leading-tight tracking-tight text-[#008285] sm:text-3xl">
+                at UMSKAL
+              </p>
             </div>
+          </div>
+        </div>
+      </div>
 
-            {/* Actual UMSKAL Campus Photograph Frame */}
-            <div className="relative mt-5 sm:mt-6 w-full max-w-[560px] overflow-hidden rounded-[24px] border border-[#ECE7F2] bg-white shadow-[0_12px_36px_rgba(78,42,132,0.08)] aspect-[16/9.5]">
+      {/* Decorative Viewport-Anchored Vectors */}
+      <TopRightWaves />
+      <BottomLeftWaves />
+      <BottomRightHibiscus />
+
+      {/* Right Authentication Area */}
+      <main className="relative z-30 flex flex-1 flex-col items-center justify-center px-4 pb-8 pt-2 sm:px-6 lg:ml-[52%] lg:min-h-dvh lg:w-[48%] lg:py-4 lg:pl-4 lg:pr-[5%]">
+        <div className="w-full max-w-[440px] rounded-[24px] border border-[#ECE7F2] bg-white/95 px-6 py-6 shadow-[0_16px_45px_rgba(78,42,132,0.08)] backdrop-blur-sm transition-opacity duration-200 sm:px-8 sm:py-7">
+          {/* Card Centered Logo */}
+          <div className="flex justify-center">
+            <Link
+              href="/"
+              className="press-feedback inline-block rounded-lg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4E2A84]"
+              aria-label="Return to Buy-U Home"
+            >
               <Image
-                src="/images/auth/umskal-campus.jpg"
-                alt="UMSKAL Campus Landmark and Administrative Tower"
-                fill
+                src="/images/logo/buyu-logo-horizontal.png"
+                alt="Buy-U"
+                width={124}
+                height={42}
+                className="h-8 w-auto object-contain select-none sm:h-9"
                 priority
-                sizes="(max-width: 768px) 100vw, (max-width: 1200px) 50vw, 560px"
-                className="object-cover object-center select-none"
               />
-            </div>
+            </Link>
           </div>
 
-          {/* Right Column: Elevated Modern Form Card (45-48% width on desktop) */}
-          <div className="flex w-full flex-col items-center lg:w-[46%] lg:max-w-[480px]">
-            <div className="w-full rounded-[28px] border border-[#ECE7F2] bg-white p-6 sm:p-8 md:p-9 shadow-[0_16px_45px_rgba(78,42,132,0.07)]">
-              
-              {/* Card Centered Logo */}
-              <div className="flex justify-center">
-                <Link
-                  href="/"
-                  className="press-feedback inline-block focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4E2A84] rounded-lg"
-                  aria-label="Return to Buy-U Home"
-                >
-                  <Image
-                    src="/images/logo/buyu-logo-horizontal.png"
-                    alt="Buy-U"
-                    width={130}
-                    height={44}
-                    className="h-9 sm:h-10 w-auto object-contain select-none"
-                    priority
-                  />
-                </Link>
-              </div>
-
-              {/* Card Title & Contextual Subtitle */}
-              <div className="mt-4 text-center">
-                <h1 className="text-2xl sm:text-3xl font-extrabold tracking-tight text-[#14121A]">
-                  {title}{" "}
-                  {accentWord ? (
-                    <span className="relative inline-block text-[#4E2A84]">
-                      {accentWord}
-                      <span
-                        className="absolute -bottom-1 left-0 right-0 h-1 rounded-full bg-[#008285]"
-                        aria-hidden="true"
-                      />
-                    </span>
-                  ) : null}
-                </h1>
-                <p className="mt-2.5 text-xs sm:text-sm text-[#555062] leading-relaxed max-w-sm mx-auto">
-                  {subtitle}
-                </p>
-              </div>
-
-              {/* Form Body */}
-              <div className="mt-6 sm:mt-7">{children}</div>
-
-              {/* Inside-Card Footer */}
-              {footer ? (
-                <div className="mt-6 border-t border-[#F0EDF5] pt-5 text-center text-xs sm:text-sm text-[#555062]">
-                  {footer}
-                </div>
+          {/* Card Title & Concise Subtitle */}
+          <div className="mt-3 text-center">
+            <h1 className="text-xl font-extrabold tracking-tight text-[#14121A] sm:text-2xl">
+              {title}{" "}
+              {accentWord ? (
+                <span className="text-[#008285] italic">{accentWord}</span>
               ) : null}
-            </div>
-
-            {/* Outside-Card Link: Return to Buy-U Home */}
-            <div className="mt-5 text-center">
-              <Link
-                href="/"
-                className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#008285] hover:text-[#4E2A84] transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4E2A84] rounded-md px-2 py-1"
-              >
-                <Home className="h-3.5 w-3.5" aria-hidden="true" />
-                <span>Return to Buy-U Home</span>
-              </Link>
-            </div>
+            </h1>
+            <p className="mx-auto mt-1.5 max-w-[340px] text-xs leading-snug text-[#555062] sm:text-[13px]">
+              {subtitle}
+            </p>
           </div>
 
+          {/* Form Body */}
+          <div className="mt-4 sm:mt-5">{children}</div>
+
+          {/* Inside-Card Footer */}
+          {footer ? (
+            <div className="mt-4 border-t border-[#F0EDF5] pt-3.5 text-center text-xs text-[#555062] sm:text-[13px]">
+              {footer}
+            </div>
+          ) : null}
+        </div>
+
+        {/* Outside-Card Link: Return to Buy-U Home */}
+        <div className="mt-3 text-center">
+          <Link
+            href="/"
+            className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-semibold text-[#4E2A84] transition-colors hover:text-[#008285] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4E2A84]"
+          >
+            <Home className="h-3.5 w-3.5" aria-hidden="true" />
+            <span>Return to Buy-U Home</span>
+          </Link>
         </div>
       </main>
-
-      {/* Subtle bottom spacing padding */}
-      <div className="h-4 sm:h-6" aria-hidden="true" />
     </div>
   );
 }

@@ -1,4 +1,5 @@
 import { resolvePublicStorageUrl } from "@/lib/format";
+import { formatVariationOptionLabel } from "@/lib/seller/variations";
 import { getPublicSupabaseEnv } from "@/lib/supabase/env";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import type { AuthSessionSummary } from "@/types/marketplace";
@@ -48,6 +49,8 @@ interface RawListingRow {
   pickup_window_end: string | null;
   pickup_note: string | null;
   food_notes: string | null;
+  service_mode: string | null;
+  accepting_requests: boolean | null;
   image_paths: string[] | null;
   status: string;
 }
@@ -60,14 +63,18 @@ interface RawVariantRow {
   quantity: number;
   reserved_quantity: number;
   active: boolean;
+  image_path?: string | null;
 }
 
 function formatVariantLabel(raw: Record<string, unknown> | null): string | null {
   if (!raw || typeof raw !== "object") return null;
-  const parts = Object.entries(raw)
-    .filter(([, v]) => v !== null && v !== undefined && String(v).trim().length > 0)
-    .map(([k, v]) => `${k}: ${String(v).trim()}`);
-  return parts.length > 0 ? parts.join(" / ") : null;
+  const clean: Record<string, string> = {};
+  for (const [k, v] of Object.entries(raw)) {
+    if (v !== null && v !== undefined && String(v).trim().length > 0) {
+      clean[k] = String(v).trim();
+    }
+  }
+  return Object.keys(clean).length > 0 ? formatVariationOptionLabel(clean) : null;
 }
 
 const EMPTY_SUMMARY: CartSummary = {
@@ -140,16 +147,31 @@ export async function getCartPageData(
     supabase
       .from("listings")
       .select(
-        "id,seller_id,kind,is_food,title,condition,price_sen,quantity,reserved_quantity,collection_area_id,has_variants,availability_mode,pickup_window_start,pickup_window_end,pickup_note,food_notes,image_paths,status"
+        "id,seller_id,kind,is_food,title,condition,price_sen,quantity,reserved_quantity,collection_area_id,has_variants,availability_mode,pickup_window_start,pickup_window_end,pickup_note,food_notes,service_mode,accepting_requests,image_paths,status"
       )
       .in("id", listingIds),
     variantIds.length > 0
-      ? supabase
-          .from("listing_variants")
-          .select(
-            "id,listing_id,option_values,price_sen,quantity,reserved_quantity,active"
-          )
-          .in("id", variantIds)
+      ? (async () => {
+          const res = await supabase
+            .from("listing_variants")
+            .select(
+              "id,listing_id,option_values,price_sen,quantity,reserved_quantity,active,image_path"
+            )
+            .in("id", variantIds);
+          if (
+            res.error &&
+            (res.error.code === "42703" ||
+              /image_path/i.test(res.error.message ?? ""))
+          ) {
+            return supabase
+              .from("listing_variants")
+              .select(
+                "id,listing_id,option_values,price_sen,quantity,reserved_quantity,active"
+              )
+              .in("id", variantIds);
+          }
+          return res;
+        })()
       : Promise.resolve({ data: [], error: null }),
   ]);
 
@@ -245,6 +267,7 @@ export async function getCartPageData(
           priceSen: Number(rawListing.price_sen ?? 0),
           quantity: Number(rawListing.quantity ?? 0),
           reservedQuantity: Number(rawListing.reserved_quantity ?? 0),
+          acceptingRequests: rawListing.accepting_requests,
         }
       : null;
 
@@ -289,7 +312,8 @@ export async function getCartPageData(
       env.url
     );
 
-    const firstImagePath = rawListing?.image_paths?.[0] ?? null;
+    const firstImagePath =
+      rawVariant?.image_path || rawListing?.image_paths?.[0] || null;
     const imageUrl = resolvePublicStorageUrl("listings", firstImagePath, env.url);
 
     return {
@@ -318,6 +342,8 @@ export async function getCartPageData(
       issueMessage: state.issueMessage,
       canAdjustToMax: state.canAdjustToMax,
       isFood: Boolean(rawListing?.is_food),
+      isService: rawListing?.kind === "service",
+      serviceMode: rawListing?.service_mode ?? null,
       availabilityMode: rawListing?.availability_mode ?? null,
       pickupWindowStart: rawListing?.pickup_window_start ?? null,
       pickupWindowEnd: rawListing?.pickup_window_end ?? null,

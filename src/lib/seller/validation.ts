@@ -158,6 +158,7 @@ export interface CreateListingInput {
   status: SellListingStatus;
   rulesAcknowledged: boolean;
   allowOffers?: boolean;
+  hasVariants?: boolean;
 }
 
 export interface ValidatedListingPayload {
@@ -236,10 +237,14 @@ export function validateListingInput(
   const isService = input.listingType === "service";
   const parsedQty = Number.parseInt(String(input.quantity ?? "1"), 10);
   const quantity = isService ? 1 : parsedQty;
-  if (!isService && (!Number.isInteger(quantity) || quantity < 1 || quantity > 999)) {
+  const minQty = input.hasVariants || status === "draft" ? 0 : 1;
+  if (!isService && (!Number.isInteger(quantity) || quantity < minQty || quantity > 999)) {
     return {
       ok: false,
-      error: "Quantity must be a whole number between 1 and 999.",
+      error:
+        minQty === 0
+          ? "Total quantity must be a whole number between 0 and 999."
+          : "Quantity must be a whole number between 1 and 999.",
     };
   }
 
@@ -250,7 +255,7 @@ export function validateListingInput(
     };
   }
 
-  if (!isService && status === "published" && !condition) {
+  if (!isService && input.listingType !== "food" && status === "published" && !condition) {
     return {
       ok: false,
       error: "Select an item condition before publishing.",
@@ -272,6 +277,8 @@ export function validateListingInput(
       : input.listingType === "preloved"
         ? "pre_loved"
         : input.listingType;
+  const bargainingEligible =
+    (dbKind === "pre_loved" || dbKind === "business") && !isFood;
 
   return {
     ok: true,
@@ -284,10 +291,10 @@ export function validateListingInput(
       priceSen: priceResult.sen,
       quantity,
       collectionAreaId: collectionAreaId || null,
-      condition: isService ? null : condition || null,
+      condition: isService || isFood ? null : condition || null,
       status,
       rulesAcknowledged: Boolean(input.rulesAcknowledged),
-      allowOffers: Boolean(input.allowOffers),
+      allowOffers: bargainingEligible ? Boolean(input.allowOffers) : false,
     },
   };
 }
@@ -341,7 +348,7 @@ export function maskPayoutAccount(
 
 const ALLOWED_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // 5 MB
-export const MAX_LISTING_PHOTOS = 5;
+export const MAX_LISTING_PHOTOS = 10;
 
 export function validateImageFileMeta(file: {
   name: string;

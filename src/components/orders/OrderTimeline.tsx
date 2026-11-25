@@ -7,6 +7,7 @@ interface OrderTimelineProps {
   paidAt: string | null;
   handedOverAt: string | null;
   completedAt: string | null;
+  isService?: boolean;
 }
 
 function formatStepTime(iso: string | null): string | null {
@@ -28,6 +29,7 @@ export function OrderTimeline({
   paidAt,
   handedOverAt,
   completedAt,
+  isService = false,
 }: OrderTimelineProps) {
   const s = status.toLowerCase();
   if (s === "expired" || s === "cancelled" || s === "canceled" || s === "refunded") {
@@ -73,7 +75,9 @@ export function OrderTimeline({
                       : "text-[#8B869B]"
                 }`}
               >
-                {step.label}
+                {isService && step.key === "handed_over"
+                  ? "Service Delivered"
+                  : step.label}
               </p>
               {ts ? (
                 <p className="mt-0.5 truncate text-[10.5px] text-[#6B6779]">

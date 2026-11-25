@@ -87,15 +87,33 @@ export function OfferCard({
           <span className={`font-bold ${statusColor}`}>{statusLabel}</span>
         </div>
 
-        <p className="mt-2 text-xl font-extrabold tracking-tight text-[#4E2A84]">
-          {formatSenToRm(offer.offerPriceSen)}
-        </p>
-
-        {listingTitle ? (
-          <p className="mt-0.5 truncate text-xs text-[#4A4656]">
-            {listingTitle}
-          </p>
-        ) : null}
+        <div className="mt-2 flex items-center gap-3">
+          {offer.variantImageUrl ? (
+            <div className="h-11 w-11 shrink-0 overflow-hidden rounded-xl border border-[#E6E3EE] bg-[#F7F6FA]">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={offer.variantImageUrl}
+                alt={offer.variantLabel || listingTitle || "Listing photo"}
+                className="h-full w-full object-cover"
+              />
+            </div>
+          ) : null}
+          <div className="min-w-0 flex-1">
+            <p className="text-xl font-extrabold tracking-tight text-[#4E2A84]">
+              {formatSenToRm(offer.offerPriceSen)}
+            </p>
+            {listingTitle ? (
+              <p className="mt-0.5 truncate text-xs text-[#4A4656]">
+                {listingTitle}
+              </p>
+            ) : null}
+            {offer.variantLabel ? (
+              <p className="mt-1 inline-block rounded-md bg-[#F4F1FA] px-2 py-0.5 text-[11px] font-semibold text-[#4E2A84]">
+                Variation: {offer.variantLabel}
+              </p>
+            ) : null}
+          </div>
+        </div>
 
         {remainingText ? (
           <p className="mt-1.5 flex items-center gap-1 text-[11px] font-medium text-[#6B6779]">

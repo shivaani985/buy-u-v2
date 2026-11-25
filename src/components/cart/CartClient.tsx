@@ -24,6 +24,7 @@ import {
 } from "@/app/cart/actions";
 import type { CartItemView, CartSummary } from "@/lib/buyer/cart";
 import { formatSenToRm } from "@/lib/format";
+import { formatServiceModeLabel } from "@/lib/orders/service-attachments";
 
 interface CartClientProps {
   summary: CartSummary;
@@ -53,6 +54,58 @@ export function CartClient({ summary }: CartClientProps) {
   const [rowFeedback, setRowFeedback] = useState<Record<string, RowFeedback>>(
     {}
   );
+  // All valid items are auto-ticked by default; track only explicitly unticked item IDs
+  const [deselectedIds, setDeselectedIds] = useState<Record<string, boolean>>(
+    {}
+  );
+
+  const isItemSelected = (item: CartItemView) =>
+    item.isValid && !deselectedIds[item.id];
+
+  function toggleItemSelection(item: CartItemView) {
+    if (!item.isValid) return;
+    setDeselectedIds((prev) => ({
+      ...prev,
+      [item.id]: !prev[item.id],
+    }));
+  }
+
+  function toggleShopSelection(items: CartItemView[]) {
+    const validItems = items.filter((it) => it.isValid);
+    if (validItems.length === 0) return;
+    const allSelected = validItems.every((it) => !deselectedIds[it.id]);
+    setDeselectedIds((prev) => {
+      const next = { ...prev };
+      for (const it of validItems) {
+        if (allSelected) {
+          next[it.id] = true;
+        } else {
+          delete next[it.id];
+        }
+      }
+      return next;
+    });
+  }
+
+  const selectedItems = summary.groups.flatMap((g) =>
+    g.items.filter(isItemSelected)
+  );
+  const selectedItemIds = selectedItems.map((it) => it.id);
+  const selectedSellerCount = summary.groups.filter((g) =>
+    g.items.some(isItemSelected)
+  ).length;
+  const selectedQuantity = selectedItems.reduce(
+    (sum, it) => sum + it.quantity,
+    0
+  );
+  const selectedSubtotalSen = selectedItems.reduce(
+    (sum, it) => sum + it.lineSubtotalSen,
+    0
+  );
+  // Always pass exact selected cart item IDs for new UI checkouts (even when all items are ticked)
+  const checkoutHref = `/checkout?items=${encodeURIComponent(
+    [...selectedItemIds].sort().join(",")
+  )}`;
 
   function setBusy(id: string, busy: boolean) {
     setBusyIds((prev) => ({ ...prev, [id]: busy }));
@@ -254,7 +307,24 @@ export function CartClient({ summary }: CartClientProps) {
           </div>
         ) : null}
 
-        {summary.groups.map((group) => (
+        {summary.groups.map((group) => {
+          const validGroupItems = group.items.filter((it) => it.isValid);
+          const groupSelectedItems = validGroupItems.filter(isItemSelected);
+          const allGroupSelected =
+            validGroupItems.length > 0 &&
+            groupSelectedItems.length === validGroupItems.length;
+          const someGroupSelected =
+            groupSelectedItems.length > 0 && !allGroupSelected;
+          const groupSelectedQty = groupSelectedItems.reduce(
+            (sum, it) => sum + it.quantity,
+            0
+          );
+          const groupSelectedSubtotalSen = groupSelectedItems.reduce(
+            (sum, it) => sum + it.lineSubtotalSen,
+            0
+          );
+
+          return (
           <section
             key={group.sellerId}
             aria-label={`Items from ${group.sellerName}`}
@@ -263,6 +333,17 @@ export function CartClient({ summary }: CartClientProps) {
             {/* Seller Group Header */}
             <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#ECEAF3] px-5 py-4">
               <div className="flex min-w-0 items-center gap-3">
+                <input
+                  type="checkbox"
+                  checked={allGroupSelected}
+                  ref={(el) => {
+                    if (el) el.indeterminate = someGroupSelected;
+                  }}
+                  disabled={validGroupItems.length === 0}
+                  onChange={() => toggleShopSelection(group.items)}
+                  aria-label={`Select all items from ${group.sellerName}`}
+                  className="h-4 w-4 shrink-0 cursor-pointer rounded border-[#CFCBD9] accent-[#4E2A84] disabled:cursor-not-allowed disabled:opacity-40"
+                />
                 {group.sellerLogoUrl ? (
                   // eslint-disable-next-line @next/next/no-img-element
                   <img
@@ -304,12 +385,12 @@ export function CartClient({ summary }: CartClientProps) {
 
               <div className="text-right">
                 <p className="text-xs font-medium text-[#6B6779]">
-                  Seller Subtotal ({group.validQuantity}{" "}
-                  {group.validQuantity === 1 ? "item" : "items"})
+                  Selected Subtotal ({groupSelectedQty}{" "}
+                  {groupSelectedQty === 1 ? "item" : "items"})
                 </p>
                 <p className="text-base font-extrabold text-[#4E2A84]">
-                  {group.subtotalSen > 0
-                    ? formatSenToRm(group.subtotalSen)
+                  {groupSelectedSubtotalSen > 0
+                    ? formatSenToRm(groupSelectedSubtotalSen)
                     : "RM 0.00"}
                 </p>
               </div>
@@ -336,8 +417,16 @@ export function CartClient({ summary }: CartClientProps) {
                     }`}
                   >
                     <div className="flex flex-col gap-4 sm:flex-row sm:items-start">
-                      {/* Compact Product Photo */}
+                      {/* Checkbox + Compact Product Photo */}
                       <div className="flex items-start gap-3.5 sm:flex-1 sm:min-w-0">
+                        <input
+                          type="checkbox"
+                          checked={isItemSelected(item)}
+                          disabled={!item.isValid}
+                          onChange={() => toggleItemSelection(item)}
+                          aria-label={`Select ${item.title} for checkout`}
+                          className="mt-7 h-4 w-4 shrink-0 cursor-pointer rounded border-[#CFCBD9] accent-[#4E2A84] disabled:cursor-not-allowed disabled:opacity-40"
+                        />
                         <div className="relative h-20 w-20 shrink-0 overflow-hidden rounded-xl border border-[#E6E3EE] bg-[#F7F6FA]">
                           {item.imageUrl ? (
                             // eslint-disable-next-line @next/next/no-img-element
@@ -357,18 +446,25 @@ export function CartClient({ summary }: CartClientProps) {
 
                         {/* Product Info */}
                         <div className="min-w-0 flex-1">
-                          {item.issueCode !== "deleted" ? (
-                            <Link
-                              href={`/listings/${item.listingId}`}
-                              className="line-clamp-2 text-sm font-bold text-[#14121A] transition hover:text-[#4E2A84]"
-                            >
-                              {item.title}
-                            </Link>
-                          ) : (
-                            <p className="text-sm font-bold text-[#6B6779]">
-                              {item.title}
-                            </p>
-                          )}
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            {item.issueCode !== "deleted" ? (
+                              <Link
+                                href={`/listings/${item.listingId}`}
+                                className="line-clamp-2 text-sm font-bold text-[#14121A] transition hover:text-[#4E2A84]"
+                              >
+                                {item.title}
+                              </Link>
+                            ) : (
+                              <p className="text-sm font-bold text-[#6B6779]">
+                                {item.title}
+                              </p>
+                            )}
+                            {item.isService ? (
+                              <span className="inline-flex items-center rounded-full bg-[#F3ECFC] px-2 py-0.5 text-[11px] font-bold text-[#4E2A84]">
+                                Service
+                              </span>
+                            ) : null}
+                          </div>
 
                           {item.variantLabel ? (
                             <p className="mt-0.5 text-xs font-medium text-[#4A4656]">
@@ -377,6 +473,11 @@ export function CartClient({ summary }: CartClientProps) {
                           ) : null}
 
                           <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-xs text-[#6B6779]">
+                            {item.isService && item.serviceMode ? (
+                              <span className="font-semibold text-[#4E2A84]">
+                                {formatServiceModeLabel(item.serviceMode)}
+                              </span>
+                            ) : null}
                             {item.campusArea ? (
                               <span className="inline-flex items-center gap-1">
                                 <MapPin
@@ -403,7 +504,9 @@ export function CartClient({ summary }: CartClientProps) {
 
                             {item.isValid ? (
                               <span className="text-xs font-semibold text-[#008285]">
-                                {item.availableStock} available
+                                {item.isService
+                                  ? "Available for purchase"
+                                  : `${item.availableStock} available`}
                               </span>
                             ) : (
                               <span className="text-xs font-semibold text-[#B42318]">
@@ -615,7 +718,8 @@ export function CartClient({ summary }: CartClientProps) {
               })}
             </ul>
           </section>
-        ))}
+          );
+        })}
       </div>
 
       {/* Right column: Order Summary Panel */}
@@ -635,15 +739,15 @@ export function CartClient({ summary }: CartClientProps) {
 
         <dl className="mt-4 space-y-2.5 border-y border-[#ECEAF3] py-4 text-sm">
           <div className="flex items-center justify-between gap-2">
-            <dt className="text-[#6B6779]">Sellers in Cart</dt>
+            <dt className="text-[#6B6779]">Selected Sellers</dt>
             <dd className="font-semibold text-[#14121A]">
-              {summary.sellerCount}
+              {selectedSellerCount}
             </dd>
           </div>
           <div className="flex items-center justify-between gap-2">
-            <dt className="text-[#6B6779]">Ready Items</dt>
+            <dt className="text-[#6B6779]">Selected Items</dt>
             <dd className="font-semibold text-[#14121A]">
-              {summary.validQuantity}
+              {selectedQuantity}
             </dd>
           </div>
           {summary.invalidRowCount > 0 ? (
@@ -657,20 +761,20 @@ export function CartClient({ summary }: CartClientProps) {
           <div className="flex items-baseline justify-between gap-2 pt-2 border-t border-[#F1EFF6]">
             <dt className="text-sm font-bold text-[#14121A]">Subtotal</dt>
             <dd className="text-2xl font-extrabold tracking-tight text-[#4E2A84]">
-              {summary.combinedSubtotalSen > 0
-                ? formatSenToRm(summary.combinedSubtotalSen)
+              {selectedSubtotalSen > 0
+                ? formatSenToRm(selectedSubtotalSen)
                 : "RM 0.00"}
             </dd>
           </div>
         </dl>
 
         <div className="mt-5 space-y-3">
-          {!summary.hasIssues && summary.validQuantity > 0 ? (
+          {selectedQuantity > 0 ? (
             <Link
-              href="/checkout"
+              href={checkoutHref}
               className="flex w-full items-center justify-center gap-2 rounded-xl bg-[#4E2A84] px-5 py-3 text-sm font-bold text-white transition hover:bg-[#3F216B] active:scale-[0.99]"
             >
-              <span>Proceed to Checkout</span>
+              <span>Proceed to Checkout ({selectedQuantity})</span>
               <ArrowRight className="h-4 w-4" aria-hidden="true" />
             </Link>
           ) : (
@@ -680,7 +784,11 @@ export function CartClient({ summary }: CartClientProps) {
               aria-disabled="true"
               className="flex w-full cursor-not-allowed items-center justify-center gap-2 rounded-xl bg-[#C9C4D6] px-5 py-3 text-sm font-bold text-white"
             >
-              <span>Resolve Cart Issues to Checkout</span>
+              <span>
+                {summary.validQuantity === 0
+                  ? "Resolve Cart Issues to Checkout"
+                  : "Select Items to Checkout"}
+              </span>
             </button>
           )}
 

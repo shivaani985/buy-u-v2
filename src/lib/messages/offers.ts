@@ -23,6 +23,9 @@ export interface OfferCardItem {
   id: string;
   conversationId: string;
   listingId: string;
+  variantId?: string | null;
+  variantLabel?: string | null;
+  variantImageUrl?: string | null;
   buyerId: string;
   sellerId: string;
   offerPriceSen: number;
@@ -33,6 +36,28 @@ export interface OfferCardItem {
   expiresAt: string;
   reservationExpiresAt: string | null;
   reservationReleasedAt: string | null;
+}
+
+/**
+ * Authoritative bargaining eligibility rule (mirrored in SQL `is_listing_bargaining_eligible`):
+ * - ALLOWED: Pre-Loved (`pre_loved`) and Student Business non-food (`business` + `isFood = false`).
+ * - NOT ALLOWED: Food & beverages (`isFood = true`), food pre-orders (`availabilityMode = 'pre_order'`),
+ *   services (`service`), and free items (`free`).
+ */
+export function isBargainingEligibleListing(input: {
+  kind?: string | null;
+  isFood?: boolean | null;
+  availabilityMode?: string | null;
+  isFreeNotice?: boolean | null;
+}): boolean {
+  if (input.isFreeNotice) return false;
+  const kind = (input.kind ?? "").trim().toLowerCase();
+  if (kind !== "pre_loved" && kind !== "business") return false;
+  if (Boolean(input.isFood)) return false;
+  if ((input.availabilityMode ?? "").trim().toLowerCase() === "pre_order") {
+    return false;
+  }
+  return true;
 }
 
 function isUuid(val: string | null | undefined): boolean {
@@ -220,6 +245,11 @@ export function validateCreateOffer(input: {
   listingId: string;
   sellerId: string;
   listingKind: string;
+  listingIsFood?: boolean | null;
+  listingAvailabilityMode?: string | null;
+  hasVariants?: boolean;
+  variantId?: string | null;
+  variantActive?: boolean;
   listingStatus: string;
   allowOffers: boolean;
   listingPriceSen: number;
@@ -261,10 +291,17 @@ export function validateCreateOffer(input: {
     return { ok: false, error: "Offers are only allowed on published listings." };
   }
 
-  if (input.listingKind !== "pre_loved") {
+  if (
+    !isBargainingEligibleListing({
+      kind: input.listingKind,
+      isFood: input.listingIsFood,
+      availabilityMode: input.listingAvailabilityMode,
+    })
+  ) {
     return {
       ok: false,
-      error: "Offers are only available for Pre-Loved listings.",
+      error:
+        "Price negotiation is only available for Pre-Loved and non-food Student Business listings.",
     };
   }
 
@@ -272,6 +309,26 @@ export function validateCreateOffer(input: {
     return {
       ok: false,
       error: "The seller has not enabled offers for this listing.",
+    };
+  }
+
+  if (input.hasVariants) {
+    if (!isUuid(input.variantId)) {
+      return {
+        ok: false,
+        error: "Please select a valid product variant before making an offer.",
+      };
+    }
+    if (input.variantActive === false) {
+      return {
+        ok: false,
+        error: "Selected product variant is no longer available.",
+      };
+    }
+  } else if (input.variantId) {
+    return {
+      ok: false,
+      error: "Unexpected variant selected for a non-variant listing.",
     };
   }
 
@@ -318,6 +375,8 @@ export function validateOfferTransition(input: {
   isBlocked: boolean;
   listingStatus?: string;
   listingKind?: string;
+  listingIsFood?: boolean | null;
+  listingAvailabilityMode?: string | null;
   allowOffers?: boolean;
   availableStock?: number;
   nowMs?: number;
@@ -377,10 +436,18 @@ export function validateOfferTransition(input: {
     ) {
       return { ok: false, error: "This listing is no longer published." };
     }
-    if (input.listingKind !== undefined && input.listingKind !== "pre_loved") {
+    if (
+      input.listingKind !== undefined &&
+      !isBargainingEligibleListing({
+        kind: input.listingKind,
+        isFood: input.listingIsFood,
+        availabilityMode: input.listingAvailabilityMode,
+      })
+    ) {
       return {
         ok: false,
-        error: "Only Pre-Loved listings support offer acceptance.",
+        error:
+          "Only Pre-Loved and non-food Student Business listings support offer acceptance.",
       };
     }
     if (input.allowOffers === false) {
@@ -561,6 +628,11 @@ export function simulateOfferInsertGuard(input: {
   listingSellerId: string;
   listingStatus: string;
   listingKind: string;
+  listingIsFood?: boolean | null;
+  listingAvailabilityMode?: string | null;
+  hasVariants?: boolean;
+  variantId?: string | null;
+  variantActive?: boolean;
   allowOffers: boolean;
   listingPriceSen: number;
   availableStock: number;
@@ -611,13 +683,29 @@ export function simulateOfferInsertGuard(input: {
 
   if (
     input.listingStatus !== "published" ||
-    input.listingKind !== "pre_loved" ||
+    !isBargainingEligibleListing({
+      kind: input.listingKind,
+      isFood: input.listingIsFood,
+      availabilityMode: input.listingAvailabilityMode,
+    }) ||
     !input.allowOffers
   ) {
     return {
       ok: false,
-      error: "Offers are only allowed on published Pre-Loved listings with offers enabled.",
+      error:
+        "Offers are only allowed on published Pre-Loved or non-food Student Business listings with offers enabled.",
     };
+  }
+
+  if (input.hasVariants) {
+    if (!isUuid(input.variantId)) {
+      return { ok: false, error: "A valid product variant must be selected." };
+    }
+    if (input.variantActive === false) {
+      return { ok: false, error: "Selected product variant is unavailable." };
+    }
+  } else if (input.variantId) {
+    return { ok: false, error: "Unexpected variant on a non-variant listing." };
   }
 
   if (input.availableStock < 1) {

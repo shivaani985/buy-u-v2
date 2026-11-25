@@ -15,11 +15,11 @@ export function ResetPasswordForm() {
   );
 
   return (
-    <form action={formAction} className="space-y-4">
+    <form action={formAction} className="space-y-3.5">
       {state.status === "error" && state.message ? (
         <div
           role="alert"
-          className="flex items-start gap-2.5 rounded-xl border border-[#F3B3B3] bg-[#FEF2F2] p-3.5 text-sm text-[#991B1B]"
+          className="flex items-start gap-2.5 rounded-xl border border-[#F3B3B3] bg-[#FEF2F2] p-3 text-xs sm:text-sm text-[#991B1B]"
         >
           <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-[#DC2626]" aria-hidden="true" />
           <span>{state.message}</span>
@@ -29,7 +29,7 @@ export function ResetPasswordForm() {
       {state.status === "success" && state.message ? (
         <div
           role="status"
-          className="space-y-2.5 rounded-xl border border-[#A7F3D0] bg-[#ECFDF5] p-3.5 text-sm text-[#065F46]"
+          className="space-y-2 rounded-xl border border-[#A7F3D0] bg-[#ECFDF5] p-3 text-xs sm:text-sm text-[#065F46]"
         >
           <div className="flex items-start gap-2.5">
             <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-[#059669]" aria-hidden="true" />
@@ -65,7 +65,7 @@ export function ResetPasswordForm() {
       <button
         type="submit"
         disabled={pending}
-        className="inline-flex w-full cursor-pointer items-center justify-center gap-2 rounded-xl bg-[#4E2A84] px-5 py-3.5 text-sm font-bold text-white shadow-md shadow-[#4E2A84]/15 transition-all duration-150 hover:bg-[#3D1E6B] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60"
+        className="inline-flex h-11 w-full cursor-pointer items-center justify-center gap-2 rounded-xl bg-[#4E2A84] px-5 text-sm font-bold text-white shadow-md shadow-[#4E2A84]/15 transition-all duration-150 hover:bg-[#3D1E6B] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60"
       >
         <KeyRound className="h-4 w-4" aria-hidden="true" />
         <span>{pending ? "Updating password..." : "Update Password"}</span>

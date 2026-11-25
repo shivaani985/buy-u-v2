@@ -42,14 +42,24 @@ export interface Listing {
   sellerDisplayName: string;
   sellerBadge: string;
   sellerFaculty: string | null;
+  rating?: number | null;
+  reviewCount?: number;
+  salesCount?: number;
   createdAt: string;
   isDemo: boolean;
 }
+
+export type MarketplaceSort = "latest" | "price_asc" | "price_desc";
 
 export interface MarketplaceFilters {
   q?: string;
   category?: string;
   type?: ListingType | "all";
+  minPrice?: number;
+  maxPrice?: number;
+  condition?: string;
+  inStock?: boolean;
+  sort?: MarketplaceSort;
   useDemo?: boolean;
 }
 

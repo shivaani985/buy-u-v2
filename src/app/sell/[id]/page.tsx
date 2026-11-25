@@ -4,7 +4,7 @@ import { ArrowLeft, ShieldAlert } from "lucide-react";
 import { EditListingForm } from "@/components/seller/EditListingForm";
 import { SellerGate } from "@/components/seller/SellerGate";
 import { SellerNav } from "@/components/seller/SellerNav";
-import { getSellerListingForEdit } from "@/lib/seller/data";
+import { getSellerListingForEdit, getSellerNewOrderCount } from "@/lib/seller/data";
 import { evaluateSellerEligibility } from "@/lib/seller/validation";
 import { getSessionSummary } from "@/lib/supabase/server";
 
@@ -27,7 +27,10 @@ export default async function EditListingPage({ params }: EditListingPageProps) 
     return <SellerGate eligibility={eligibility} nextPath={`/sell/${id}`} />;
   }
 
-  const loaded = await getSellerListingForEdit(session, id);
+  const [loaded, newOrderCount] = await Promise.all([
+    getSellerListingForEdit(session, id),
+    getSellerNewOrderCount(session),
+  ]);
 
   if (loaded.status !== "ok") {
     return (
@@ -71,6 +74,12 @@ export default async function EditListingPage({ params }: EditListingPageProps) 
     );
   }
 
+  const sellerDisplayName =
+    session.profile?.display_name ||
+    session.profile?.full_name ||
+    session.email?.split("@")[0] ||
+    "UMS Student";
+
   return (
     <div className="bg-[#FAFAFC]">
       <div className="bori-container py-6 lg:py-8">
@@ -96,14 +105,15 @@ export default async function EditListingPage({ params }: EditListingPageProps) 
         </div>
 
         <div className="mt-4">
-          <SellerNav />
+          <SellerNav newOrderCount={newOrderCount} />
         </div>
 
-        <div className="mt-6 max-w-4xl">
+        <div className="mt-6">
           <EditListingForm
             listing={loaded.listing}
             categories={loaded.categories}
             collectionAreas={loaded.collectionAreas}
+            sellerDisplayName={sellerDisplayName}
           />
         </div>
       </div>

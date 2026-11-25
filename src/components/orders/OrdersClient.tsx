@@ -36,6 +36,7 @@ import {
   type UploadedEvidenceItem,
 } from "@/components/disputes/DisputeEvidenceUploader";
 import { OrderTimeline } from "@/components/orders/OrderTimeline";
+import { ServiceOrderDetailsBlock } from "@/components/orders/ServiceOrderDetailsBlock";
 import {
   COMPLETED_ORDER_DISPUTE_WINDOW_HOURS,
   DISPUTE_REASONS,
@@ -99,9 +100,39 @@ function formatDeadlineMyt(iso: string | null): string | null {
   }).format(d);
 }
 
+const SERVICE_DISPUTE_REASON_LABELS: Record<DisputeReasonCode, string> = {
+  not_received: "Service not delivered / seller no-show",
+  not_as_described: "Service not as described",
+  damaged: "Poor quality or defective deliverable",
+  wrong_item: "Wrong service delivered",
+  missing_item: "Incomplete service or missing deliverables",
+  other: "Other service issue",
+};
+
+function getDisplayOrderStatusLabel(
+  status: string,
+  baseLabel: string,
+  isService: boolean
+): string {
+  if (!isService) return baseLabel;
+  switch (status.toLowerCase()) {
+    case "paid":
+      return "Paid — Awaiting Service";
+    case "handed_over":
+      return "Service Delivered";
+    case "completed":
+      return "Completed";
+    default:
+      return baseLabel;
+  }
+}
+
 export function OrdersClient({ pendingCheckouts, orders }: OrdersClientProps) {
   const router = useRouter();
   const [nowMs] = useState<number>(() => Date.now());
+  const [typeFilter, setTypeFilter] = useState<"all" | "products" | "services">(
+    "all"
+  );
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [confirmingOrder, setConfirmingOrder] = useState<BuyerOrderView | null>(
     null
@@ -250,9 +281,15 @@ export function OrdersClient({ pendingCheckouts, orders }: OrdersClientProps) {
     const key = `msg:${order.id}`;
     setBusyKey(key);
     try {
+      const firstItem = order.items[0];
+      const itemSummary = firstItem
+        ? `${firstItem.title}${order.items.length > 1 ? ` (+${order.items.length - 1} more)` : ""}`
+        : "my order";
       const res = await startConversationAction({
         sellerId: order.sellerId,
-        listingId: order.items[0]?.listingId ?? null,
+        listingId: firstItem?.listingId ?? null,
+        orderId: order.id,
+        initialMessage: `Hi, I'm messaging regarding Order #${order.orderCode} (${itemSummary}).`,
       });
       if (!res.ok || !res.href) {
         setFeedbackByKey((prev) => ({
@@ -476,8 +513,60 @@ export function OrdersClient({ pendingCheckouts, orders }: OrdersClientProps) {
     }
   }
 
+  const productCount = orders.filter((o) => !o.isServiceOrder).length;
+  const serviceCount = orders.filter((o) => o.isServiceOrder).length;
+  const filteredOrders = orders.filter((o) => {
+    if (typeFilter === "products") return !o.isServiceOrder;
+    if (typeFilter === "services") return o.isServiceOrder;
+    return true;
+  });
+
   return (
     <div className="space-y-5">
+      {/* Type Filter Tabs: All | Products | Services */}
+      {orders.length > 0 ? (
+        <div
+          role="tablist"
+          aria-label="Filter orders by type"
+          className="inline-flex flex-wrap items-center gap-1.5 rounded-2xl border border-[#E6E3EE] bg-white p-1.5"
+        >
+          {(
+            [
+              { key: "all", label: "All", count: orders.length },
+              { key: "products", label: "Products", count: productCount },
+              { key: "services", label: "Services", count: serviceCount },
+            ] as const
+          ).map((tab) => {
+            const active = typeFilter === tab.key;
+            return (
+              <button
+                key={tab.key}
+                type="button"
+                role="tab"
+                aria-selected={active}
+                onClick={() => setTypeFilter(tab.key)}
+                className={`inline-flex cursor-pointer items-center gap-1.5 rounded-xl px-3.5 py-1.5 text-xs font-bold transition ${
+                  active
+                    ? "bg-[#4E2A84] text-white shadow-2xs"
+                    : "text-[#4A4656] hover:bg-[#FAF8FD] hover:text-[#4E2A84]"
+                }`}
+              >
+                <span>{tab.label}</span>
+                <span
+                  className={`rounded-full px-1.5 py-0.5 text-[10.5px] font-extrabold ${
+                    active
+                      ? "bg-white/20 text-white"
+                      : "bg-[#F4F1FA] text-[#6B6779]"
+                  }`}
+                >
+                  {tab.count}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
+
       {/* Phase 6B.4 Unified Pending Checkouts (ONE Pay Now button covering all sellers) */}
       {pendingCheckouts.map((checkout) => {
         const key = `chk:${checkout.id}`;
@@ -663,7 +752,12 @@ export function OrdersClient({ pendingCheckouts, orders }: OrdersClientProps) {
       })}
 
       {/* Individual Seller Orders (Paid, Handed Over, Completed, Expired & Legacy Orders) */}
-      {orders.map((order) => {
+      {filteredOrders.length === 0 && orders.length > 0 ? (
+        <div className="rounded-2xl border border-[#E6E3EE] bg-white px-6 py-10 text-center text-sm text-[#6B6779]">
+          No {typeFilter === "services" ? "service" : "product"} orders yet.
+        </div>
+      ) : null}
+      {filteredOrders.map((order) => {
         const key = `ord:${order.id}`;
         const badge = getOrderStatusBadge(
           order.status,
@@ -734,6 +828,11 @@ export function OrdersClient({ pendingCheckouts, orders }: OrdersClientProps) {
                 <span className="text-[#6B6779]">
                   {formatShortDate(order.createdAt)}
                 </span>
+                {order.isServiceOrder ? (
+                  <span className="inline-flex items-center rounded-full bg-[#F3ECFC] px-2 py-0.5 text-[10.5px] font-bold text-[#4E2A84]">
+                    Service
+                  </span>
+                ) : null}
                 {order.source === "offer" ? (
                   <>
                     <span className="text-[#C7C3D4]" aria-hidden="true">
@@ -748,7 +847,11 @@ export function OrdersClient({ pendingCheckouts, orders }: OrdersClientProps) {
               <span
                 className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-[11px] font-bold ${badge.toneClass}`}
               >
-                {badge.label}
+                {getDisplayOrderStatusLabel(
+                  order.status,
+                  badge.label,
+                  order.isServiceOrder
+                )}
               </span>
             </div>
 
@@ -776,6 +879,11 @@ export function OrdersClient({ pendingCheckouts, orders }: OrdersClientProps) {
                     <p className="truncate text-sm font-bold text-[#14121A]">
                       {item.title}
                     </p>
+                    {item.variantLabel ? (
+                      <p className="mt-0.5 truncate text-[11px] font-semibold text-[#4E2A84]">
+                        {item.variantLabel}
+                      </p>
+                    ) : null}
                     <p className="mt-0.5 text-xs text-[#6B6779]">
                       Qty {item.quantity} &times; {formatSenToRm(item.unitSen)}
                     </p>
@@ -787,25 +895,34 @@ export function OrdersClient({ pendingCheckouts, orders }: OrdersClientProps) {
               ))}
             </ul>
 
+            <ServiceOrderDetailsBlock orderId={order.id} items={order.items} />
+
             <OrderTimeline
               status={order.status}
               createdAt={order.createdAt}
               paidAt={order.paidAt}
               handedOverAt={order.handedOverAt}
               completedAt={order.completedAt}
+              isService={order.isServiceOrder}
             />
 
             {isEligibleForPin ? (
               <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[#D6EEEE] bg-[#F2FAFA] px-5 py-3 text-xs">
                 <span className="inline-flex items-center gap-1.5 font-semibold text-[#008285]">
                   <KeyRound className="h-3.5 w-3.5" aria-hidden="true" />
-                  <span>Private Pickup PIN (buyer-only):</span>
+                  <span>
+                    {order.isServiceOrder
+                      ? "Service Completion PIN (buyer-only):"
+                      : "Private Pickup PIN (buyer-only):"}
+                  </span>
                   <strong className="rounded-md bg-white px-2 py-0.5 font-mono text-sm font-extrabold tracking-[0.2em] text-[#14121A] ring-1 ring-[#C6E4E4]">
                     {order.pickupPin}
                   </strong>
                 </span>
                 <span className="text-[#4A4656]">
-                  Share only in person at campus handover
+                  {order.isServiceOrder
+                    ? "Share with seller only once the service is delivered"
+                    : "Share only in person at campus handover"}
                 </span>
               </div>
             ) : null}
@@ -818,9 +935,14 @@ export function OrdersClient({ pendingCheckouts, orders }: OrdersClientProps) {
                     aria-hidden="true"
                   />
                   <span>
-                    <strong className="font-bold">Handover verified.</strong>{" "}
-                    Inspect your item(s) and confirm receipt to complete this
-                    order.
+                    <strong className="font-bold">
+                      {order.isServiceOrder
+                        ? "Service delivered."
+                        : "Handover verified."}
+                    </strong>{" "}
+                    {order.isServiceOrder
+                      ? "Review the delivered service and confirm completion to close this order."
+                      : "Inspect your item(s) and confirm receipt to complete this order."}
                   </span>
                 </div>
                 <button
@@ -837,7 +959,11 @@ export function OrdersClient({ pendingCheckouts, orders }: OrdersClientProps) {
                   ) : (
                     <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
                   )}
-                  <span>Confirm Receipt</span>
+                  <span>
+                    {order.isServiceOrder
+                      ? "Confirm Completion"
+                      : "Confirm Receipt"}
+                  </span>
                 </button>
               </div>
             ) : null}
@@ -1311,7 +1437,9 @@ export function OrdersClient({ pendingCheckouts, orders }: OrdersClientProps) {
                 >
                   {DISPUTE_REASONS.map((r) => (
                     <option key={r.code} value={r.code}>
-                      {r.label}
+                      {reportingOrder.isServiceOrder
+                        ? SERVICE_DISPUTE_REASON_LABELS[r.code]
+                        : r.label}
                     </option>
                   ))}
                 </select>

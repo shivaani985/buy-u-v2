@@ -2,6 +2,20 @@ import type { CheckoutPreparationSummary } from "../buyer/checkout";
 import type { BuyerEligibilityResult } from "../buyer/validation";
 import type { OfferCardItem } from "../messages/offers";
 
+function isOfferCheckoutListingEligible(
+  kind: string,
+  isFood?: boolean | null,
+  availabilityMode?: string | null
+): boolean {
+  const k = kind.trim().toLowerCase();
+  if (k !== "pre_loved" && k !== "business") return false;
+  if (Boolean(isFood)) return false;
+  if ((availabilityMode ?? "").trim().toLowerCase() === "pre_order") {
+    return false;
+  }
+  return true;
+}
+
 const MIN_OFFER_SEN = 200;
 const OFFER_RESERVATION_TTL_MS = 30 * 60 * 1000;
 
@@ -147,6 +161,8 @@ export interface OfferCheckoutValidationInput {
   listingSellerId: string;
   listingStatus: string;
   listingKind: string;
+  listingIsFood?: boolean | null;
+  listingAvailabilityMode?: string | null;
   listingTitle: string;
   listingPriceSen: number;
   collectionAreaName: string;
@@ -218,7 +234,11 @@ export function prepareOfferOrderPlan(
 
   if (
     input.listingStatus !== "published" ||
-    input.listingKind !== "pre_loved"
+    !isOfferCheckoutListingEligible(
+      input.listingKind,
+      input.listingIsFood,
+      input.listingAvailabilityMode
+    )
   ) {
     return {
       ok: false,

@@ -76,6 +76,7 @@ export interface SellerHubData {
   };
   payout: MaskedPayoutStatus;
   financials: SellerFinancialSummary;
+  newOrderCount: number;
   error?: string;
 }
 
@@ -112,6 +113,7 @@ export async function getSellerHubData(
     counts: { total: 0, published: 0, draft: 0, soldOut: 0, other: 0 },
     payout: maskPayoutAccount(null),
     financials: unavailableFinancials,
+    newOrderCount: 0,
   };
 
   const eligibility = evaluateSellerEligibility(session);
@@ -378,6 +380,11 @@ export async function getSellerHubData(
   }
 
   const error = storefrontRes.error?.message || listingsRes.error?.message;
+  const newOrderCount = !ordersRes.error
+    ? ((ordersRes.data ?? []) as Array<{ status: string }>).filter(
+        (o) => o.status === "paid" || o.status === "ready_for_pickup"
+      ).length
+    : 0;
 
   return {
     storefront,
@@ -385,6 +392,7 @@ export async function getSellerHubData(
     counts,
     payout,
     financials,
+    newOrderCount,
     error,
   };
 }
@@ -511,6 +519,7 @@ export interface SellerListingDetail {
   rulesAcknowledged: boolean;
   hasVariants: boolean;
   optionGroups: string[];
+  variationPhotoGroup: string | null;
   photos: EditablePhotoItem[];
   variants: ExistingVariantRecord[];
   lockedVariantIds: string[];
@@ -554,15 +563,33 @@ export async function getSellerListingForEdit(
     supabase
       .from("listings")
       .select(
-        "id, seller_id, kind, is_food, title, description, category_id, condition, price_sen, quantity, reserved_quantity, collection_area_id, allow_offers, has_variants, option_groups, image_paths, rules_acknowledged, status, published_at, updated_at"
+        "id, seller_id, kind, is_food, title, description, category_id, condition, price_sen, quantity, reserved_quantity, collection_area_id, allow_offers, has_variants, option_groups, variation_photo_group, image_paths, rules_acknowledged, status, published_at, updated_at"
       )
       .eq("id", listingId)
-      .maybeSingle(),
+      .maybeSingle()
+      .then(async (res) => {
+        if (!res.error) return res;
+        return supabase
+          .from("listings")
+          .select(
+            "id, seller_id, kind, is_food, title, description, category_id, condition, price_sen, quantity, reserved_quantity, collection_area_id, allow_offers, has_variants, option_groups, image_paths, rules_acknowledged, status, published_at, updated_at"
+          )
+          .eq("id", listingId)
+          .maybeSingle();
+      }),
     supabase
       .from("listing_variants")
-      .select("id, option_values, price_sen, quantity, reserved_quantity, active")
+      .select("id, option_values, price_sen, quantity, reserved_quantity, active, image_path")
       .eq("listing_id", listingId)
-      .order("id", { ascending: true }),
+      .order("id", { ascending: true })
+      .then(async (res) => {
+        if (!res.error) return res;
+        return supabase
+          .from("listing_variants")
+          .select("id, option_values, price_sen, quantity, reserved_quantity, active")
+          .eq("listing_id", listingId)
+          .order("id", { ascending: true });
+      }),
     supabase
       .from("categories")
       .select("id, name, kind, icon, sort_order, active")
@@ -594,6 +621,7 @@ export async function getSellerListingForEdit(
     allow_offers: boolean;
     has_variants: boolean;
     option_groups: string[] | null;
+    variation_photo_group?: string | null;
     image_paths: string[] | null;
     rules_acknowledged: boolean;
     status: string;
@@ -618,6 +646,7 @@ export async function getSellerListingForEdit(
     quantity: number;
     reserved_quantity: number;
     active: boolean;
+    image_path?: string | null;
   }>;
 
   const variantIds = rawVariants.map((v) => v.id);
@@ -695,6 +724,7 @@ export async function getSellerListingForEdit(
       rulesAcknowledged: Boolean(row.rules_acknowledged),
       hasVariants: Boolean(row.has_variants),
       optionGroups: row.option_groups ?? [],
+      variationPhotoGroup: row.variation_photo_group ?? null,
       photos,
       variants: rawVariants.map((v) => ({
         id: v.id,
@@ -703,6 +733,7 @@ export async function getSellerListingForEdit(
         quantity: v.quantity ?? 0,
         reservedQuantity: v.reserved_quantity ?? 0,
         active: Boolean(v.active),
+        imagePath: v.image_path ?? null,
       })),
       lockedVariantIds: Array.from(lockedSet),
       updatedAt: row.updated_at,
@@ -711,4 +742,29 @@ export async function getSellerListingForEdit(
     categories,
     collectionAreas,
   };
+}
+
+/**
+ * Counts paid seller orders awaiting preparation or handover (`paid` / `ready_for_pickup`).
+ */
+export async function getSellerNewOrderCount(
+  session: AuthSessionSummary
+): Promise<number> {
+  const userId = session.profile?.id;
+  if (!session.isAuthenticated || !userId) return 0;
+  const supabase = await createSupabaseServerClient();
+  if (!supabase) return 0;
+
+  try {
+    const { count, error } = await supabase
+      .from("orders")
+      .select("id", { count: "exact", head: true })
+      .eq("seller_id", userId)
+      .in("status", ["paid", "ready_for_pickup"]);
+
+    if (error || typeof count !== "number") return 0;
+    return Math.max(0, count);
+  } catch {
+    return 0;
+  }
 }

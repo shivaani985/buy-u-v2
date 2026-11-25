@@ -165,6 +165,7 @@ export interface AddToCartInput {
   selectedVariant: CartVariantSnapshot | null;
   requestedQuantity: number;
   existingCartQuantity: number;
+  acceptingRequests?: boolean | null;
   isDemo?: boolean;
 }
 
@@ -182,7 +183,7 @@ export type AddToCartValidationResult =
       error: string;
     };
 
-const CART_ELIGIBLE_KINDS = new Set(["pre_loved", "business"]);
+const CART_ELIGIBLE_KINDS = new Set(["pre_loved", "business", "service"]);
 
 export function validateAddToCartRequest(
   input: AddToCartInput
@@ -225,7 +226,14 @@ export function validateAddToCartRequest(
   if (!CART_ELIGIBLE_KINDS.has(input.kind)) {
     return {
       ok: false,
-      error: "Only physical marketplace products can be added to the cart.",
+      error: "This listing cannot be added to the shopping cart.",
+    };
+  }
+
+  if (input.kind === "service" && input.acceptingRequests === false) {
+    return {
+      ok: false,
+      error: "This service is currently paused and cannot be purchased.",
     };
   }
 
@@ -236,6 +244,25 @@ export function validateAddToCartRequest(
     return {
       ok: false,
       error: "Choose a valid quantity of at least 1.",
+    };
+  }
+
+  if (input.kind === "service") {
+    const existing = Math.max(0, Math.floor(input.existingCartQuantity));
+    const nextQuantity = existing + input.requestedQuantity;
+    if (nextQuantity > 99) {
+      return {
+        ok: false,
+        error: "You can add up to 99 units of a service per order.",
+      };
+    }
+    return {
+      ok: true,
+      normalizedVariantId: null,
+      nextQuantity,
+      addedQuantity: input.requestedQuantity,
+      availableStock: 99,
+      merged: existing > 0,
     };
   }
 

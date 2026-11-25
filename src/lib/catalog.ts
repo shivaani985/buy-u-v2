@@ -1,10 +1,12 @@
 import { DEMO_CATEGORIES, DEMO_LISTINGS } from "./demo-data";
 import { resolvePublicStorageUrl } from "./format";
+import { computeRatingSummary } from "./marketplace/phase8";
 import { getPublicSupabaseEnv } from "./supabase/env";
 import {
   createSupabaseServerClient,
   getSessionSummary,
 } from "./supabase/server";
+import { getServerServiceClient } from "./supabase/service";
 import type {
   CatalogResult,
   Category,
@@ -85,12 +87,36 @@ function filterListings(
   const query = filters.q?.trim().toLowerCase() ?? "";
   const category = filters.category?.trim().toLowerCase() ?? "";
   const type = filters.type && filters.type !== "all" ? filters.type : null;
+  const condition = filters.condition?.trim().toLowerCase() ?? "";
+  const minSen =
+    typeof filters.minPrice === "number" && Number.isFinite(filters.minPrice) && filters.minPrice >= 0
+      ? Math.round(filters.minPrice * 100)
+      : null;
+  const maxSen =
+    typeof filters.maxPrice === "number" && Number.isFinite(filters.maxPrice) && filters.maxPrice >= 0
+      ? Math.round(filters.maxPrice * 100)
+      : null;
 
-  return listings.filter((item) => {
+  const filtered = listings.filter((item) => {
     if (category && item.categoryId.toLowerCase() !== category) {
       return false;
     }
     if (type && item.listingType !== type) {
+      return false;
+    }
+    if (minSen !== null && item.priceSen < minSen) {
+      return false;
+    }
+    if (maxSen !== null && item.priceSen > maxSen) {
+      return false;
+    }
+    if (condition) {
+      const itemCond = (item.condition ?? "").toLowerCase();
+      if (!itemCond.includes(condition)) {
+        return false;
+      }
+    }
+    if (filters.inStock && item.availableStock === 0) {
       return false;
     }
     if (query) {
@@ -105,6 +131,17 @@ function filterListings(
       if (!haystack.includes(query)) return false;
     }
     return true;
+  });
+
+  const sort = filters.sort ?? "latest";
+  return [...filtered].sort((a, b) => {
+    if (sort === "price_asc") {
+      return a.priceSen - b.priceSen;
+    }
+    if (sort === "price_desc") {
+      return b.priceSen - a.priceSen;
+    }
+    return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
   });
 }
 
@@ -337,22 +374,91 @@ export async function getListings(
     ).filter(Boolean);
 
     const profileMap = new Map<string, RawPublicProfileRow>();
-    if (memberIds.length > 0) {
-      const profilesRes = await supabase
-        .from("public_profiles")
-        .select("id, display_name, university_role, faculty")
-        .in("id", memberIds);
+    const shopRatingMap = new Map<
+      string,
+      { averageRating: number | null; totalReviews: number }
+    >();
+    const salesCountMap = new Map<string, number>();
+    const listingIds = listingRows.map((r) => r.id).filter(Boolean);
+    const sellerIds = Array.from(
+      new Set(listingRows.map((r) => r.seller_id).filter(Boolean))
+    );
+    const serviceClient = getServerServiceClient();
 
-      if (!profilesRes.error && profilesRes.data) {
-        for (const p of profilesRes.data as RawPublicProfileRow[]) {
-          profileMap.set(p.id, p);
-        }
+    const [profilesRes, reviewsRes, salesRes] = await Promise.all([
+      memberIds.length > 0
+        ? supabase
+            .from("public_profiles")
+            .select("id, display_name, university_role, faculty")
+            .in("id", memberIds)
+        : Promise.resolve({ data: [], error: null }),
+      serviceClient && sellerIds.length > 0
+        ? serviceClient
+            .from("reviews")
+            .select("seller_id, rating, hidden")
+            .eq("hidden", false)
+            .in("seller_id", sellerIds)
+        : Promise.resolve({ data: [], error: null }),
+      serviceClient && listingIds.length > 0
+        ? serviceClient
+            .from("order_items")
+            .select("listing_id, quantity, orders!inner(status)")
+            .in("listing_id", listingIds)
+            .in("orders.status", [
+              "paid",
+              "ready_for_pickup",
+              "handed_over",
+              "completed",
+            ])
+        : Promise.resolve({ data: [], error: null }),
+    ]);
+
+    if (!profilesRes.error && profilesRes.data) {
+      for (const p of profilesRes.data as RawPublicProfileRow[]) {
+        profileMap.set(p.id, p);
+      }
+    }
+
+    if (!reviewsRes.error && reviewsRes.data) {
+      const bySeller = new Map<
+        string,
+        Array<{ rating: number; hidden: boolean }>
+      >();
+      for (const r of reviewsRes.data as Array<{
+        seller_id: string;
+        rating: number;
+        hidden: boolean;
+      }>) {
+        const list = bySeller.get(r.seller_id) ?? [];
+        list.push(r);
+        bySeller.set(r.seller_id, list);
+      }
+      for (const [sid, list] of bySeller.entries()) {
+        const rs = computeRatingSummary(list);
+        shopRatingMap.set(sid, {
+          averageRating: rs.averageRating,
+          totalReviews: rs.totalReviews,
+        });
+      }
+    }
+
+    if (!salesRes.error && salesRes.data) {
+      for (const row of salesRes.data as Array<{
+        listing_id: string;
+        quantity: number | null;
+      }>) {
+        salesCountMap.set(
+          row.listing_id,
+          (salesCountMap.get(row.listing_id) ?? 0) +
+            Math.max(1, Number(row.quantity ?? 1))
+        );
       }
     }
 
     const mappedListings: Listing[] = listingRows.map((row) => {
       const listingType = mapListingType(row);
       const seller = profileMap.get(row.seller_id);
+      const shopRating = shopRatingMap.get(row.seller_id);
       const resolvedUrls = (row.image_paths ?? [])
         .map((p) => resolvePublicStorageUrl("listings", p, env.url))
         .filter((u): u is string => u !== null);
@@ -387,6 +493,9 @@ export async function getListings(
         sellerDisplayName: seller?.display_name || "UMS Campus Member",
         sellerBadge: formatRoleBadge(seller?.university_role),
         sellerFaculty: seller?.faculty ?? null,
+        rating: shopRating?.averageRating ?? null,
+        reviewCount: shopRating?.totalReviews ?? 0,
+        salesCount: salesCountMap.get(row.id) ?? 0,
         createdAt: row.published_at ?? row.created_at,
         isDemo: false,
       };

@@ -26,8 +26,7 @@ export interface OfferActionResult {
   migrationRequired?: boolean;
 }
 
-const OFFER_SELECT_COLUMNS =
-  "id,conversation_id,listing_id,buyer_id,seller_id,offer_price_sen,status,order_id,created_at,responded_at";
+const OFFER_SELECT_COLUMNS = "*";
 
 async function checkMemberBlocked(
   supabase: NonNullable<Awaited<ReturnType<typeof createSupabaseServerClient>>>,
@@ -62,6 +61,7 @@ async function checkMemberBlocked(
 export async function createOfferAction(input: {
   conversationId: string;
   listingId: string;
+  variantId?: string | null;
   amountRm: string;
 }): Promise<OfferActionResult> {
   const session = await getSessionSummary();
@@ -84,6 +84,7 @@ export async function createOfferAction(input: {
   const userId = eligibility.userId;
   const conversationId = (input.conversationId ?? "").trim();
   const listingId = (input.listingId ?? "").trim();
+  const variantId = (input.variantId ?? "").trim() || null;
 
   if (!isValidUuid(conversationId) || !isValidUuid(listingId)) {
     return { ok: false, error: "Invalid conversation or listing reference." };
@@ -98,7 +99,7 @@ export async function createOfferAction(input: {
     supabase
       .from("listings")
       .select(
-        "id,seller_id,title,kind,status,allow_offers,price_sen,quantity,reserved_quantity"
+        "id,seller_id,title,kind,is_food,availability_mode,has_variants,status,allow_offers,price_sen,quantity,reserved_quantity"
       )
       .eq("id", listingId)
       .maybeSingle(),
@@ -121,6 +122,9 @@ export async function createOfferAction(input: {
     seller_id: string;
     title: string;
     kind: string;
+    is_food: boolean | null;
+    availability_mode: string | null;
+    has_variants: boolean | null;
     status: string;
     allow_offers: boolean | null;
     price_sen: number | null;
@@ -145,11 +149,51 @@ export async function createOfferAction(input: {
     (row) => resolveEffectiveOfferStatus(mapRawOffer(row), nowMs) === "pending"
   );
 
-  const availableStock = Math.max(
+  const hasVariants = Boolean(listing.has_variants);
+  let effectivePriceSen = Number(listing.price_sen ?? 0);
+  let availableStock = Math.max(
     0,
     Number(listing.quantity ?? 0) -
       Math.max(0, Number(listing.reserved_quantity ?? 0))
   );
+  let variantActive = true;
+  let variantLabel: string | null = null;
+
+  if (hasVariants && variantId && isValidUuid(variantId)) {
+    const { data: vRow } = await supabase
+      .from("listing_variants")
+      .select("id,option_values,price_sen,quantity,reserved_quantity,active")
+      .eq("id", variantId)
+      .eq("listing_id", listing.id)
+      .maybeSingle();
+
+    const variant = vRow as {
+      id: string;
+      option_values: Record<string, string> | null;
+      price_sen: number;
+      quantity: number;
+      reserved_quantity: number;
+      active: boolean | null;
+    } | null;
+
+    if (!variant) {
+      variantActive = false;
+      availableStock = 0;
+    } else {
+      variantActive = variant.active !== false;
+      effectivePriceSen = Number(variant.price_sen ?? 0);
+      availableStock = Math.max(
+        0,
+        Number(variant.quantity ?? 0) -
+          Math.max(0, Number(variant.reserved_quantity ?? 0))
+      );
+      variantLabel =
+        variant.option_values && typeof variant.option_values === "object"
+          ? Object.values(variant.option_values).filter(Boolean).join(" / ") ||
+            null
+          : null;
+    }
+  }
 
   const offerPriceSen = parseOfferPriceRmToSen(input.amountRm ?? "");
   const validation = validateCreateOffer({
@@ -158,9 +202,14 @@ export async function createOfferAction(input: {
     listingId,
     sellerId: listing.seller_id,
     listingKind: listing.kind,
+    listingIsFood: Boolean(listing.is_food),
+    listingAvailabilityMode: listing.availability_mode ?? null,
+    hasVariants,
+    variantId,
+    variantActive,
     listingStatus: listing.status,
     allowOffers: Boolean(listing.allow_offers),
-    listingPriceSen: Number(listing.price_sen ?? 0),
+    listingPriceSen: effectivePriceSen,
     availableStock,
     offerPriceSen,
     isParticipant,
@@ -172,29 +221,43 @@ export async function createOfferAction(input: {
     return { ok: false, error: validation.error };
   }
 
+  const insertPayload: Record<string, unknown> = {
+    conversation_id: conversationId,
+    listing_id: listingId,
+    buyer_id: userId,
+    seller_id: listing.seller_id,
+    offer_price_sen: validation.offerPriceSen,
+    status: "pending",
+  };
+  if (hasVariants && variantId) {
+    insertPayload.variant_id = variantId;
+  }
+
   const { data: inserted, error: insertErr } = await supabase
     .from("offers")
-    .insert({
-      conversation_id: conversationId,
-      listing_id: listingId,
-      buyer_id: userId,
-      seller_id: listing.seller_id,
-      offer_price_sen: validation.offerPriceSen,
-      status: "pending",
-    })
+    .insert(insertPayload)
     .select(OFFER_SELECT_COLUMNS)
     .single();
 
   if (insertErr || !inserted) {
+    const errMsg = insertErr?.message ?? "";
+    if (/variant_id/i.test(errMsg)) {
+      return {
+        ok: false,
+        migrationRequired: true,
+        error:
+          "Variant bargaining requires applying docs/sql/phase-10-bargaining-eligibility.sql on Supabase first.",
+      };
+    }
     return {
       ok: false,
-      error: insertErr?.message
-        ? `Could not submit offer: ${insertErr.message}`
+      error: errMsg
+        ? `Could not submit offer: ${errMsg}`
         : "Could not submit offer right now. Please retry.",
     };
   }
 
-  const mapped = mapRawOffer(inserted as RawOfferRow);
+  const mapped = mapRawOffer(inserted as RawOfferRow, variantLabel);
   const senderDisplayName =
     session.profile?.display_name?.trim() ||
     session.profile?.full_name?.trim() ||
@@ -394,25 +457,48 @@ export async function acceptOfferAction(
 
   const { data: listingRow } = await supabase
     .from("listings")
-    .select("status,kind,allow_offers,quantity,reserved_quantity")
+    .select(
+      "status,kind,is_food,availability_mode,has_variants,allow_offers,quantity,reserved_quantity"
+    )
     .eq("id", offer.listingId)
     .maybeSingle();
 
   const listing = listingRow as {
     status: string;
     kind: string;
+    is_food: boolean | null;
+    availability_mode: string | null;
+    has_variants: boolean | null;
     allow_offers: boolean | null;
     quantity: number | null;
     reserved_quantity: number | null;
   } | null;
 
-  const availableStock = listing
+  let availableStock = listing
     ? Math.max(
         0,
         Number(listing.quantity ?? 0) -
           Math.max(0, Number(listing.reserved_quantity ?? 0))
       )
     : 0;
+
+  if (listing?.has_variants && offer.variantId && isValidUuid(offer.variantId)) {
+    const { data: vRow } = await supabase
+      .from("listing_variants")
+      .select("quantity,reserved_quantity,active")
+      .eq("id", offer.variantId)
+      .eq("listing_id", offer.listingId)
+      .maybeSingle();
+    const v = vRow as {
+      quantity: number;
+      reserved_quantity: number;
+      active: boolean | null;
+    } | null;
+    availableStock =
+      v && v.active !== false
+        ? Math.max(0, Number(v.quantity ?? 0) - Math.max(0, Number(v.reserved_quantity ?? 0)))
+        : 0;
+  }
 
   const check = validateOfferTransition({
     action: "accept",
@@ -421,6 +507,8 @@ export async function acceptOfferAction(
     isBlocked,
     listingStatus: listing?.status ?? "unavailable",
     listingKind: listing?.kind ?? "unknown",
+    listingIsFood: Boolean(listing?.is_food),
+    listingAvailabilityMode: listing?.availability_mode ?? null,
     allowOffers: Boolean(listing?.allow_offers),
     availableStock,
     nowMs: Date.now(),

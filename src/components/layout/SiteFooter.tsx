@@ -1,102 +1,169 @@
 import Image from "next/image";
 import Link from "next/link";
+import { Clock, GraduationCap, KeyRound, ShieldCheck } from "lucide-react";
 
 interface SiteFooterProps {
   dataSource: "supabase" | "unconfigured";
 }
 
-export function SiteFooter({ dataSource }: SiteFooterProps) {
+export function SiteFooter({}: SiteFooterProps) {
   return (
-    <footer className="mt-8 border-t border-[#2E2A3B] bg-[#14121A] text-white">
-      <div className="bori-container py-10">
-        <div className="grid gap-10 md:grid-cols-3">
-          <div>
+    <footer className="mt-10 border-t border-[#2E2A3B] bg-[#14121A] text-white">
+      <div
+        className="h-1 w-full bg-gradient-to-r from-[#4E2A84] via-[#00A3A6] to-[#4E2A84]"
+        aria-hidden="true"
+      />
+
+      <div className="bori-container py-8 sm:py-10">
+        <div className="grid gap-8 sm:grid-cols-2 lg:grid-cols-12">
+          {/* Column 1 — Brand */}
+          <div className="lg:col-span-4">
             <div className="flex items-center gap-3">
-              <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-white p-1 shadow-sm">
+              <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-white p-1.5 shadow-sm">
                 <Image
                   src="/images/logo/buyu-logo.png"
                   alt="Buy-U Logo"
                   width={40}
                   height={45}
-                  className="h-9 w-auto object-contain"
+                  className="h-8 w-auto object-contain select-none"
                 />
               </div>
-              <span className="text-lg font-extrabold tracking-tight text-white">
-                Buy-U <span className="text-xs font-semibold text-[#00A3A6]">v2</span>
-              </span>
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="text-lg font-extrabold tracking-tight text-white">
+                    Buy-U
+                  </span>
+                  <span className="rounded-full bg-[#00A3A6]/15 px-2 py-0.5 text-[11px] font-bold tracking-wide text-[#00A3A6]">
+                    UMSKAL
+                  </span>
+                </div>
+                <p className="text-xs text-[#A9A3B8]">
+                  Your Campus Marketplace
+                </p>
+              </div>
             </div>
-            <p className="mt-3 max-w-sm text-sm leading-relaxed text-[#D9D6E2]">
-              A community-based university marketplace for Universiti Malaysia
-              Sabah (UMSKAL, Labuan) students and staff to trade pre-loved
-              items, student ventures, campus services, and free giveaways.
+
+            <p className="mt-3.5 max-w-sm text-sm leading-relaxed text-[#D4D0E0]">
+              Connecting the UMSKAL community through campus commerce, student
+              entrepreneurship and sustainable sharing.
             </p>
           </div>
 
-          <div>
-            <h2 className="text-sm font-bold uppercase tracking-wider text-[#00A3A6]">
-              Explore Campus
+          {/* Column 2 — Explore Buy-U */}
+          <nav aria-label="Explore Buy-U" className="lg:col-span-2">
+            <h2 className="text-xs font-bold uppercase tracking-wider text-[#00A3A6]">
+              Explore Buy-U
             </h2>
-            <ul className="mt-3 space-y-2 text-sm text-[#D9D6E2]">
+            <ul className="mt-3 space-y-2 text-sm text-[#D4D0E0]">
               <li>
-                <Link href="/marketplace" className="hover:text-white underline-offset-4 hover:underline">
-                  All Marketplace Listings
+                <Link
+                  href="/marketplace"
+                  className="transition-colors hover:text-white"
+                >
+                  Marketplace
                 </Link>
               </li>
               <li>
                 <Link
-                  href="/marketplace?type=service"
-                  className="hover:text-white underline-offset-4 hover:underline"
+                  href="/services"
+                  className="transition-colors hover:text-white"
                 >
-                  Student Services
+                  Campus Services
                 </Link>
               </li>
               <li>
                 <Link
-                  href="/marketplace?type=free"
-                  className="hover:text-white underline-offset-4 hover:underline"
+                  href="/free-items"
+                  className="transition-colors hover:text-white"
                 >
-                  Free Items & Share Spots
+                  Free Items
                 </Link>
               </li>
               <li>
-                <Link href="/account" className="hover:text-white underline-offset-4 hover:underline">
-                  Account & UMS Verification Roadmap
+                <Link
+                  href="/messages"
+                  className="transition-colors hover:text-white"
+                >
+                  Messages &amp; Offers
                 </Link>
               </li>
             </ul>
-          </div>
+          </nav>
 
-          <div>
-            <h2 className="text-sm font-bold uppercase tracking-wider text-[#00A3A6]">
-              Phase 1 Status
+          {/* Column 3 — My Buy-U */}
+          <nav aria-label="My Buy-U" className="lg:col-span-3">
+            <h2 className="text-xs font-bold uppercase tracking-wider text-[#00A3A6]">
+              My Buy-U
             </h2>
-            <p className="mt-3 text-sm leading-relaxed text-[#D9D6E2]">
-              Read-only foundation build. Purchasing, chat, offers, and seller
-              dashboards are scheduled for subsequent phases.
-            </p>
-            <div className="mt-4 inline-flex items-center gap-2 border border-[#4E2A84] bg-[#24173B] px-3 py-1.5 text-xs font-semibold text-white">
-              <span
-                className={`h-2 w-2 ${
-                  dataSource === "supabase" ? "bg-[#00A3A6]" : "bg-[#1D70B8]"
-                }`}
-                aria-hidden="true"
-              />
-              <span>
-                Catalog Source:{" "}
-                {dataSource === "supabase"
-                  ? "Supabase (Read-Only)"
-                  : "Demo Data (Offline Safe)"}
-              </span>
-            </div>
+            <ul className="mt-3 space-y-2 text-sm text-[#D4D0E0]">
+              <li>
+                <Link
+                  href="/orders"
+                  className="transition-colors hover:text-white"
+                >
+                  My Orders
+                </Link>
+              </li>
+              <li>
+                <Link
+                  href="/seller"
+                  className="transition-colors hover:text-white"
+                >
+                  Seller Hub
+                </Link>
+              </li>
+              <li>
+                <Link
+                  href="/account"
+                  className="transition-colors hover:text-white"
+                >
+                  Account Settings
+                </Link>
+              </li>
+            </ul>
+          </nav>
+
+          {/* Column 4 — Trust & Safety */}
+          <div className="lg:col-span-3">
+            <h2 className="text-xs font-bold uppercase tracking-wider text-[#00A3A6]">
+              Trust &amp; Safety
+            </h2>
+            <ul className="mt-3 space-y-2.5 text-sm text-[#D4D0E0]">
+              <li className="flex items-center gap-2.5">
+                <GraduationCap
+                  className="h-4 w-4 shrink-0 text-[#00A3A6]"
+                  aria-hidden="true"
+                />
+                <span>Verified university community</span>
+              </li>
+              <li className="flex items-center gap-2.5">
+                <KeyRound
+                  className="h-4 w-4 shrink-0 text-[#00A3A6]"
+                  aria-hidden="true"
+                />
+                <span>Pickup PIN verification</span>
+              </li>
+              <li className="flex items-center gap-2.5">
+                <Clock
+                  className="h-4 w-4 shrink-0 text-[#00A3A6]"
+                  aria-hidden="true"
+                />
+                <span>72-hour buyer protection</span>
+              </li>
+              <li className="flex items-center gap-2.5">
+                <ShieldCheck
+                  className="h-4 w-4 shrink-0 text-[#00A3A6]"
+                  aria-hidden="true"
+                />
+                <span>Community moderation and dispute resolution</span>
+              </li>
+            </ul>
           </div>
         </div>
 
-        <div className="mt-10 flex flex-col gap-2 border-t border-[#2E2A3B] pt-6 text-xs text-[#B5B0C4] sm:flex-row sm:items-center sm:justify-between">
-          <p>
-            Buy-U Final Year Project — Universiti Malaysia Sabah, Kampus
-            Antarabangsa Labuan (UMSKAL).
-          </p>
-          <p>Student-led academic project. Not an official UMS commercial portal.</p>
+        <div className="mt-8 flex flex-col gap-2 border-t border-[#2E2A3B] pt-5 text-xs text-[#A9A3B8] sm:flex-row sm:items-center sm:justify-between">
+          <p>© {new Date().getFullYear()} Buy-U. All rights reserved.</p>
+          <p>Built for the UMSKAL community.</p>
         </div>
       </div>
     </footer>

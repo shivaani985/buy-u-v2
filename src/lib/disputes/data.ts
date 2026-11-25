@@ -45,12 +45,17 @@ export interface SellerDisputeItemView extends OrderDisputeSummaryView {
   subtotalSen: number;
   sellerNetSen: number;
   collectionAreaName: string;
+  isServiceOrder: boolean;
   items: Array<{
     id: string;
     title: string;
     quantity: number;
     unitSen: number;
     imageUrl: string | null;
+    isService: boolean;
+    serviceMode: string | null;
+    serviceRequirements: string | null;
+    serviceAttachmentPaths: string[];
   }>;
 }
 
@@ -223,7 +228,9 @@ export async function getSellerDisputesData(
   const [itemsRes, buyersRes] = await Promise.all([
     supabase
       .from("order_items")
-      .select("id,order_id,title_snapshot,quantity,unit_sen,image_path")
+      .select(
+        "id,order_id,title_snapshot,quantity,unit_sen,image_path,is_service,service_mode,service_requirements,service_attachment_paths"
+      )
       .in("order_id", relevantOrderIds),
     supabase.from("public_profiles").select("id,display_name").in("id", buyerIds),
   ]);
@@ -244,6 +251,10 @@ export async function getSellerDisputesData(
     quantity: number;
     unit_sen: number;
     image_path: string | null;
+    is_service?: boolean | null;
+    service_mode?: string | null;
+    service_requirements?: string | null;
+    service_attachment_paths?: string[] | null;
   }>) {
     const list = itemsByOrder.get(it.order_id) ?? [];
     list.push({
@@ -252,6 +263,12 @@ export async function getSellerDisputesData(
       quantity: Number(it.quantity ?? 1),
       unitSen: Number(it.unit_sen ?? 0),
       imageUrl: resolvePublicStorageUrl("listings", it.image_path, env.url),
+      isService: Boolean(it.is_service),
+      serviceMode: it.service_mode ?? null,
+      serviceRequirements: it.service_requirements ?? null,
+      serviceAttachmentPaths: Array.isArray(it.service_attachment_paths)
+        ? it.service_attachment_paths
+        : [],
     });
     itemsByOrder.set(it.order_id, list);
   }
@@ -260,6 +277,7 @@ export async function getSellerDisputesData(
     .map((row) => {
       const ord = orderMap.get(row.order_id);
       if (!ord) return null;
+      const items = itemsByOrder.get(ord.id) ?? [];
       return {
         ...mapDisputeRow(row),
         orderCode: ord.order_code,
@@ -268,7 +286,8 @@ export async function getSellerDisputesData(
         subtotalSen: Number(ord.subtotal_sen ?? 0),
         sellerNetSen: Number(ord.seller_net_sen ?? 0),
         collectionAreaName: ord.collection_area_name || "Campus Collection Point",
-        items: itemsByOrder.get(ord.id) ?? [],
+        isServiceOrder: items.some((it) => it.isService),
+        items,
       };
     })
     .filter((d): d is SellerDisputeItemView => d !== null);
@@ -314,7 +333,9 @@ export async function getAdminDisputesData(
       .in("id", orderIds),
     service
       .from("order_items")
-      .select("id,order_id,title_snapshot,quantity,unit_sen,image_path")
+      .select(
+        "id,order_id,title_snapshot,quantity,unit_sen,image_path,is_service,service_mode,service_requirements,service_attachment_paths"
+      )
       .in("order_id", orderIds),
   ]);
 
@@ -358,6 +379,10 @@ export async function getAdminDisputesData(
     quantity: number;
     unit_sen: number;
     image_path: string | null;
+    is_service?: boolean | null;
+    service_mode?: string | null;
+    service_requirements?: string | null;
+    service_attachment_paths?: string[] | null;
   }>) {
     const list = itemsByOrder.get(it.order_id) ?? [];
     list.push({
@@ -366,6 +391,12 @@ export async function getAdminDisputesData(
       quantity: Number(it.quantity ?? 1),
       unitSen: Number(it.unit_sen ?? 0),
       imageUrl: resolvePublicStorageUrl("listings", it.image_path, env.url),
+      isService: Boolean(it.is_service),
+      serviceMode: it.service_mode ?? null,
+      serviceRequirements: it.service_requirements ?? null,
+      serviceAttachmentPaths: Array.isArray(it.service_attachment_paths)
+        ? it.service_attachment_paths
+        : [],
     });
     itemsByOrder.set(it.order_id, list);
   }
@@ -374,6 +405,7 @@ export async function getAdminDisputesData(
     .map((row) => {
       const ord = orderMap.get(row.order_id);
       if (!ord) return null;
+      const items = itemsByOrder.get(ord.id) ?? [];
       return {
         ...mapDisputeRow(row),
         orderCode: ord.order_code,
@@ -383,7 +415,8 @@ export async function getAdminDisputesData(
         subtotalSen: Number(ord.subtotal_sen ?? 0),
         sellerNetSen: Number(ord.seller_net_sen ?? 0),
         collectionAreaName: ord.collection_area_name || "Campus Collection Point",
-        items: itemsByOrder.get(ord.id) ?? [],
+        isServiceOrder: items.some((it) => it.isService),
+        items,
         adminNotes: row.admin_notes ?? null,
       };
     })

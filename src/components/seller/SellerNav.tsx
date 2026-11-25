@@ -4,7 +4,6 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   BarChart3,
-  Briefcase,
   ClipboardList,
   Landmark,
   LayoutDashboard,
@@ -17,7 +16,6 @@ import {
 const TABS = [
   { href: "/seller", label: "Seller Hub", icon: LayoutDashboard },
   { href: "/seller/orders", label: "Orders", icon: ClipboardList },
-  { href: "/seller/services", label: "Services", icon: Briefcase },
   { href: "/seller/analytics", label: "Analytics", icon: BarChart3 },
   { href: "/seller/disputes", label: "Disputes", icon: ShieldAlert },
   { href: "/seller/withdrawals", label: "Withdrawals", icon: Wallet },
@@ -26,7 +24,7 @@ const TABS = [
   { href: "/sell", label: "Create Listing", icon: PlusCircle },
 ];
 
-export function SellerNav() {
+export function SellerNav({ newOrderCount = 0 }: { newOrderCount?: number }) {
   const pathname = usePathname();
 
   return (
@@ -37,6 +35,7 @@ export function SellerNav() {
       {TABS.map((tab) => {
         const isActive = pathname === tab.href;
         const Icon = tab.icon;
+        const showOrderBadge = tab.href === "/seller/orders" && newOrderCount > 0;
         return (
           <Link
             key={tab.href}
@@ -50,6 +49,17 @@ export function SellerNav() {
           >
             <Icon className="h-4 w-4 shrink-0" aria-hidden="true" />
             <span>{tab.label}</span>
+            {showOrderBadge ? (
+              <span
+                className={`inline-flex min-w-5 items-center justify-center rounded-full px-1.5 py-0.5 text-[11px] font-extrabold leading-none ${
+                  isActive
+                    ? "bg-white text-[#4E2A84]"
+                    : "bg-[#00A3A6] text-white"
+                }`}
+              >
+                {newOrderCount > 99 ? "99+" : newOrderCount}
+              </span>
+            ) : null}
           </Link>
         );
       })}

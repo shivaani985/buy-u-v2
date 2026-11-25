@@ -4,6 +4,7 @@ import { SellerDisputesClient } from "@/components/seller/SellerDisputesClient";
 import { SellerGate } from "@/components/seller/SellerGate";
 import { SellerNav } from "@/components/seller/SellerNav";
 import { getSellerDisputesData } from "@/lib/disputes/data";
+import { getSellerNewOrderCount } from "@/lib/seller/data";
 import { evaluateSellerEligibility } from "@/lib/seller/validation";
 import { getSessionSummary } from "@/lib/supabase/server";
 
@@ -23,11 +24,14 @@ export default async function SellerDisputesPage() {
     return <SellerGate eligibility={eligibility} nextPath="/seller/disputes" />;
   }
 
-  const { disputes, error } = await getSellerDisputesData(session);
+  const [{ disputes, error }, newOrderCount] = await Promise.all([
+    getSellerDisputesData(session),
+    getSellerNewOrderCount(session),
+  ]);
 
   return (
     <div className="mx-auto w-full max-w-[1200px] space-y-6 px-4 py-6 sm:px-6 lg:px-10">
-      <SellerNav />
+      <SellerNav newOrderCount={newOrderCount} />
 
       <div>
         <h1 className="text-2xl font-extrabold tracking-[-0.02em] text-[#14121A] sm:text-3xl">

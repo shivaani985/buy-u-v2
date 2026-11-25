@@ -1,5 +1,6 @@
 import { getListingById } from "@/lib/catalog";
 import { resolvePublicStorageUrl } from "@/lib/format";
+import { formatVariationOptionLabel } from "@/lib/seller/variations";
 import { getPublicSupabaseEnv } from "@/lib/supabase/env";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { reconcileExpiredOfferReservations } from "@/lib/supabase/service";
@@ -24,6 +25,8 @@ export interface ProductVariantItem {
   reservedQuantity: number;
   availableStock: number;
   active: boolean;
+  imagePath: string | null;
+  imageUrl: string | null;
 }
 
 export interface ProductStorefrontInfo {
@@ -61,6 +64,8 @@ export interface ProductDetail {
   reservedQuantity: number;
   availableStock: number | null;
   hasVariants: boolean;
+  optionGroups: string[];
+  variationPhotoGroup: string | null;
   variants: ProductVariantItem[];
   categoryId: string;
   categoryName: string;
@@ -106,6 +111,8 @@ interface RawListingRow {
   collection_area_id: string | null;
   allow_offers: boolean | null;
   has_variants: boolean | null;
+  option_groups?: string[] | null;
+  variation_photo_group?: string | null;
   availability_mode: string | null;
   preorder_close_at: string | null;
   pickup_window_start: string | null;
@@ -128,6 +135,7 @@ interface RawVariantRow {
   quantity: number;
   reserved_quantity: number;
   active: boolean;
+  image_path?: string | null;
 }
 
 function mapKindToListingType(kind: string, isFood: boolean): ListingType {
@@ -138,9 +146,7 @@ function mapKindToListingType(kind: string, isFood: boolean): ListingType {
 }
 
 function formatVariantLabel(optionValues: Record<string, string>): string {
-  const entries = Object.entries(optionValues);
-  if (entries.length === 0) return "Standard";
-  return entries.map(([key, val]) => `${key}: ${val}`).join(" / ");
+  return formatVariationOptionLabel(optionValues);
 }
 
 function normalizeOptionValues(
@@ -201,6 +207,8 @@ export async function getProductDetailData(
         reservedQuantity: 0,
         availableStock: item.availableStock,
         hasVariants: false,
+        optionGroups: [],
+        variationPhotoGroup: null,
         variants: [],
         categoryId: item.categoryId,
         categoryName: item.categoryName,
@@ -270,13 +278,29 @@ export async function getProductDetailData(
   // Release any expired 30m offer holds before reading live stock (throttled, no-op pre-migration)
   await reconcileExpiredOfferReservations();
 
-  const { data: rawListing, error: listingErr } = await supabase
+  let { data: rawListing, error: listingErr } = await supabase
     .from("listings")
     .select(
-      "id,seller_id,kind,is_food,title,description,category_id,condition,limitations,price_sen,quantity,reserved_quantity,collection_area_id,allow_offers,has_variants,availability_mode,preorder_close_at,pickup_window_start,pickup_window_end,pickup_note,food_notes,service_mode,accepting_requests,image_paths,status,published_at,created_at"
+      "id,seller_id,kind,is_food,title,description,category_id,condition,limitations,price_sen,quantity,reserved_quantity,collection_area_id,allow_offers,has_variants,option_groups,variation_photo_group,availability_mode,preorder_close_at,pickup_window_start,pickup_window_end,pickup_note,food_notes,service_mode,accepting_requests,image_paths,status,published_at,created_at"
     )
     .eq("id", idOrSlug)
     .maybeSingle();
+
+  if (
+    listingErr &&
+    (listingErr.code === "42703" ||
+      /variation_photo_group|option_groups/i.test(listingErr.message ?? ""))
+  ) {
+    const fallbackListingRes = await supabase
+      .from("listings")
+      .select(
+        "id,seller_id,kind,is_food,title,description,category_id,condition,limitations,price_sen,quantity,reserved_quantity,collection_area_id,allow_offers,has_variants,availability_mode,preorder_close_at,pickup_window_start,pickup_window_end,pickup_note,food_notes,service_mode,accepting_requests,image_paths,status,published_at,created_at"
+      )
+      .eq("id", idOrSlug)
+      .maybeSingle();
+    rawListing = fallbackListingRes.data as typeof rawListing;
+    listingErr = fallbackListingRes.error;
+  }
 
   if (listingErr) {
     return {
@@ -310,6 +334,8 @@ export async function getProductDetailData(
           reservedQuantity: 0,
           availableStock: 1,
           hasVariants: false,
+          optionGroups: [],
+          variationPhotoGroup: null,
           variants: [],
           categoryId: item.categoryId,
           categoryName: item.categoryName,
@@ -354,6 +380,34 @@ export async function getProductDetailData(
   const isOwner = Boolean(currentUserId && currentUserId === row.seller_id);
 
   // Fetch related metadata, variants, storefront, favourite status, and existing cart rows in parallel.
+  const variantsPromise = row.has_variants
+    ? (async () => {
+        const res = await supabase
+          .from("listing_variants")
+          .select(
+            "id,listing_id,option_values,price_sen,quantity,reserved_quantity,active,image_path"
+          )
+          .eq("listing_id", row.id)
+          .eq("active", true)
+          .order("price_sen", { ascending: true });
+        if (
+          res.error &&
+          (res.error.code === "42703" ||
+            /image_path/i.test(res.error.message ?? ""))
+        ) {
+          return supabase
+            .from("listing_variants")
+            .select(
+              "id,listing_id,option_values,price_sen,quantity,reserved_quantity,active"
+            )
+            .eq("listing_id", row.id)
+            .eq("active", true)
+            .order("price_sen", { ascending: true });
+        }
+        return res;
+      })()
+    : Promise.resolve({ data: [], error: null });
+
   const [
     variantsRes,
     categoryRes,
@@ -363,16 +417,7 @@ export async function getProductDetailData(
     favRes,
     cartRes,
   ] = await Promise.all([
-    row.has_variants
-      ? supabase
-          .from("listing_variants")
-          .select(
-            "id,listing_id,option_values,price_sen,quantity,reserved_quantity,active"
-          )
-          .eq("listing_id", row.id)
-          .eq("active", true)
-          .order("price_sen", { ascending: true })
-      : Promise.resolve({ data: [], error: null }),
+    variantsPromise,
     row.category_id
       ? supabase
           .from("categories")
@@ -418,6 +463,7 @@ export async function getProductDetailData(
     (variantsRes.data ?? []) as RawVariantRow[]
   ).map((v) => {
     const optionValues = normalizeOptionValues(v.option_values);
+    const imagePath = v.image_path ?? null;
     return {
       id: v.id,
       label: formatVariantLabel(optionValues),
@@ -430,6 +476,8 @@ export async function getProductDetailData(
         Number(v.reserved_quantity ?? 0)
       ),
       active: Boolean(v.active),
+      imagePath,
+      imageUrl: resolvePublicStorageUrl("listings", imagePath, env.url),
     };
   });
 
@@ -516,6 +564,10 @@ export async function getProductDetailData(
       reservedQuantity,
       availableStock,
       hasVariants: Boolean(row.has_variants),
+      optionGroups: Array.isArray(row.option_groups)
+        ? row.option_groups.filter((g): g is string => typeof g === "string")
+        : [],
+      variationPhotoGroup: row.variation_photo_group ?? null,
       variants,
       categoryId: row.category_id ?? "",
       categoryName,

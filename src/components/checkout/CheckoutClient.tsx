@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useCallback, useRef, useState, useTransition } from "react";
 import Link from "next/link";
 import {
   AlertCircle,
@@ -20,16 +20,23 @@ import {
 import {
   revalidateCheckoutAction,
   startCartToyyibPayCheckoutAction,
+  type ServiceCheckoutDetailInput,
   type UnifiedCheckoutActionResult,
 } from "@/app/checkout/actions";
+import {
+  ServiceRequirementsPanel,
+  type ServiceItemCheckoutState,
+} from "@/components/checkout/ServiceRequirementsPanel";
 import {
   extractPriceSnapshots,
   type CheckoutPreparationSummary,
 } from "@/lib/buyer/checkout";
 import { TOYYIBPAY_FPX_FEE_SEN } from "@/lib/orders/pricing";
+import { formatServiceModeLabel } from "@/lib/orders/service-attachments";
 import { formatSenToRm } from "@/lib/format";
 
 export interface CheckoutBuyerInfo {
+  userId: string;
   displayName: string;
   email: string;
   roleLabel: string;
@@ -38,6 +45,7 @@ export interface CheckoutBuyerInfo {
 
 interface CheckoutClientProps {
   initialPreparation: CheckoutPreparationSummary;
+  selectedCartItemIds?: string[] | null;
   buyer: CheckoutBuyerInfo;
 }
 
@@ -63,6 +71,7 @@ function formatDateTime(iso: string | null | undefined): string | null {
 
 export function CheckoutClient({
   initialPreparation,
+  selectedCartItemIds = null,
   buyer,
 }: CheckoutClientProps) {
   const [preparation, setPreparation] =
@@ -78,24 +87,93 @@ export function CheckoutClient({
     text: string;
   } | null>(null);
   const [isRefreshing, startRefreshTransition] = useTransition();
-  const [idempotencyKey] = useState<string>(() =>
-    typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
-      ? `cart-${crypto.randomUUID()}`
-      : `cart-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
-  );
+  const reviewedCartItemIds = Array.from(
+    new Set(
+      preparation.sellerOrders.flatMap((order) =>
+        order.items.map((line) => line.cartItem.id)
+      )
+    )
+  ).sort();
+  const submittedCartItemIds =
+    selectedCartItemIds && selectedCartItemIds.length > 0
+      ? [...selectedCartItemIds].sort()
+      : reviewedCartItemIds;
+  const selectionSignature = submittedCartItemIds.join(",");
+
+  // Reuse original key on retries of the same selection; generate a new key if selection changes
+  const keyBySelectionRef = useRef<Record<string, string>>({});
+  if (!keyBySelectionRef.current[selectionSignature]) {
+    keyBySelectionRef.current[selectionSignature] =
+      typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+        ? `cart-${crypto.randomUUID()}`
+        : `cart-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  }
+  const idempotencyKey = keyBySelectionRef.current[selectionSignature]!;
+
   const [isPaying, setIsPaying] = useState(false);
   const [paymentError, setPaymentError] = useState<string | null>(null);
   const [readyCheckout, setReadyCheckout] =
     useState<UnifiedCheckoutActionResult | null>(null);
+  const [serviceStates, setServiceStates] = useState<
+    Record<string, ServiceItemCheckoutState>
+  >({});
+
+  const handleServiceStateChange = useCallback(
+    (cartItemId: string, next: ServiceItemCheckoutState) => {
+      setServiceStates((prev) => {
+        const cur = prev[cartItemId];
+        if (
+          cur &&
+          cur.requirements === next.requirements &&
+          cur.isBusy === next.isBusy &&
+          cur.hasFailedUpload === next.hasFailedUpload &&
+          cur.validatedPaths.length === next.validatedPaths.length &&
+          cur.validatedPaths.every((p, idx) => p === next.validatedPaths[idx])
+        ) {
+          return prev;
+        }
+        return { ...prev, [cartItemId]: next };
+      });
+    },
+    []
+  );
+
+  const anyAttachmentBusy = Object.values(serviceStates).some((s) => s.isBusy);
+  const anyAttachmentFailed = Object.values(serviceStates).some(
+    (s) => s.hasFailedUpload
+  );
 
   async function handleStartToyyibPayCheckout() {
-    if (!preparation.canProceedToPayment || isPaying || isRefreshing) return;
+    if (
+      !preparation.canProceedToPayment ||
+      isPaying ||
+      isRefreshing ||
+      anyAttachmentBusy ||
+      anyAttachmentFailed
+    ) {
+      return;
+    }
     setPaymentError(null);
     setIsPaying(true);
     try {
+      const reviewedSet = new Set(submittedCartItemIds);
+      const serviceDetails: Record<string, ServiceCheckoutDetailInput> = {};
+      for (const [cartItemId, st] of Object.entries(serviceStates)) {
+        if (!reviewedSet.has(cartItemId)) continue;
+        const trimmed = st.requirements.trim();
+        if (trimmed.length > 0 || st.validatedPaths.length > 0) {
+          serviceDetails[cartItemId] = {
+            requirements: trimmed.length > 0 ? trimmed : null,
+            attachment_paths: st.validatedPaths,
+          };
+        }
+      }
+
       const res = await startCartToyyibPayCheckoutAction({
         idempotencyKey,
         priceSnapshots,
+        serviceDetails,
+        selectedCartItemIds: submittedCartItemIds,
       });
 
       if (!res.ok || !res.billUrl) {
@@ -120,7 +198,10 @@ export function CheckoutClient({
     setRefreshMessage(null);
     startRefreshTransition(async () => {
       try {
-        const res = await revalidateCheckoutAction(priceSnapshots);
+        const res = await revalidateCheckoutAction(
+          priceSnapshots,
+          selectedCartItemIds
+        );
         if (!res.ok || !res.preparation) {
           setRefreshMessage({
             type: "error",
@@ -161,7 +242,10 @@ export function CheckoutClient({
     setPriceSnapshots(nextSnapshots);
     setRefreshMessage(null);
     startRefreshTransition(async () => {
-      const res = await revalidateCheckoutAction(nextSnapshots);
+      const res = await revalidateCheckoutAction(
+        nextSnapshots,
+        selectedCartItemIds
+      );
       if (res.ok && res.preparation) {
         setPreparation(res.preparation);
         setRefreshMessage({
@@ -504,9 +588,16 @@ export function CheckoutClient({
                           <div className="min-w-0 flex-1">
                             <div className="flex flex-wrap items-start justify-between gap-2">
                               <div className="min-w-0">
-                                <p className="text-sm font-bold text-[#14121A]">
-                                  {item.title}
-                                </p>
+                                <div className="flex flex-wrap items-center gap-1.5">
+                                  <p className="text-sm font-bold text-[#14121A]">
+                                    {item.title}
+                                  </p>
+                                  {item.isService ? (
+                                    <span className="inline-flex items-center rounded-full bg-[#F3ECFC] px-2 py-0.5 text-[11px] font-bold text-[#4E2A84]">
+                                      Service
+                                    </span>
+                                  ) : null}
+                                </div>
                                 {item.variantLabel ? (
                                   <p className="mt-0.5 text-xs font-medium text-[#4A4656]">
                                     Option: {item.variantLabel}
@@ -517,6 +608,9 @@ export function CheckoutClient({
                                   {item.unitPriceSen > 0
                                     ? formatSenToRm(item.unitPriceSen)
                                     : "—"}
+                                  {item.isService && item.serviceMode
+                                    ? ` · ${formatServiceModeLabel(item.serviceMode)}`
+                                    : ""}
                                   {item.campusArea
                                     ? ` · ${item.campusArea}`
                                     : ""}
@@ -557,9 +651,25 @@ export function CheckoutClient({
                               </p>
                             ) : (
                               <p className="mt-1 text-xs font-semibold text-[#008285]">
-                                In stock ({item.availableStock} available)
+                                {item.isService
+                                  ? "Service available for purchase"
+                                  : `In stock (${item.availableStock} available)`}
                               </p>
                             )}
+
+                            {item.isService &&
+                            line.isCheckoutEligible &&
+                            buyer.userId ? (
+                              <ServiceRequirementsPanel
+                                buyerId={buyer.userId}
+                                cartItemId={item.id}
+                                serviceTitle={item.title}
+                                disabled={isPaying}
+                                onChange={(next) =>
+                                  handleServiceStateChange(item.id, next)
+                                }
+                              />
+                            ) : null}
 
                             {/* Food / Pickup Instructions (only when present) */}
                             {item.isFood &&
@@ -795,19 +905,29 @@ export function CheckoutClient({
           <div className="mt-5 space-y-3">
             <button
               type="button"
-              disabled={!preparation.canProceedToPayment || isPaying || isRefreshing}
+              disabled={
+                !preparation.canProceedToPayment ||
+                isPaying ||
+                isRefreshing ||
+                anyAttachmentBusy ||
+                anyAttachmentFailed
+              }
               onClick={handleStartToyyibPayCheckout}
               className="flex w-full items-center justify-center gap-2 rounded-xl bg-[#4E2A84] px-5 py-3 text-sm font-bold text-white transition hover:bg-[#3F216B] disabled:cursor-not-allowed disabled:bg-[#C9C4D6]"
             >
-              {isPaying ? (
+              {isPaying || anyAttachmentBusy ? (
                 <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
               ) : null}
               <span>
                 {isPaying
                   ? "Opening ToyyibPay FPX..."
-                  : preparation.canProceedToPayment
-                    ? `Pay Now · ${formatSenToRm(preparation.itemsSubtotalSen + TOYYIBPAY_FPX_FEE_SEN)}`
-                    : "Resolve Issues Before Payment"}
+                  : anyAttachmentBusy
+                    ? "Validating Attachments..."
+                    : anyAttachmentFailed
+                      ? "Fix or Remove Failed Uploads"
+                      : preparation.canProceedToPayment
+                        ? `Pay Now · ${formatSenToRm(preparation.itemsSubtotalSen + TOYYIBPAY_FPX_FEE_SEN)}`
+                        : "Resolve Issues Before Payment"}
               </span>
             </button>
 

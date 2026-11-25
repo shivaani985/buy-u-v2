@@ -1,4 +1,59 @@
-import type { CartItemView, CartSummary } from "./cart";
+import type { CartItemView, CartSellerGroup, CartSummary } from "./cart";
+
+export function filterCartSummaryByIds(
+  summary: CartSummary,
+  selectedCartItemIds: string[] | null | undefined
+): CartSummary {
+  if (!selectedCartItemIds || selectedCartItemIds.length === 0) {
+    return summary;
+  }
+  const allow = new Set(selectedCartItemIds);
+  const groups: CartSellerGroup[] = [];
+  let totalRowCount = 0;
+  let invalidRowCount = 0;
+  let totalQuantity = 0;
+  let validQuantity = 0;
+  let combinedSubtotalSen = 0;
+
+  for (const g of summary.groups) {
+    const items = g.items.filter((it) => allow.has(it.id));
+    if (items.length === 0) continue;
+    let groupValidQty = 0;
+    let groupInvalid = 0;
+    let groupSubtotal = 0;
+    for (const it of items) {
+      totalRowCount += 1;
+      totalQuantity += it.quantity;
+      if (it.isValid) {
+        validQuantity += it.quantity;
+        groupValidQty += it.quantity;
+        groupSubtotal += it.lineSubtotalSen;
+      } else {
+        invalidRowCount += 1;
+        groupInvalid += 1;
+      }
+    }
+    combinedSubtotalSen += groupSubtotal;
+    groups.push({
+      ...g,
+      items,
+      validQuantity: groupValidQty,
+      invalidRowCount: groupInvalid,
+      subtotalSen: groupSubtotal,
+    });
+  }
+
+  return {
+    groups,
+    sellerCount: groups.length,
+    totalRowCount,
+    invalidRowCount,
+    totalQuantity,
+    validQuantity,
+    combinedSubtotalSen,
+    hasIssues: invalidRowCount > 0,
+  };
+}
 
 export interface CheckoutLineItem {
   cartItem: CartItemView;

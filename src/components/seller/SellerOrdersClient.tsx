@@ -17,6 +17,7 @@ import {
 import { startConversationAction } from "@/app/messages/actions";
 import { verifySellerPickupPinAction } from "@/app/orders/actions";
 import { OrderTimeline } from "@/components/orders/OrderTimeline";
+import { ServiceOrderDetailsBlock } from "@/components/orders/ServiceOrderDetailsBlock";
 import { formatSenToRm, formatShortDate } from "@/lib/format";
 import {
   getOrderStatusBadge,
@@ -102,9 +103,15 @@ export function SellerOrdersClient({ orders }: SellerOrdersClientProps) {
     const key = `msg:${order.id}`;
     setBusyKey(key);
     try {
+      const firstItem = order.items[0];
+      const itemSummary = firstItem
+        ? `${firstItem.title}${order.items.length > 1 ? ` (+${order.items.length - 1} more)` : ""}`
+        : "your order";
       const res = await startConversationAction({
         sellerId: order.buyerId,
-        listingId: order.items[0]?.listingId ?? null,
+        listingId: firstItem?.listingId ?? null,
+        orderId: order.id,
+        initialMessage: `Hi, I'm reaching out regarding Order #${order.orderCode} (${itemSummary}).`,
       });
       if (!res.ok || !res.href) {
         setFeedbackByOrder((prev) => ({
@@ -303,6 +310,11 @@ export function SellerOrdersClient({ orders }: SellerOrdersClientProps) {
                     <span className="text-[#6B6779]">
                       {formatShortDate(order.createdAt)}
                     </span>
+                    {order.isServiceOrder ? (
+                      <span className="inline-flex items-center rounded-full bg-[#F3ECFC] px-2 py-0.5 text-[10.5px] font-bold text-[#4E2A84]">
+                        Service
+                      </span>
+                    ) : null}
                     {order.source === "offer" ? (
                       <>
                         <span className="text-[#C7C3D4]" aria-hidden="true">
@@ -317,7 +329,11 @@ export function SellerOrdersClient({ orders }: SellerOrdersClientProps) {
                   <span
                     className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-[11px] font-bold ${badge.toneClass}`}
                   >
-                    {badge.label}
+                    {order.isServiceOrder && statusLower === "paid"
+                      ? "Paid — Awaiting Service"
+                      : order.isServiceOrder && statusLower === "handed_over"
+                        ? "Service Delivered"
+                        : badge.label}
                   </span>
                 </div>
 
@@ -346,6 +362,11 @@ export function SellerOrdersClient({ orders }: SellerOrdersClientProps) {
                         <p className="truncate text-sm font-bold text-[#14121A]">
                           {item.title}
                         </p>
+                        {item.variantLabel ? (
+                          <p className="mt-0.5 truncate text-[11px] font-semibold text-[#4E2A84]">
+                            {item.variantLabel}
+                          </p>
+                        ) : null}
                         <p className="mt-0.5 text-xs text-[#6B6779]">
                           Qty {item.quantity} &times;{" "}
                           {formatSenToRm(item.unitSen)}
@@ -358,6 +379,11 @@ export function SellerOrdersClient({ orders }: SellerOrdersClientProps) {
                   ))}
                 </ul>
 
+                <ServiceOrderDetailsBlock
+                  orderId={order.id}
+                  items={order.items}
+                />
+
                 {/* Order Progress Timeline */}
                 <OrderTimeline
                   status={order.status}
@@ -365,6 +391,7 @@ export function SellerOrdersClient({ orders }: SellerOrdersClientProps) {
                   paidAt={order.paidAt}
                   handedOverAt={order.handedOverAt}
                   completedAt={order.completedAt}
+                  isService={order.isServiceOrder}
                 />
 
                 {/* Seller Verify Pickup PIN Panel (ONLY for eligible paid orders; NEVER reveals buyer PIN) */}
@@ -374,11 +401,16 @@ export function SellerOrdersClient({ orders }: SellerOrdersClientProps) {
                       <div>
                         <p className="inline-flex items-center gap-1.5 text-xs font-extrabold text-[#006A6D]">
                           <KeyRound className="h-3.5 w-3.5" aria-hidden="true" />
-                          <span>Verify Buyer Pickup PIN</span>
+                          <span>
+                            {order.isServiceOrder
+                              ? "Verify Service Completion PIN"
+                              : "Verify Buyer Pickup PIN"}
+                          </span>
                         </p>
                         <p className="mt-0.5 text-xs text-[#4A4656]">
-                          Ask the buyer for their private 6-digit PIN in person
-                          during campus handover.
+                          {order.isServiceOrder
+                            ? "Ask the buyer for their private 6-digit Service Completion PIN once the service is delivered."
+                            : "Ask the buyer for their private 6-digit PIN in person during campus handover."}
                         </p>
                       </div>
 
@@ -490,7 +522,11 @@ export function SellerOrdersClient({ orders }: SellerOrdersClientProps) {
                       ) : (
                         <MessageCircle className="h-3.5 w-3.5 text-[#4E2A84]" />
                       )}
-                      <span>Contact Buyer / Arrange Collection</span>
+                      <span>
+                        {order.isServiceOrder
+                          ? "Contact Customer"
+                          : "Contact Customer / Arrange Collection"}
+                      </span>
                     </button>
                   </div>
 

@@ -171,7 +171,7 @@ export async function addToCartAction(
 
   const { data: rawListing, error: listingErr } = await supabase
     .from("listings")
-    .select("id,seller_id,kind,status,has_variants,quantity,reserved_quantity")
+    .select("id,seller_id,kind,status,has_variants,quantity,reserved_quantity,accepting_requests")
     .eq("id", listingId)
     .maybeSingle();
 
@@ -190,6 +190,7 @@ export async function addToCartAction(
     has_variants: boolean | null;
     quantity: number | null;
     reserved_quantity: number | null;
+    accepting_requests: boolean | null;
   };
 
   let selectedVariant: CartVariantSnapshot | null = null;
@@ -258,6 +259,7 @@ export async function addToCartAction(
     selectedVariant,
     requestedQuantity,
     existingCartQuantity,
+    acceptingRequests: listing.accepting_requests,
   });
 
   if (!validation.ok) {

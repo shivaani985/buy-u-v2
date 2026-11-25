@@ -7,6 +7,7 @@ import {
   isValidUuid,
   mapAtomicUpdateError,
   validateListingEditInput,
+  validateVariantsInput,
   type EditableListingStatus,
   type ExistingVariantRecord,
   type VariantDraftInput,
@@ -25,6 +26,25 @@ export interface SellerActionState {
   status: "idle" | "success" | "error";
   message?: string;
   createdId?: string;
+}
+
+/**
+ * Cleans up ONLY newly created, unpersisted uploads from a failed request,
+ * never touching any pre-existing or historical storage paths.
+ */
+async function cleanupNewlyUploadedListingFiles(
+  supabase: NonNullable<Awaited<ReturnType<typeof createSupabaseServerClient>>>,
+  newlyUploadedPaths: string[],
+  protectedPaths: Iterable<string> = []
+): Promise<void> {
+  if (newlyUploadedPaths.length === 0) return;
+  const protectedSet = new Set(protectedPaths);
+  const safeTargets = newlyUploadedPaths.filter(
+    (p) => typeof p === "string" && p.length > 0 && !protectedSet.has(p)
+  );
+  if (safeTargets.length > 0) {
+    await supabase.storage.from("listings").remove(safeTargets);
+  }
 }
 
 async function requireEligibleStudent() {
@@ -270,24 +290,77 @@ export async function createListingAction(
   const listingType = String(
     formData.get("listingType") ?? "preloved"
   ) as SellListingKind;
+  const hasVariantsRequested =
+    formData.get("hasVariants") === "on" &&
+    (listingType === "business" || listingType === "food");
+  const optionGroups = safeParseJson<string[]>(
+    formData.get("optionGroupsJson"),
+    []
+  );
+  const variantsInput = safeParseJson<VariantDraftInput[]>(
+    formData.get("variantsJson"),
+    []
+  );
+
+  const variantsCheck = validateVariantsInput({
+    hasVariants: hasVariantsRequested,
+    isService: listingType === "service",
+    targetStatus: intent === "published" ? "published" : "draft",
+    optionGroups,
+    variants: variantsInput,
+    existingVariants: [],
+    referencedVariantIds: new Set<string>(),
+  });
+  if (!variantsCheck.ok) {
+    return { status: "error", message: variantsCheck.error };
+  }
+
+  const effectivePriceRm =
+    variantsCheck.hasVariants && variantsCheck.minPriceSen !== null
+      ? (variantsCheck.minPriceSen / 100).toFixed(2)
+      : String(formData.get("priceRm") ?? "");
+  const effectiveQuantity =
+    variantsCheck.hasVariants && variantsCheck.totalQuantity !== null
+      ? String(variantsCheck.totalQuantity)
+      : String(formData.get("quantity") ?? "1");
 
   const validated = validateListingInput({
     title: String(formData.get("title") ?? ""),
     description: String(formData.get("description") ?? ""),
     listingType,
     categoryId: String(formData.get("categoryId") ?? ""),
-    priceRm: String(formData.get("priceRm") ?? ""),
-    quantity: String(formData.get("quantity") ?? "1"),
+    priceRm: effectivePriceRm,
+    quantity: effectiveQuantity,
     collectionAreaId: String(formData.get("collectionAreaId") ?? ""),
     condition: String(formData.get("condition") ?? ""),
     status: intent === "published" ? "published" : "draft",
     rulesAcknowledged: formData.get("rulesAcknowledged") === "on",
     allowOffers: formData.get("allowOffers") === "on",
+    hasVariants: variantsCheck.hasVariants,
   });
 
   if (!validated.ok) {
     return { status: "error", message: validated.error };
   }
+
+  const rawVariationPhotoGroup = String(
+    formData.get("variationPhotoGroup") ?? ""
+  ).trim();
+  const matchedPhotoGroup =
+    variantsCheck.hasVariants && rawVariationPhotoGroup
+      ? variantsCheck.optionGroups.find(
+          (g) => g.toLowerCase() === rawVariationPhotoGroup.toLowerCase()
+        ) ?? null
+      : null;
+
+  if (variantsCheck.hasVariants && rawVariationPhotoGroup && !matchedPhotoGroup) {
+    return {
+      status: "error",
+      message: "Selected photo variation group does not match any option group.",
+    };
+  }
+  const variationPhotoGroup = matchedPhotoGroup;
+  const photoKeys = safeParseJson<string[]>(formData.get("photoKeysJson"), []);
 
   // Automatically initialize storefront on first listing (idempotent, no duplicates)
   const fallbackName =
@@ -303,7 +376,7 @@ export async function createListingAction(
     return { status: "error", message: sfInit.error };
   }
 
-  // Validate & upload up to 4 photos into public listings bucket scoped to seller_id
+  // Validate & upload up to MAX_LISTING_PHOTOS into public listings bucket scoped to seller_id
   const rawFiles = formData.getAll("photos").filter(
     (entry): entry is File => entry instanceof File && entry.size > 0
   );
@@ -315,6 +388,7 @@ export async function createListingAction(
   }
 
   const uploadedPaths: string[] = [];
+  const photoKeyToPath = new Map<string, string>();
   for (let i = 0; i < rawFiles.length; i++) {
     const file = rawFiles[i];
     if (!file) continue;
@@ -324,6 +398,7 @@ export async function createListingAction(
       size: file.size,
     });
     if (!metaCheck.ok) {
+      await cleanupNewlyUploadedListingFiles(auth.supabase, uploadedPaths);
       return { status: "error", message: metaCheck.error };
     }
 
@@ -337,18 +412,165 @@ export async function createListingAction(
       });
 
     if (uploadErr) {
+      await cleanupNewlyUploadedListingFiles(auth.supabase, uploadedPaths);
       return {
         status: "error",
         message: `Photo upload failed: ${uploadErr.message}`,
       };
     }
     uploadedPaths.push(storagePath);
+    const key = photoKeys[i];
+    if (typeof key === "string" && key.trim()) {
+      photoKeyToPath.set(key.trim(), storagePath);
+    }
+  }
+  const allowedUploadedSet = new Set(uploadedPaths);
+
+  const resolvedVariantRows: Array<{
+    option_values: Record<string, string>;
+    price_sen: number;
+    quantity: number;
+    reserved_quantity: number;
+    active: boolean;
+    image_path: string | null;
+  }> = [];
+
+  if (variantsCheck.hasVariants && variantsCheck.variants && variantsCheck.variants.length > 0) {
+    for (const v of variantsCheck.variants) {
+      const rawRef = v.image_path;
+      let mappedPath: string | null = null;
+      if (rawRef) {
+        if (!variationPhotoGroup) {
+          await cleanupNewlyUploadedListingFiles(auth.supabase, uploadedPaths);
+          return {
+            status: "error",
+            message: "Choose which variation controls photos before assigning variation images.",
+          };
+        }
+        mappedPath =
+          photoKeyToPath.get(rawRef) ??
+          (allowedUploadedSet.has(rawRef) ? rawRef : null);
+        if (!mappedPath) {
+          await cleanupNewlyUploadedListingFiles(auth.supabase, uploadedPaths);
+          return {
+            status: "error",
+            message: "One or more assigned variation photos are missing from uploaded listing photos.",
+          };
+        }
+      }
+      resolvedVariantRows.push({
+        option_values: v.option_values,
+        price_sen: v.price_sen,
+        quantity: v.quantity,
+        reserved_quantity: 0,
+        active: v.active,
+        image_path: mappedPath,
+      });
+    }
   }
 
+  const hasRequestedVariationPhotos =
+    Boolean(variationPhotoGroup) ||
+    resolvedVariantRows.some((v) => v.image_path !== null);
+
   const now = new Date().toISOString();
-  const { data: inserted, error: insertErr } = await auth.supabase
-    .from("listings")
-    .insert({
+  const rawServiceMode = String(formData.get("serviceMode") ?? "").trim();
+  const serviceMode =
+    validated.data.dbKind === "service"
+      ? rawServiceMode || "in_person"
+      : null;
+  const rawAvailabilityMode = String(
+    formData.get("availabilityMode") ?? ""
+  ).trim();
+  const availabilityMode = rawAvailabilityMode || "ready";
+  const preorderCloseAt =
+    String(formData.get("preorderCloseAt") ?? "").trim() || null;
+  const pickupWindowStart =
+    String(formData.get("pickupWindowStart") ?? "").trim() || null;
+  const pickupWindowEnd =
+    String(formData.get("pickupWindowEnd") ?? "").trim() || null;
+  const pickupNote = String(formData.get("pickupNote") ?? "").trim();
+  const foodNotes = String(formData.get("foodNotes") ?? "").trim();
+  const rawServiceDetails = formData.get("serviceDetails");
+  const parsedServiceDetails =
+    typeof rawServiceDetails === "string" && rawServiceDetails.trim().length > 0
+      ? (() => {
+          try {
+            return JSON.parse(rawServiceDetails);
+          } catch {
+            return rawServiceDetails.trim();
+          }
+        })()
+      : undefined;
+
+  const baseListingPayload: Record<string, unknown> = {
+    kind: validated.data.dbKind,
+    is_food: validated.data.isFood,
+    title: validated.data.title,
+    description: validated.data.description,
+    category_id: validated.data.categoryId,
+    condition: validated.data.condition,
+    limitations: "",
+    price_sen: validated.data.priceSen,
+    quantity: validated.data.quantity,
+    collection_area_id: validated.data.collectionAreaId,
+    allow_offers: validated.data.allowOffers,
+    has_variants: variantsCheck.hasVariants,
+    option_groups: variantsCheck.optionGroups,
+    variation_photo_group: variationPhotoGroup,
+    availability_mode: availabilityMode,
+    preorder_close_at: preorderCloseAt,
+    pickup_window_start: pickupWindowStart,
+    pickup_window_end: pickupWindowEnd,
+    pickup_note: pickupNote,
+    food_notes: foodNotes,
+    service_mode: serviceMode,
+    accepting_requests: validated.data.dbKind === "service",
+    image_paths: uploadedPaths,
+    rules_acknowledged: validated.data.rulesAcknowledged,
+    status: validated.data.status,
+  };
+  if (parsedServiceDetails !== undefined) {
+    baseListingPayload.service_details = parsedServiceDetails;
+  }
+
+  let createdListingId: string | null = null;
+
+  // Primary path: single-transaction atomic listing + variation creation
+  const atomicCreateRes = await auth.supabase.rpc(
+    "create_listing_with_variations_atomic",
+    {
+      p_listing: baseListingPayload,
+      p_variants: resolvedVariantRows,
+    }
+  );
+
+  if (!atomicCreateRes.error && typeof atomicCreateRes.data === "string") {
+    createdListingId = atomicCreateRes.data;
+  } else if (
+    atomicCreateRes.error &&
+    !/Could not find the function.*create_listing_with_variations_atomic/i.test(
+      atomicCreateRes.error.message
+    )
+  ) {
+    await cleanupNewlyUploadedListingFiles(auth.supabase, uploadedPaths);
+    return {
+      status: "error",
+      message: `Unable to save listing: ${atomicCreateRes.error.message}`,
+    };
+  } else {
+    // Pre-migration fallback: never discard requested variation photos
+    if (hasRequestedVariationPhotos) {
+      await cleanupNewlyUploadedListingFiles(auth.supabase, uploadedPaths);
+      return {
+        status: "error",
+        message:
+          "Variation photo assignments require applying the Phase 10V database migration first.",
+      };
+    }
+
+    // Draft-first safe recovery: insert as draft BEFORE adding variants, then promote only after variants succeed
+    const draftPayload: Record<string, unknown> = {
       seller_id: auth.userId,
       kind: validated.data.dbKind,
       is_food: validated.data.isFood,
@@ -362,40 +584,163 @@ export async function createListingAction(
       reserved_quantity: 0,
       collection_area_id: validated.data.collectionAreaId,
       allow_offers: validated.data.allowOffers,
-      has_variants: false,
-      option_groups: [],
-      availability_mode: "ready",
-      pickup_note: "",
-      food_notes: "",
+      has_variants: variantsCheck.hasVariants,
+      option_groups: variantsCheck.optionGroups,
+      availability_mode: availabilityMode,
+      preorder_close_at: preorderCloseAt,
+      pickup_window_start: pickupWindowStart,
+      pickup_window_end: pickupWindowEnd,
+      pickup_note: pickupNote,
+      food_notes: foodNotes,
+      service_mode: serviceMode,
       accepting_requests: validated.data.dbKind === "service",
       image_paths: uploadedPaths,
       rules_acknowledged: validated.data.rulesAcknowledged,
-      status: validated.data.status,
-      published_at: validated.data.status === "published" ? now : null,
+      status: "draft",
+      published_at: null,
       updated_at: now,
-    })
-    .select("id")
-    .single();
-
-  if (insertErr) {
-    return {
-      status: "error",
-      message: `Unable to save listing: ${insertErr.message}`,
     };
+    if (parsedServiceDetails !== undefined) {
+      draftPayload.service_details = parsedServiceDetails;
+    }
+
+    const { data: insertedDraft, error: insertErr } = await auth.supabase
+      .from("listings")
+      .insert(draftPayload)
+      .select("id")
+      .single();
+
+    if (insertErr || !insertedDraft?.id) {
+      await cleanupNewlyUploadedListingFiles(auth.supabase, uploadedPaths);
+      return {
+        status: "error",
+        message: `Unable to save listing: ${insertErr?.message ?? "Unknown error"}`,
+      };
+    }
+
+    createdListingId = insertedDraft.id;
+
+    if (resolvedVariantRows.length > 0) {
+      const legacyVarRows = resolvedVariantRows
+        .filter((v) => v.active)
+        .map(({ image_path: _omitImg, ...rest }) => {
+          void _omitImg;
+          return { ...rest, listing_id: createdListingId };
+        });
+
+      const { error: varErr } = await auth.supabase
+        .from("listing_variants")
+        .insert(legacyVarRows);
+
+      if (varErr) {
+        await auth.supabase
+          .from("listings")
+          .delete()
+          .eq("id", createdListingId);
+        await cleanupNewlyUploadedListingFiles(auth.supabase, uploadedPaths);
+        return {
+          status: "error",
+          message: `Unable to save listing variants: ${varErr.message}`,
+        };
+      }
+    }
+
+    if (validated.data.status === "published") {
+      const { error: pubErr } = await auth.supabase
+        .from("listings")
+        .update({
+          status: "published",
+          published_at: now,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", createdListingId)
+        .eq("seller_id", auth.userId);
+
+      if (pubErr) {
+        await auth.supabase
+          .from("listings")
+          .delete()
+          .eq("id", createdListingId);
+        await cleanupNewlyUploadedListingFiles(auth.supabase, uploadedPaths);
+        return {
+          status: "error",
+          message: `Unable to publish listing: ${pubErr.message}`,
+        };
+      }
+    }
+  }
+
+  if (!createdListingId) {
+    await cleanupNewlyUploadedListingFiles(auth.supabase, uploadedPaths);
+    return { status: "error", message: "Unable to save listing." };
   }
 
   revalidatePath("/seller");
   revalidatePath("/marketplace");
+  revalidatePath("/services");
   revalidatePath("/");
 
   return {
     status: "success",
-    createdId: inserted?.id,
+    createdId: createdListingId,
     message:
       validated.data.status === "published"
         ? "Listing published to the UMS campus marketplace."
         : "Listing saved as a draft in your Seller Hub.",
   };
+}
+
+export async function deleteListingAction(
+  listingId: string
+): Promise<{ ok: boolean; message: string }> {
+  const auth = await requireEligibleStudent();
+  if (!auth.ok) {
+    return { ok: false, message: auth.error };
+  }
+
+  const { data: existing, error: fetchErr } = await auth.supabase
+    .from("listings")
+    .select("id,seller_id,reserved_quantity,image_paths")
+    .eq("id", listingId)
+    .maybeSingle();
+
+  if (fetchErr || !existing) {
+    return { ok: false, message: "Listing not found." };
+  }
+  if (existing.seller_id !== auth.userId) {
+    return { ok: false, message: "You can only delete your own listings." };
+  }
+  if ((existing.reserved_quantity ?? 0) > 0) {
+    return {
+      ok: false,
+      message:
+        "Cannot delete this listing while buyers have active reserved stock.",
+    };
+  }
+
+  const { error: delErr } = await auth.supabase
+    .from("listings")
+    .delete()
+    .eq("id", listingId)
+    .eq("seller_id", auth.userId);
+
+  if (delErr) {
+    if (delErr.code === "23503") {
+      return {
+        ok: false,
+        message:
+          "This listing has order or offer history and cannot be permanently deleted. Use Archive Listing instead.",
+      };
+    }
+    return { ok: false, message: `Unable to delete listing: ${delErr.message}` };
+  }
+
+  revalidatePath("/seller");
+  revalidatePath("/marketplace");
+  revalidatePath("/services");
+  revalidatePath("/");
+
+  return { ok: true, message: "Listing deleted permanently." };
 }
 
 function safeParseJson<T>(raw: FormDataEntryValue | null, fallback: T): T {
@@ -544,8 +889,35 @@ export async function updateListingAction(
     return { status: "error", message: validated.error };
   }
 
-  // Upload any newly added photos (track separately for safe rollback cleanup)
+  const newPhotoKeys = safeParseJson<string[]>(
+    formData.get("newPhotoKeysJson"),
+    []
+  );
+  const rawVariationPhotoGroup = String(
+    formData.get("variationPhotoGroup") ?? ""
+  ).trim();
+  const variationPhotoGroup =
+    validated.data.hasVariants && rawVariationPhotoGroup
+      ? validated.data.optionGroups.find(
+          (g) => g.toLowerCase() === rawVariationPhotoGroup.toLowerCase()
+        ) ?? null
+      : null;
+
+  if (
+    validated.data.hasVariants &&
+    rawVariationPhotoGroup &&
+    !variationPhotoGroup
+  ) {
+    return {
+      status: "error",
+      message: "Selected photo variation group does not match any active option group.",
+    };
+  }
+
+  // Upload any newly added photos (upsert: false, unique keys; rollback removes ONLY newly uploaded files)
+  const existingProtectedPaths = existing.image_paths ?? [];
   const newlyUploadedPaths: string[] = [];
+  const newPhotoKeyToPath = new Map<string, string>();
   for (let i = 0; i < rawFiles.length; i++) {
     const file = rawFiles[i];
     if (!file) continue;
@@ -555,9 +927,11 @@ export async function updateListingAction(
       size: file.size,
     });
     if (!metaCheck.ok) {
-      if (newlyUploadedPaths.length > 0) {
-        await auth.supabase.storage.from("listings").remove(newlyUploadedPaths);
-      }
+      await cleanupNewlyUploadedListingFiles(
+        auth.supabase,
+        newlyUploadedPaths,
+        existingProtectedPaths
+      );
       return { status: "error", message: metaCheck.error };
     }
 
@@ -571,18 +945,77 @@ export async function updateListingAction(
       });
 
     if (uploadErr) {
-      if (newlyUploadedPaths.length > 0) {
-        await auth.supabase.storage.from("listings").remove(newlyUploadedPaths);
-      }
+      await cleanupNewlyUploadedListingFiles(
+        auth.supabase,
+        newlyUploadedPaths,
+        existingProtectedPaths
+      );
       return {
         status: "error",
         message: `Photo upload failed: ${uploadErr.message}`,
       };
     }
     newlyUploadedPaths.push(storagePath);
+    const key = newPhotoKeys[i];
+    if (typeof key === "string" && key.trim()) {
+      newPhotoKeyToPath.set(key.trim(), storagePath);
+    }
   }
 
   const finalPhotoPaths = [...keptPhotoPaths, ...newlyUploadedPaths];
+  const allowedFinalPhotoSet = new Set(finalPhotoPaths);
+
+  const variantImageMappings: Array<{
+    variant_id: string | null;
+    option_values: Record<string, string>;
+    image_path: string | null;
+    active: boolean;
+  }> = [];
+
+  for (const v of validated.data.variants ?? []) {
+    const rawRef = v.image_path;
+    let resolvedPath: string | null = null;
+    if (rawRef) {
+      if (!variationPhotoGroup) {
+        await cleanupNewlyUploadedListingFiles(
+          auth.supabase,
+          newlyUploadedPaths,
+          existingProtectedPaths
+        );
+        return {
+          status: "error",
+          message:
+            "Choose which variation controls photos before assigning variation images.",
+        };
+      }
+      resolvedPath =
+        newPhotoKeyToPath.get(rawRef) ??
+        (allowedFinalPhotoSet.has(rawRef) ? rawRef : null);
+      if (!resolvedPath) {
+        await cleanupNewlyUploadedListingFiles(
+          auth.supabase,
+          newlyUploadedPaths,
+          existingProtectedPaths
+        );
+        return {
+          status: "error",
+          message:
+            "One or more assigned variation photos are missing from the listing gallery.",
+        };
+      }
+    }
+    variantImageMappings.push({
+      variant_id: v.id ?? null,
+      option_values: v.option_values,
+      image_path: resolvedPath,
+      active: v.active,
+    });
+  }
+
+  const hasRequestedVariationPhotos =
+    Boolean(variationPhotoGroup) ||
+    variantImageMappings.some((m) => m.image_path !== null);
+
   const now = new Date().toISOString();
 
   const pPayload = {
@@ -607,24 +1040,75 @@ export async function updateListingAction(
         : existing.published_at,
   };
 
-  // Atomic update with optimistic concurrency check via existing DB RPC
-  const { error: rpcError } = await auth.supabase.rpc("update_listing_atomic", {
+  // Strip `image_path` & `active` before passing to `update_listing_atomic`;
+  // `save_listing_edit_atomic` persists both edits + `active` + variation photos in ONE transaction.
+  const rpcVariants = (validated.data.variants ?? []).map(
+    ({ image_path: _img, active: _act, ...rest }) => {
+      void _img;
+      void _act;
+      return rest;
+    }
+  );
+
+  let { error: saveErr } = await auth.supabase.rpc("save_listing_edit_atomic", {
     p_listing_id: listingId,
     p_expected_updated_at: expectedUpdatedAt,
     p_payload: pPayload,
-    p_variants: validated.data.variants,
+    p_variants: rpcVariants,
+    p_variation_photo_group: variationPhotoGroup,
+    p_variant_images: variantImageMappings,
   });
 
-  if (rpcError) {
-    // Roll back any newly uploaded orphan images without touching existing order-referenced files
-    if (newlyUploadedPaths.length > 0) {
-      await auth.supabase.storage.from("listings").remove(newlyUploadedPaths);
+  if (
+    saveErr &&
+    /Could not find the function.*save_listing_edit_atomic/i.test(saveErr.message)
+  ) {
+    if (hasRequestedVariationPhotos) {
+      await cleanupNewlyUploadedListingFiles(
+        auth.supabase,
+        newlyUploadedPaths,
+        existingProtectedPaths
+      );
+      return {
+        status: "error",
+        message:
+          "Variation photo assignments require applying the Phase 10V database migration first.",
+      };
     }
+
+    // Legacy pre-migration path omits inactive rows so `update_listing_atomic` deactivates them safely
+    const legacyActiveVariants = (validated.data.variants ?? [])
+      .filter((v) => v.active)
+      .map(({ image_path: _img, active: _act, ...rest }) => {
+        void _img;
+        void _act;
+        return rest;
+      });
+    const legacyRes = await auth.supabase.rpc("update_listing_atomic", {
+      p_listing_id: listingId,
+      p_expected_updated_at: expectedUpdatedAt,
+      p_payload: pPayload,
+      p_variants: legacyActiveVariants,
+    });
+    saveErr = legacyRes.error;
+  }
+
+  if (saveErr) {
+    // Roll back ONLY newly uploaded orphan files; never delete removed historical paths
+    await cleanupNewlyUploadedListingFiles(
+      auth.supabase,
+      newlyUploadedPaths,
+      existingProtectedPaths
+    );
     return {
       status: "error",
-      message: mapAtomicUpdateError(rpcError.message),
+      message: mapAtomicUpdateError(saveErr.message),
     };
   }
+
+  // Historical storage files removed from `image_paths` are intentionally retained in
+  // the `listings` bucket so historical `order_items.image_path` and `offers.variant_image_path`
+  // snapshots remain intact cleanly.
 
   revalidatePath("/seller");
   revalidatePath(`/sell/${listingId}`);

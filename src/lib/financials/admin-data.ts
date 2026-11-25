@@ -17,6 +17,7 @@ export interface AdminRefundRow {
   disputeId: string;
   orderId: string;
   orderCode: string;
+  isServiceOrder: boolean;
   refundType: string;
   refundAmountSen: number;
   commissionReversalSen: number;
@@ -144,6 +145,19 @@ export async function getAdminFinancialsData(
   }>;
 
   const orderCodeMap = new Map(orders.map((o) => [o.id, o.order_code]));
+  const refundOrderIds = Array.from(new Set(rawRefunds.map((r) => r.order_id)));
+  const { data: serviceRefundItems } = refundOrderIds.length
+    ? await service
+        .from("order_items")
+        .select("order_id")
+        .in("order_id", refundOrderIds)
+        .eq("is_service", true)
+    : { data: [] };
+  const serviceOrderIds = new Set(
+    ((serviceRefundItems ?? []) as Array<{ order_id: string }>).map(
+      (r) => r.order_id
+    )
+  );
   const sellerIds = Array.from(new Set(rawPayouts.map((w) => w.seller_id)));
   const { data: sellerProfiles } = sellerIds.length
     ? await service
@@ -178,6 +192,7 @@ export async function getAdminFinancialsData(
     disputeId: r.dispute_id,
     orderId: r.order_id,
     orderCode: orderCodeMap.get(r.order_id) ?? r.order_id.slice(0, 8),
+    isServiceOrder: serviceOrderIds.has(r.order_id),
     refundType: r.refund_type,
     refundAmountSen: r.refund_amount_sen,
     commissionReversalSen: r.commission_reversal_sen,

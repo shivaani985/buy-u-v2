@@ -7,7 +7,6 @@ import {
   REPORT_REASONS,
   validateFreeNoticeInput,
   validateReviewInput,
-  validateServiceRequestInput,
 } from "@/lib/marketplace/phase8";
 import { evaluateSellerEligibility } from "@/lib/seller/validation";
 import {
@@ -33,114 +32,33 @@ export async function recordListingViewAction(listingId: string): Promise<void> 
 }
 
 // -----------------------------------------------------------------------------
-// Phase 8A: Services Marketplace (Off-Platform Campus Agreement)
+// Phase 8A (RETIRED in Phase 10S): Services are purchased directly via Cart & Checkout
 // -----------------------------------------------------------------------------
-export async function createServiceRequestAction(input: {
+export async function createServiceRequestAction(_input: {
   listingId: string;
   mode: string;
   requirements: string;
   preferredDate?: string;
 }): Promise<MarketplaceActionResult> {
-  if (!isValidUuid(input.listingId)) {
-    return { ok: false, message: "Invalid service listing reference." };
-  }
-  const session = await getSessionSummary();
-  const elig = evaluateBuyerEligibility(session);
-  if (!elig.eligible) {
-    return { ok: false, message: elig.reason || "Sign in with an active UMS account." };
-  }
-  const check = validateServiceRequestInput(input);
-  if (!check.ok) return { ok: false, message: check.error };
-
-  const supabase = await createSupabaseServerClient();
-  if (!supabase) return { ok: false, message: "Database unavailable." };
-
-  const { data, error } = await supabase.rpc("create_service_request_atomic", {
-    p_listing_id: input.listingId,
-    p_mode: check.mode,
-    p_requirements: check.requirements,
-    p_preferred_date: check.preferredDate,
-  });
-
-  if (error) {
-    if (error.message.includes("INTERACTION_BLOCKED")) {
-      return { ok: false, message: "You cannot submit a request to this member." };
-    }
-    if (error.message.includes("DUPLICATE_ACTIVE_SERVICE_REQUEST")) {
-      return { ok: false, message: "You already have an active request for this service." };
-    }
-    if (error.message.includes("CANNOT_REQUEST_OWN_SERVICE")) {
-      return { ok: false, message: "You cannot request your own service." };
-    }
-    if (error.message.includes("SERVICE_PAUSED")) {
-      return { ok: false, message: "This provider has paused new requests." };
-    }
-    if (error.message.includes("INVALID_SERVICE_MODE")) {
-      return { ok: false, message: "Selected delivery mode is not supported by this service." };
-    }
-    if (error.message.includes("PROVIDER_INACTIVE")) {
-      return { ok: false, message: "This service provider is currently unavailable." };
-    }
-    return { ok: false, message: "Could not submit service request right now." };
-  }
-
-  const row = (Array.isArray(data) ? data[0] : data) as { out_request_code?: string } | undefined;
-  revalidatePath("/services");
-  revalidatePath("/requests");
-  revalidatePath("/seller/services");
+  void _input;
   return {
-    ok: true,
-    reference: row?.out_request_code,
-    message: `Service request ${row?.out_request_code ?? ""} submitted. Track progress in My Requests.`,
+    ok: false,
+    message:
+      "Service requests have been retired. Add the service to your cart and complete checkout directly.",
   };
 }
 
-export async function updateServiceRequestAction(input: {
+export async function updateServiceRequestAction(_input: {
   requestId: string;
   action: "accept" | "decline" | "start" | "deliver" | "complete" | "cancel";
   note?: string;
 }): Promise<MarketplaceActionResult> {
-  if (!isValidUuid(input.requestId)) {
-    return { ok: false, message: "Invalid service request reference." };
-  }
-  const session = await getSessionSummary();
-  const elig = evaluateBuyerEligibility(session);
-  if (!elig.eligible) {
-    return { ok: false, message: elig.reason || "Active member access required." };
-  }
-  const supabase = await createSupabaseServerClient();
-  if (!supabase) return { ok: false, message: "Database unavailable." };
-
-  const { data, error } = await supabase.rpc("update_service_request_status_atomic", {
-    p_request_id: input.requestId,
-    p_action: input.action,
-    p_note: input.note?.trim() || null,
-  });
-
-  if (error) {
-    if (error.message.includes("BUYER_ACCOUNT_INACTIVE")) {
-      return { ok: false, message: "Cannot accept request because the requesting member's account is no longer active." };
-    }
-    if (error.message.includes("INCOMPATIBLE_SERVICE_MODE")) {
-      return { ok: false, message: "Requested service mode is no longer supported by this listing." };
-    }
-    return { ok: false, message: "Could not update service request status." };
-  }
-
-  const row = (Array.isArray(data) ? data[0] : data) as { out_status?: string } | undefined;
-  revalidatePath("/requests");
-  revalidatePath("/seller/services");
-  revalidatePath("/seller/analytics");
-
-  if (row?.out_status === "expired") {
-    return {
-      ok: false,
-      message:
-        "This service request expired after the 48-hour response deadline and has been marked expired.",
-    };
-  }
-
-  return { ok: true, message: `Service request updated (${input.action}).` };
+  void _input;
+  return {
+    ok: false,
+    message:
+      "Legacy service requests are retired. Manage service orders in My Orders or Seller Orders.",
+  };
 }
 
 // -----------------------------------------------------------------------------

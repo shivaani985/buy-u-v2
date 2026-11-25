@@ -5,6 +5,7 @@ import {
 } from "@/components/seller/SellerBankClient";
 import { SellerGate } from "@/components/seller/SellerGate";
 import { SellerNav } from "@/components/seller/SellerNav";
+import { getSellerNewOrderCount } from "@/lib/seller/data";
 import { evaluateSellerEligibility } from "@/lib/seller/validation";
 import {
   createSupabaseServerClient,
@@ -26,7 +27,10 @@ export default async function SellerBankPage() {
     return <SellerGate eligibility={eligibility} nextPath="/seller/bank" />;
   }
 
-  const supabase = await createSupabaseServerClient();
+  const [supabase, newOrderCount] = await Promise.all([
+    createSupabaseServerClient(),
+    getSellerNewOrderCount(session),
+  ]);
   let account: MaskedSellerBankAccount | null = null;
 
   if (supabase && session.profile?.id) {
@@ -62,7 +66,7 @@ export default async function SellerBankPage() {
 
   return (
     <div className="mx-auto w-full max-w-[1200px] space-y-6 px-4 py-6 sm:px-6 lg:px-10">
-      <SellerNav />
+      <SellerNav newOrderCount={newOrderCount} />
       <div>
         <h1 className="text-2xl font-extrabold tracking-[-0.02em] text-[#14121A] sm:text-3xl">
           Payout Bank Account

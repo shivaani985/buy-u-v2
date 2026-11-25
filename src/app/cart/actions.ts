@@ -81,7 +81,7 @@ export async function updateCartItemQuantityAction(input: {
     supabase
       .from("listings")
       .select(
-        "id,seller_id,kind,status,has_variants,price_sen,quantity,reserved_quantity"
+        "id,seller_id,kind,status,has_variants,price_sen,quantity,reserved_quantity,accepting_requests"
       )
       .eq("id", cartRow.listing_id)
       .maybeSingle(),
@@ -110,6 +110,7 @@ export async function updateCartItemQuantityAction(input: {
     price_sen: number | null;
     quantity: number | null;
     reserved_quantity: number | null;
+    accepting_requests: boolean | null;
   } | null;
 
   const rawVariant = variantRes.data as {
@@ -131,6 +132,7 @@ export async function updateCartItemQuantityAction(input: {
         priceSen: Number(rawListing.price_sen ?? 0),
         quantity: Number(rawListing.quantity ?? 0),
         reservedQuantity: Number(rawListing.reserved_quantity ?? 0),
+        acceptingRequests: rawListing.accepting_requests,
       }
     : null;
 

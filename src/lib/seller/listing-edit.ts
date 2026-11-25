@@ -36,6 +36,7 @@ export interface ExistingVariantRecord {
   quantity: number;
   reservedQuantity: number;
   active: boolean;
+  imagePath?: string | null;
 }
 
 export interface VariantDraftInput {
@@ -43,16 +44,21 @@ export interface VariantDraftInput {
   optionValues: Record<string, string>;
   priceRm: string;
   quantity: string | number;
+  reservedQuantity?: number;
+  isLocked?: boolean;
   active: boolean;
+  imagePath?: string | null;
 }
 
-export const MAX_EDIT_PHOTOS = 5;
+export const MAX_EDIT_PHOTOS = 10;
 
 export interface ValidatedVariantPayload {
   id?: string;
   option_values: Record<string, string>;
   price_sen: number;
   quantity: number;
+  active: boolean;
+  image_path: string | null;
 }
 
 const UUID_REGEX =
@@ -181,7 +187,14 @@ export function validateVariantsInput(input: {
   if (input.variants.length === 0) {
     return {
       ok: false,
-      error: "Add at least one variant when product variants are enabled.",
+      error: "Add at least one variation option when Variations & Inventory are enabled.",
+    };
+  }
+
+  if (input.variants.length > 50) {
+    return {
+      ok: false,
+      error: "A listing can have at most 50 variation combinations.",
     };
   }
 
@@ -206,19 +219,14 @@ export function validateVariantsInput(input: {
   }
 
   const seenKeys = new Set<string>();
-  const validatedActive: ValidatedVariantPayload[] = [];
+  const validatedAll: ValidatedVariantPayload[] = [];
   let totalQuantity = 0;
   let minPriceSen: number | null = null;
+  let activeCount = 0;
 
   for (let i = 0; i < input.variants.length; i++) {
     const v = input.variants[i];
     if (!v) continue;
-
-    // Inactive variants are intentionally omitted from p_variants so the hosted RPC
-    // marks them active=false while preserving historical order_items references.
-    if (!v.active) {
-      continue;
-    }
 
     const cleanValues: Record<string, string> = {};
     for (const group of groups) {
@@ -256,26 +264,43 @@ export function validateVariantsInput(input: {
 
     const existing = v.id ? existingMap.get(v.id) : undefined;
     const reserved = existing?.reservedQuantity ?? 0;
+    const isActive = Boolean(v.active);
+    if (reserved > 0 && !isActive) {
+      return {
+        ok: false,
+        error:
+          "A variant with active reserved stock cannot be deactivated until reservations clear.",
+      };
+    }
+
     const parsedQty = Number.parseInt(String(v.quantity ?? "0"), 10);
     const stockRes = validateStockUpdate(parsedQty, reserved, false);
     if (!stockRes.ok) {
       return { ok: false, error: `Variant #${i + 1}: ${stockRes.error}` };
     }
 
-    totalQuantity += stockRes.quantity;
-    if (minPriceSen === null || priceRes.sen < minPriceSen) {
-      minPriceSen = priceRes.sen;
+    if (isActive) {
+      activeCount += 1;
+      totalQuantity += stockRes.quantity;
+      if (minPriceSen === null || priceRes.sen < minPriceSen) {
+        minPriceSen = priceRes.sen;
+      }
     }
 
-    validatedActive.push({
+    validatedAll.push({
       ...(v.id ? { id: v.id } : {}),
       option_values: cleanValues,
       price_sen: priceRes.sen,
       quantity: stockRes.quantity,
+      active: isActive,
+      image_path:
+        typeof v.imagePath === "string" && v.imagePath.trim().length > 0
+          ? v.imagePath.trim()
+          : null,
     });
   }
 
-  if (input.targetStatus === "published" && validatedActive.length === 0) {
+  if (input.targetStatus === "published" && activeCount === 0) {
     return {
       ok: false,
       error: "At least one variant must be active before publishing.",
@@ -286,7 +311,7 @@ export function validateVariantsInput(input: {
     ok: true,
     hasVariants: true,
     optionGroups: groups,
-    variants: validatedActive,
+    variants: validatedAll,
     totalQuantity,
     minPriceSen,
   };
@@ -360,6 +385,13 @@ export function validateListingEditInput(input: ListingEditValidationInput) {
       ? variantsCheck.totalQuantity
       : Number.parseInt(String(input.quantity ?? "0"), 10);
 
+  if (variantsCheck.hasVariants && (variantsCheck.totalQuantity ?? 0) > 999) {
+    return {
+      ok: false as const,
+      error: "Combined stock across all variations cannot exceed 999 units.",
+    };
+  }
+
   if (!variantsCheck.hasVariants) {
     const stockCheck = validateStockUpdate(
       effectiveQuantity,
@@ -412,7 +444,7 @@ export function validateListingEditInput(input: ListingEditValidationInput) {
       error: "Select a campus collection area before publishing.",
     };
   }
-  if (!isService && validationStatus === "published" && !condition) {
+  if (!isService && input.listingType !== "food" && validationStatus === "published" && !condition) {
     return {
       ok: false as const,
       error: "Select an item condition before publishing.",
@@ -432,6 +464,8 @@ export function validateListingEditInput(input: ListingEditValidationInput) {
       : input.listingType === "preloved"
         ? "pre_loved"
         : input.listingType;
+  const bargainingEligible =
+    (dbKind === "pre_loved" || dbKind === "business") && !isFood;
 
   return {
     ok: true as const,
@@ -444,10 +478,10 @@ export function validateListingEditInput(input: ListingEditValidationInput) {
       priceSen: priceRes.sen,
       quantity: isService ? 1 : effectiveQuantity,
       collectionAreaId: collectionAreaId || null,
-      condition: isService ? null : condition || null,
+      condition: isService || isFood ? null : condition || null,
       status: statusCheck.status,
       rulesAcknowledged: Boolean(input.rulesAcknowledged),
-      allowOffers: Boolean(input.allowOffers),
+      allowOffers: bargainingEligible ? Boolean(input.allowOffers) : false,
       hasVariants: variantsCheck.hasVariants,
       optionGroups: variantsCheck.optionGroups,
       variants: variantsCheck.variants,

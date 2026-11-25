@@ -53,7 +53,7 @@ export default async function SellerStorefrontPage({
         </div>
 
         <div className="mt-5">
-          <SellerNav />
+          <SellerNav newOrderCount={hub.newOrderCount} />
         </div>
 
         {params.initialized === "1" ? (

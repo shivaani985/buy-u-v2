@@ -4,6 +4,7 @@ import { useActionState, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import {
+  AlertTriangle,
   Archive,
   ArrowLeft,
   ArrowRight,
@@ -11,9 +12,8 @@ import {
   CheckCircle2,
   ExternalLink,
   FileText,
+  GripVertical,
   ImagePlus,
-  Lock,
-  Plus,
   RotateCcw,
   Send,
   Star,
@@ -21,24 +21,39 @@ import {
   Trash2,
   Utensils,
   Wrench,
+  X,
 } from "lucide-react";
 import {
   updateListingAction,
   type SellerActionState,
 } from "@/app/seller/actions";
+import { DeleteListingButton } from "@/components/seller/DeleteListingButton";
+import { ListingCardPreview } from "@/components/seller/ListingCardPreview";
+import { VariationsInventoryManager } from "@/components/seller/VariationsInventoryManager";
 import type {
   CollectionAreaOption,
   EditablePhotoItem,
   SellerListingDetail,
 } from "@/lib/seller/data";
 import type { VariantDraftInput } from "@/lib/seller/listing-edit";
-import { MAX_LISTING_PHOTOS, parseRmToSen, type SellListingKind } from "@/lib/seller/validation";
+import {
+  MAX_LISTING_PHOTOS,
+  parseRmToSen,
+  validateImageFileMeta,
+  type SellListingKind,
+} from "@/lib/seller/validation";
+import {
+  extractVariationSetupFromVariants,
+  type SharedListingPhotoRef,
+  type VariationGroupConfig,
+} from "@/lib/seller/variations";
 import type { Category } from "@/types/marketplace";
 
 interface EditListingFormProps {
   listing: SellerListingDetail;
   categories: Category[];
   collectionAreas: CollectionAreaOption[];
+  sellerDisplayName?: string;
 }
 
 const INITIAL_STATE: SellerActionState = { status: "idle" };
@@ -70,64 +85,166 @@ export function EditListingForm({
   listing,
   categories,
   collectionAreas,
+  sellerDisplayName = "UMS Student",
 }: EditListingFormProps) {
   const [state, formAction, pending] = useActionState(
     updateListingAction,
     INITIAL_STATE
   );
+  const [submitCount, setSubmitCount] = useState(0);
+  const [dismissedCount, setDismissedCount] = useState(0);
 
   const [listingType, setListingType] = useState<SellListingKind>(
     listing.listingType
+  );
+  const [title, setTitle] = useState(listing.title);
+  const [categoryId, setCategoryId] = useState(listing.categoryId);
+  const [collectionAreaId, setCollectionAreaId] = useState(
+    listing.collectionAreaId
+  );
+  const [condition, setCondition] = useState(listing.condition || "Like New");
+  const [allowOffers, setAllowOffers] = useState<boolean>(
+    Boolean(
+      listing.allowOffers &&
+        (listing.listingType === "preloved" ||
+          listing.listingType === "business")
+    )
   );
   const [priceRm, setPriceRm] = useState((listing.priceSen / 100).toFixed(2));
   const [quantity, setQuantity] = useState(String(listing.quantity));
   const [keptPhotos, setKeptPhotos] = useState<EditablePhotoItem[]>(
     listing.photos
   );
-  const [newPhotoPreviews, setNewPhotoPreviews] = useState<string[]>([]);
+  const [newPhotos, setNewPhotos] = useState<
+    Array<{ id: string; file: File; previewUrl: string }>
+  >([]);
+  const [photoError, setPhotoError] = useState<string | null>(null);
+  const [pendingKeptRemovalIdx, setPendingKeptRemovalIdx] = useState<
+    number | null
+  >(null);
+
+  const lockedSet = new Set(listing.lockedVariantIds);
+
+  const initialVariantRows: VariantDraftInput[] = listing.variants.map((v) => ({
+    id: v.id,
+    optionValues: v.optionValues,
+    priceRm: (v.priceSen / 100).toFixed(2),
+    quantity: String(v.quantity),
+    active: v.active,
+    imagePath: v.imagePath ?? null,
+    reservedQuantity: v.reservedQuantity,
+    isLocked: lockedSet.has(v.id),
+  }));
+
+  const initialVariationSetup = extractVariationSetupFromVariants({
+    optionGroups: listing.optionGroups,
+    variants: initialVariantRows,
+    variationPhotoGroup: listing.variationPhotoGroup,
+  });
 
   // Variant state
   const [hasVariants, setHasVariants] = useState(listing.hasVariants);
-  const [optionGroups, setOptionGroups] = useState<string[]>(
-    listing.optionGroups.length > 0 ? listing.optionGroups : ["Option"]
+  const [variationGroups, setVariationGroups] = useState<
+    VariationGroupConfig[]
+  >(initialVariationSetup.groups);
+  const [photoGroupName, setPhotoGroupName] = useState<string | null>(
+    initialVariationSetup.photoGroupName
   );
+  const [optionPhotoMap, setOptionPhotoMap] = useState<
+    Record<string, string | null>
+  >(initialVariationSetup.optionPhotoMap);
   const [variants, setVariants] = useState<VariantDraftInput[]>(
-    listing.variants.length > 0
-      ? listing.variants.map((v) => ({
-          id: v.id,
-          optionValues: v.optionValues,
-          priceRm: (v.priceSen / 100).toFixed(2),
-          quantity: String(v.quantity),
-          active: v.active,
-        }))
-      : []
-  );
-
-  const lockedSet = new Set(listing.lockedVariantIds);
-  const reservedByVariant = new Map(
-    listing.variants.map((v) => [v.id, v.reservedQuantity])
+    initialVariantRows
   );
 
   const isService = listingType === "service";
+  const isFood = listingType === "food";
   const supportsVariants = listingType === "business" || listingType === "food";
-  const filteredCategories = categories.filter((c) =>
-    isService ? c.kind === "service" : c.kind !== "service"
-  );
+  const supportsBargaining =
+    listingType === "preloved" || listingType === "business";
+  const filteredCategories = categories.filter((c) => {
+    if (isService) return c.kind === "service";
+    if (isFood) {
+      return (
+        c.kind !== "service" &&
+        (c.id === "food" || /food|snack|drink|beverage|meal/i.test(c.name))
+      );
+    }
+    return c.kind !== "service";
+  });
+  const fallbackCategories = isService
+    ? categories
+    : categories.filter((c) => c.kind !== "service");
   const selectableCategories =
-    filteredCategories.length > 0 ? filteredCategories : categories;
+    filteredCategories.length > 0
+      ? filteredCategories
+      : fallbackCategories.length > 0
+        ? fallbackCategories
+        : categories;
+
+  const effectiveCategoryId = selectableCategories.some(
+    (c) => c.id === categoryId
+  )
+    ? categoryId
+    : (selectableCategories[0]?.id ?? "");
 
   const parsedPrice = priceRm.trim() ? parseRmToSen(priceRm) : null;
-  const maxNewPhotos = Math.max(0, MAX_LISTING_PHOTOS - keptPhotos.length);
+  const maxNewPhotos = Math.max(
+    0,
+    MAX_LISTING_PHOTOS - keptPhotos.length - newPhotos.length
+  );
   const st = statusDisplayText(
     listing.status,
     listing.availableStock,
     isService
   );
 
-  // Aggregate variant stock preview
-  const activeVariantTotal = variants
-    .filter((v) => v.active)
-    .reduce((sum, v) => sum + Math.max(0, Number.parseInt(String(v.quantity || "0"), 10) || 0), 0);
+  // Aggregate active variant totals & minimum price for preview and form submission
+  const activeVariants = variants.filter((v) => v.active);
+  const activeVariantTotal = activeVariants.reduce(
+    (sum, v) => sum + Math.max(0, Number.parseInt(String(v.quantity || "0"), 10) || 0),
+    0
+  );
+  const minVariantSen = activeVariants.reduce<number | null>((min, v) => {
+    const p = parseRmToSen(v.priceRm);
+    if (!p.ok) return min;
+    return min === null || p.sen < min ? p.sen : min;
+  }, null);
+
+  const previewPriceSen =
+    hasVariants && supportsVariants && minVariantSen !== null
+      ? minVariantSen
+      : parsedPrice?.ok
+        ? parsedPrice.sen
+        : 0;
+  const previewCategoryName =
+    selectableCategories.find((c) => c.id === effectiveCategoryId)?.name ??
+    "Category";
+  const previewAreaName =
+    collectionAreas.find((a) => a.id === collectionAreaId)?.name ??
+    "UMSKAL, Labuan";
+  const previewCoverUrl = keptPhotos[0]?.url ?? newPhotos[0]?.previewUrl ?? null;
+
+  const [dragPhotoIdx, setDragPhotoIdx] = useState<number | null>(null);
+  const [dragOverIdx, setDragOverIdx] = useState<number | null>(null);
+
+  function reorderPhoto(fromIndex: number, toIndex: number) {
+    if (
+      fromIndex === toIndex ||
+      fromIndex < 0 ||
+      toIndex < 0 ||
+      fromIndex >= keptPhotos.length ||
+      toIndex >= keptPhotos.length
+    ) {
+      return;
+    }
+    setKeptPhotos((prev) => {
+      const copy = [...prev];
+      const [moved] = copy.splice(fromIndex, 1);
+      if (moved) copy.splice(toIndex, 0, moved);
+      return copy;
+    });
+  }
 
   function movePhoto(index: number, delta: number) {
     const nextIdx = index + delta;
@@ -150,70 +267,177 @@ export function EditListingForm({
     });
   }
 
-  function removePhoto(index: number) {
-    setKeptPhotos((prev) => prev.filter((_, i) => i !== index));
+  function getAssignedPhotoOptions(photoKey: string): string[] {
+    return Object.entries(optionPhotoMap)
+      .filter(([, mappedKey]) => mappedKey === photoKey)
+      .map(([option]) => option);
   }
 
-  function handleNewPhotosChange(e: React.ChangeEvent<HTMLInputElement>) {
-    const files = Array.from(e.target.files ?? []).slice(0, maxNewPhotos);
-    if (files.length === 0) {
-      setNewPhotoPreviews([]);
-      return;
-    }
-    const urls: string[] = [];
-    let loaded = 0;
-    files.forEach((file, idx) => {
-      const reader = new FileReader();
-      reader.onload = () => {
-        if (typeof reader.result === "string") urls[idx] = reader.result;
-        loaded += 1;
-        if (loaded === files.length) setNewPhotoPreviews(urls.filter(Boolean));
-      };
-      reader.readAsDataURL(file);
+  function clearPhotoReference(photoKey: string) {
+    setOptionPhotoMap((prev) => {
+      let changed = false;
+      const next: Record<string, string | null> = {};
+      for (const [k, v] of Object.entries(prev)) {
+        if (v === photoKey) {
+          next[k] = null;
+          changed = true;
+        } else {
+          next[k] = v;
+        }
+      }
+      return changed ? next : prev;
     });
-  }
-
-  function addVariantRow() {
-    const blankValues: Record<string, string> = {};
-    for (const g of optionGroups) blankValues[g] = "";
-    setVariants((prev) => [
-      ...prev,
-      {
-        optionValues: blankValues,
-        priceRm: priceRm || "15.00",
-        quantity: "1",
-        active: true,
-      },
-    ]);
-  }
-
-  function updateVariantField(
-    idx: number,
-    patch: Partial<VariantDraftInput>
-  ) {
     setVariants((prev) =>
-      prev.map((row, i) => (i === idx ? { ...row, ...patch } : row))
-    );
-  }
-
-  function updateVariantOptionValue(idx: number, group: string, value: string) {
-    setVariants((prev) =>
-      prev.map((row, i) =>
-        i === idx
-          ? { ...row, optionValues: { ...row.optionValues, [group]: value } }
-          : row
+      prev.map((row) =>
+        row.imagePath === photoKey ? { ...row, imagePath: null } : row
       )
     );
   }
 
-  function removeVariantRow(idx: number) {
-    const row = variants[idx];
-    if (row?.id && lockedSet.has(row.id)) return;
-    setVariants((prev) => prev.filter((_, i) => i !== idx));
+  function removePhotoConfirmed(index: number) {
+    const target = keptPhotos[index];
+    setPendingKeptRemovalIdx(null);
+    setKeptPhotos((prev) => prev.filter((_, i) => i !== index));
+    if (target) clearPhotoReference(target.path);
   }
 
+  function removePhoto(index: number) {
+    const target = keptPhotos[index];
+    if (!target) return;
+    if (hasVariants && supportsVariants) {
+      const assigned = getAssignedPhotoOptions(target.path);
+      if (assigned.length > 0) {
+        setPendingKeptRemovalIdx(index);
+        return;
+      }
+    }
+    removePhotoConfirmed(index);
+  }
+
+  function removeNewPhoto(id: string) {
+    setNewPhotos((prev) => prev.filter((p) => p.id !== id));
+    clearPhotoReference(id);
+  }
+
+  async function readFileDataUrl(file: File): Promise<string | null> {
+    return new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = () =>
+        resolve(typeof reader.result === "string" ? reader.result : null);
+      reader.onerror = () => resolve(null);
+      reader.readAsDataURL(file);
+    });
+  }
+
+  async function handleUploadSharedPhoto(
+    file: File
+  ): Promise<SharedListingPhotoRef | null> {
+    const metaCheck = validateImageFileMeta(file);
+    if (!metaCheck.ok) {
+      setPhotoError(metaCheck.error);
+      return null;
+    }
+    if (keptPhotos.length + newPhotos.length >= MAX_LISTING_PHOTOS) {
+      setPhotoError(`Maximum ${MAX_LISTING_PHOTOS} photos reached.`);
+      return null;
+    }
+    const previewUrl = await readFileDataUrl(file);
+    if (!previewUrl) {
+      setPhotoError("Failed to read uploaded photo.");
+      return null;
+    }
+    const id = `new-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    setPhotoError(null);
+    setNewPhotos((prev) => {
+      if (keptPhotos.length + prev.length >= MAX_LISTING_PHOTOS) return prev;
+      return [...prev, { id, file, previewUrl }];
+    });
+    return {
+      key: id,
+      url: previewUrl,
+      storagePath: null,
+    };
+  }
+
+  async function handleNewPhotosChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(e.target.files ?? []);
+    e.target.value = "";
+    if (files.length === 0) return;
+
+    const remaining = Math.max(
+      0,
+      MAX_LISTING_PHOTOS - keptPhotos.length - newPhotos.length
+    );
+    if (remaining <= 0) {
+      setPhotoError(`Maximum ${MAX_LISTING_PHOTOS} photos allowed.`);
+      return;
+    }
+
+    for (const file of files.slice(0, remaining)) {
+      const check = validateImageFileMeta(file);
+      if (!check.ok) {
+        setPhotoError(check.error);
+        return;
+      }
+    }
+
+    setPhotoError(null);
+    const added: Array<{ id: string; file: File; previewUrl: string }> = [];
+    for (const file of files.slice(0, remaining)) {
+      const previewUrl = await readFileDataUrl(file);
+      if (previewUrl) {
+        added.push({
+          id: `new-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          file,
+          previewUrl,
+        });
+      }
+    }
+    if (added.length > 0) {
+      setNewPhotos((prev) => {
+        const cap = Math.max(0, MAX_LISTING_PHOTOS - keptPhotos.length);
+        return [...prev, ...added].slice(0, cap);
+      });
+    }
+  }
+
+  const sharedPhotos: SharedListingPhotoRef[] = [
+    ...keptPhotos.map((p) => ({
+      key: p.path,
+      url: p.url,
+      storagePath: p.path,
+    })),
+    ...newPhotos.map((p) => ({
+      key: p.id,
+      url: p.previewUrl,
+      storagePath: null,
+    })),
+  ];
+
+  const serializedOptionGroups = variationGroups
+    .map((g) => g.name.trim())
+    .filter((name) => name.length > 0);
+
   return (
-    <form action={formAction} className="space-y-6">
+    <>
+    <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_310px] lg:items-start">
+    <form
+      action={(fd) => {
+        fd.delete("photos");
+        for (const p of newPhotos) {
+          fd.append("photos", p.file);
+        }
+        fd.set("newPhotoKeysJson", JSON.stringify(newPhotos.map((p) => p.id)));
+        fd.set("hasVariants", hasVariants && supportsVariants ? "on" : "");
+        fd.set("variationPhotoGroup", photoGroupName ?? "");
+        fd.set("optionGroupsJson", JSON.stringify(serializedOptionGroups));
+        fd.set("variantsJson", JSON.stringify(variants));
+        fd.set("categoryId", effectiveCategoryId);
+        setSubmitCount((c) => c + 1);
+        return formAction(fd);
+      }}
+      className="space-y-6"
+    >
       <input type="hidden" name="listingId" value={listing.id} />
       <input type="hidden" name="expectedUpdatedAt" value={listing.updatedAt} />
       <input
@@ -223,8 +447,18 @@ export function EditListingForm({
       />
       <input
         type="hidden"
+        name="newPhotoKeysJson"
+        value={JSON.stringify(newPhotos.map((p) => p.id))}
+      />
+      <input
+        type="hidden"
+        name="variationPhotoGroup"
+        value={photoGroupName ?? ""}
+      />
+      <input
+        type="hidden"
         name="optionGroupsJson"
-        value={JSON.stringify(optionGroups)}
+        value={JSON.stringify(serializedOptionGroups)}
       />
       <input
         type="hidden"
@@ -320,7 +554,12 @@ export function EditListingForm({
                 <button
                   key={type.id}
                   type="button"
-                  onClick={() => setListingType(type.id)}
+                  onClick={() => {
+                    setListingType(type.id);
+                    if (type.id !== "preloved" && type.id !== "business") {
+                      setAllowOffers(false);
+                    }
+                  }}
                   aria-pressed={active}
                   className={`flex items-start gap-2.5 rounded-xl border p-3 text-left transition-colors press-feedback ${
                     active
@@ -356,7 +595,8 @@ export function EditListingForm({
               required
               minLength={3}
               maxLength={120}
-              defaultValue={listing.title}
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
               className="mt-1.5 w-full rounded-xl border border-[#CFCBD9] bg-white px-3.5 py-2.5 text-sm text-[#14121A] focus:border-[#4E2A84] focus:outline-none"
             />
           </div>
@@ -369,12 +609,8 @@ export function EditListingForm({
               id="categoryId"
               name="categoryId"
               required
-              defaultValue={
-                selectableCategories.some((c) => c.id === listing.categoryId)
-                  ? listing.categoryId
-                  : (selectableCategories[0]?.id ?? "")
-              }
-              key={listingType}
+              value={effectiveCategoryId}
+              onChange={(e) => setCategoryId(e.target.value)}
               className="mt-1.5 w-full rounded-xl border border-[#CFCBD9] bg-white px-3.5 py-2.5 text-sm text-[#14121A] focus:border-[#4E2A84] focus:outline-none"
             >
               {selectableCategories.map((cat) => (
@@ -385,115 +621,181 @@ export function EditListingForm({
             </select>
           </div>
 
-          {/* Price & Quantity (when variants are NOT enabled) */}
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label htmlFor="priceRm" className="block text-sm font-bold text-[#14121A]">
-                Price (RM) <span className="text-[#B42318]">*</span>
-              </label>
-              <div className="relative mt-1.5">
-                <span className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-xs font-extrabold text-[#6E6A7C]">
-                  RM
-                </span>
-                <input
-                  id="priceRm"
-                  name="priceRm"
-                  type="text"
-                  inputMode="decimal"
-                  required={!hasVariants}
-                  disabled={hasVariants && !isService}
-                  value={priceRm}
-                  onChange={(e) => setPriceRm(e.target.value)}
-                  className="w-full rounded-xl border border-[#CFCBD9] bg-white py-2.5 pr-3 pl-9 text-sm font-bold text-[#14121A] disabled:bg-[#FAFAFC] disabled:text-[#6E6A7C] focus:border-[#4E2A84] focus:outline-none"
-                />
-              </div>
-              {hasVariants && !isService ? (
-                <p className="mt-1 text-[11px] text-[#6E6A7C]">
-                  Auto-set from lowest active variant
-                </p>
-              ) : parsedPrice ? (
-                <p
-                  className={`mt-1 text-[11px] font-semibold ${
-                    parsedPrice.ok ? "text-[#0F766E]" : "text-[#B42318]"
-                  }`}
-                >
-                  {parsedPrice.ok
-                    ? `RM ${(parsedPrice.sen / 100).toFixed(2)}`
-                    : parsedPrice.error}
-                </p>
-              ) : null}
-            </div>
-
-            {!isService ? (
-              <div>
-                <label htmlFor="quantity" className="block text-sm font-bold text-[#14121A]">
-                  Total Quantity
-                </label>
-                <input
-                  id="quantity"
-                  name="quantity"
-                  type="number"
-                  min={listing.reservedQuantity}
-                  max={999}
-                  disabled={hasVariants}
-                  value={hasVariants ? String(activeVariantTotal) : quantity}
-                  onChange={(e) => setQuantity(e.target.value)}
-                  className="mt-1.5 w-full rounded-xl border border-[#CFCBD9] bg-white px-3.5 py-2.5 text-sm font-bold text-[#14121A] disabled:bg-[#FAFAFC] disabled:text-[#6E6A7C] focus:border-[#4E2A84] focus:outline-none"
-                />
-                <p className="mt-1 text-[11px] text-[#6E6A7C]">
-                  {hasVariants
-                    ? "Sum of active variants"
-                    : listing.reservedQuantity > 0
-                      ? `Min ${listing.reservedQuantity} (reserved)`
-                      : "Set 0 for Out of Stock"}
-                </p>
-              </div>
-            ) : (
-              <input type="hidden" name="quantity" value="1" />
-            )}
-          </div>
-
-          <div>
-            <label htmlFor="collectionAreaId" className="block text-sm font-bold text-[#14121A]">
-              Campus Collection Area {!isService ? <span className="text-[#B42318]">*</span> : "(optional)"}
-            </label>
-            <select
-              id="collectionAreaId"
-              name="collectionAreaId"
-              required={!isService}
-              defaultValue={listing.collectionAreaId}
-              className="mt-1.5 w-full rounded-xl border border-[#CFCBD9] bg-white px-3.5 py-2.5 text-sm text-[#14121A] focus:border-[#4E2A84] focus:outline-none"
-            >
-              <option value="">Select campus meetup area</option>
-              {collectionAreas.map((area) => (
-                <option key={area.id} value={area.id}>
-                  {area.name}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          {!isService ? (
-            <div>
-              <label htmlFor="condition" className="block text-sm font-bold text-[#14121A]">
-                Item Condition <span className="text-[#B42318]">*</span>
-              </label>
-              <select
-                id="condition"
-                name="condition"
-                required
-                defaultValue={listing.condition || "Like New"}
-                className="mt-1.5 w-full rounded-xl border border-[#CFCBD9] bg-white px-3.5 py-2.5 text-sm text-[#14121A] focus:border-[#4E2A84] focus:outline-none"
+          {hasVariants && supportsVariants ? (
+            <>
+              <div
+                className={`grid gap-3 ${
+                  !isService && !isFood ? "grid-cols-1 sm:grid-cols-2" : "grid-cols-1"
+                }`}
               >
-                {CONDITIONS.map((cond) => (
-                  <option key={cond} value={cond}>
-                    {cond}
-                  </option>
-                ))}
-              </select>
-            </div>
+                <div>
+                  <label htmlFor="collectionAreaId" className="block text-sm font-bold text-[#14121A]">
+                    Campus Collection Area <span className="text-[#B42318]">*</span>
+                  </label>
+                  <select
+                    id="collectionAreaId"
+                    name="collectionAreaId"
+                    required
+                    value={collectionAreaId}
+                    onChange={(e) => setCollectionAreaId(e.target.value)}
+                    className="mt-1.5 w-full rounded-xl border border-[#CFCBD9] bg-white px-3.5 py-2.5 text-sm text-[#14121A] focus:border-[#4E2A84] focus:outline-none"
+                  >
+                    <option value="">Select campus meetup area</option>
+                    {collectionAreas.map((area) => (
+                      <option key={area.id} value={area.id}>
+                        {area.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {!isService && !isFood ? (
+                  <div>
+                    <label htmlFor="condition" className="block text-sm font-bold text-[#14121A]">
+                      Item Condition <span className="text-[#B42318]">*</span>
+                    </label>
+                    <select
+                      id="condition"
+                      name="condition"
+                      required
+                      value={condition}
+                      onChange={(e) => setCondition(e.target.value)}
+                      className="mt-1.5 w-full rounded-xl border border-[#CFCBD9] bg-white px-3.5 py-2.5 text-sm text-[#14121A] focus:border-[#4E2A84] focus:outline-none"
+                    >
+                      {CONDITIONS.map((cond) => (
+                        <option key={cond} value={cond}>
+                          {cond}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                ) : (
+                  <input type="hidden" name="condition" value="" />
+                )}
+              </div>
+
+              <input
+                type="hidden"
+                name="priceRm"
+                value={
+                  minVariantSen !== null
+                    ? (minVariantSen / 100).toFixed(2)
+                    : priceRm
+                }
+              />
+              <input
+                type="hidden"
+                name="quantity"
+                value={String(activeVariantTotal)}
+              />
+            </>
           ) : (
-            <input type="hidden" name="condition" value="" />
+            <>
+              {/* Price & Quantity (when variants are NOT enabled) */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label htmlFor="priceRm" className="block text-sm font-bold text-[#14121A]">
+                    Price (RM) <span className="text-[#B42318]">*</span>
+                  </label>
+                  <div className="relative mt-1.5">
+                    <span className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-xs font-extrabold text-[#6E6A7C]">
+                      RM
+                    </span>
+                    <input
+                      id="priceRm"
+                      name="priceRm"
+                      type="text"
+                      inputMode="decimal"
+                      required
+                      value={priceRm}
+                      onChange={(e) => setPriceRm(e.target.value)}
+                      className="w-full rounded-xl border border-[#CFCBD9] bg-white py-2.5 pr-3 pl-9 text-sm font-bold text-[#14121A] focus:border-[#4E2A84] focus:outline-none"
+                    />
+                  </div>
+                  {parsedPrice ? (
+                    <p
+                      className={`mt-1 text-[11px] font-semibold ${
+                        parsedPrice.ok ? "text-[#0F766E]" : "text-[#B42318]"
+                      }`}
+                    >
+                      {parsedPrice.ok
+                        ? `RM ${(parsedPrice.sen / 100).toFixed(2)}`
+                        : parsedPrice.error}
+                    </p>
+                  ) : null}
+                </div>
+
+                {!isService ? (
+                  <div>
+                    <label htmlFor="quantity" className="block text-sm font-bold text-[#14121A]">
+                      Total Quantity
+                    </label>
+                    <input
+                      id="quantity"
+                      name="quantity"
+                      type="number"
+                      min={listing.reservedQuantity}
+                      max={999}
+                      value={quantity}
+                      onChange={(e) => setQuantity(e.target.value)}
+                      className="mt-1.5 w-full rounded-xl border border-[#CFCBD9] bg-white px-3.5 py-2.5 text-sm font-bold text-[#14121A] focus:border-[#4E2A84] focus:outline-none"
+                    />
+                    <p className="mt-1 text-[11px] text-[#6E6A7C]">
+                      {listing.reservedQuantity > 0
+                        ? `Min ${listing.reservedQuantity} (reserved)`
+                        : "Set 0 for Out of Stock"}
+                    </p>
+                  </div>
+                ) : (
+                  <input type="hidden" name="quantity" value="1" />
+                )}
+              </div>
+
+              <div>
+                <label htmlFor="collectionAreaId" className="block text-sm font-bold text-[#14121A]">
+                  Campus Collection Area {!isService ? <span className="text-[#B42318]">*</span> : "(optional)"}
+                </label>
+                <select
+                  id="collectionAreaId"
+                  name="collectionAreaId"
+                  required={!isService}
+                  value={collectionAreaId}
+                  onChange={(e) => setCollectionAreaId(e.target.value)}
+                  className="mt-1.5 w-full rounded-xl border border-[#CFCBD9] bg-white px-3.5 py-2.5 text-sm text-[#14121A] focus:border-[#4E2A84] focus:outline-none"
+                >
+                  <option value="">Select campus meetup area</option>
+                  {collectionAreas.map((area) => (
+                    <option key={area.id} value={area.id}>
+                      {area.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {!isService && !isFood ? (
+                <div>
+                  <label htmlFor="condition" className="block text-sm font-bold text-[#14121A]">
+                    Item Condition <span className="text-[#B42318]">*</span>
+                  </label>
+                  <select
+                    id="condition"
+                    name="condition"
+                    required
+                    value={condition}
+                    onChange={(e) => setCondition(e.target.value)}
+                    className="mt-1.5 w-full rounded-xl border border-[#CFCBD9] bg-white px-3.5 py-2.5 text-sm text-[#14121A] focus:border-[#4E2A84] focus:outline-none"
+                  >
+                    {CONDITIONS.map((cond) => (
+                      <option key={cond} value={cond}>
+                        {cond}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              ) : (
+                <input type="hidden" name="condition" value="" />
+              )}
+            </>
           )}
 
           <div className="lg:col-span-2">
@@ -517,216 +819,26 @@ export function EditListingForm({
         </div>
       </div>
 
-      {/* Product Variants Section (Student Business & Campus Food Only) */}
+      {/* Product Variations & Inventory Section (Student Business & Campus Food Only) */}
       {supportsVariants ? (
-        <div className="rounded-2xl border border-[#E6E3EE] bg-white p-5 shadow-[0_1px_4px_rgba(20,18,26,0.03)] sm:p-6">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <h2 className="text-base font-extrabold italic text-[#14121A]">
-                Product Variants &amp; Inventory
-              </h2>
-              <p className="mt-0.5 text-xs text-[#6E6A7C]">
-                Add sizes, colors, or editions with individual RM prices and
-                stock counts.
-              </p>
-            </div>
-            <label className="inline-flex items-center gap-2 text-xs font-bold text-[#14121A]">
-              <input
-                type="checkbox"
-                name="hasVariants"
-                checked={hasVariants}
-                onChange={(e) => {
-                  const checked = e.target.checked;
-                  setHasVariants(checked);
-                  if (checked && variants.length === 0) {
-                    addVariantRow();
-                  }
-                }}
-                className="h-4 w-4 rounded border-[#CFCBD9] accent-[#4E2A84]"
-              />
-              <span>Enable Variants</span>
-            </label>
-          </div>
-
-          {hasVariants ? (
-            <div className="mt-4 space-y-4 border-t border-[#F0EDF5] pt-4">
-              {/* Option Group Name */}
-              <div className="flex flex-wrap items-end gap-3">
-                {optionGroups.map((group, gIdx) => (
-                  <div key={gIdx} className="w-44">
-                    <label className="block text-xs font-bold text-[#555062]">
-                      Option Group #{gIdx + 1}
-                    </label>
-                    <input
-                      type="text"
-                      value={group}
-                      onChange={(e) => {
-                        const oldName = optionGroups[gIdx] ?? "";
-                        const newName = e.target.value;
-                        setOptionGroups((prev) =>
-                          prev.map((g, idx) => (idx === gIdx ? newName : g))
-                        );
-                        setVariants((prev) =>
-                          prev.map((v) => {
-                            const nextVals = { ...v.optionValues };
-                            if (oldName in nextVals && oldName !== newName) {
-                              nextVals[newName] = nextVals[oldName] ?? "";
-                              delete nextVals[oldName];
-                            }
-                            return { ...v, optionValues: nextVals };
-                          })
-                        );
-                      }}
-                      placeholder="e.g. Size"
-                      className="mt-1 w-full rounded-lg border border-[#CFCBD9] px-3 py-1.5 text-xs font-semibold text-[#14121A] focus:border-[#4E2A84] focus:outline-none"
-                    />
-                  </div>
-                ))}
-                {optionGroups.length < 2 ? (
-                  <button
-                    type="button"
-                    onClick={() => setOptionGroups((prev) => [...prev, "Color"])}
-                    className="rounded-lg border border-[#D5D1E3] px-3 py-1.5 text-xs font-bold text-[#4E2A84] hover:border-[#4E2A84]"
-                  >
-                    + Add 2nd Option
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={() => setOptionGroups((prev) => prev.slice(0, 1))}
-                    className="rounded-lg border border-[#E6E3EE] px-3 py-1.5 text-xs font-semibold text-[#6E6A7C] hover:text-[#B42318]"
-                  >
-                    Remove 2nd Option
-                  </button>
-                )}
-              </div>
-
-              {/* Variant Rows */}
-              <div className="space-y-2.5">
-                {variants.map((variant, idx) => {
-                  const isLocked = Boolean(
-                    variant.id && lockedSet.has(variant.id)
-                  );
-                  const reserved =
-                    (variant.id && reservedByVariant.get(variant.id)) || 0;
-                  return (
-                    <div
-                      key={variant.id ?? `new-${idx}`}
-                      className="grid grid-cols-1 gap-2.5 rounded-xl border border-[#ECEAF2] bg-[#FAFAFC] p-3 sm:grid-cols-12 sm:items-end"
-                    >
-                      {optionGroups.map((group) => (
-                        <div
-                          key={group}
-                          className={
-                            optionGroups.length === 1
-                              ? "sm:col-span-4"
-                              : "sm:col-span-2"
-                          }
-                        >
-                          <label className="block text-[11px] font-bold text-[#555062]">
-                            {group || "Option"}
-                          </label>
-                          <input
-                            type="text"
-                            value={variant.optionValues[group] ?? ""}
-                            onChange={(e) =>
-                              updateVariantOptionValue(idx, group, e.target.value)
-                            }
-                            placeholder={`e.g. Medium`}
-                            className="mt-1 w-full rounded-lg border border-[#CFCBD9] bg-white px-2.5 py-1.5 text-xs text-[#14121A] focus:border-[#4E2A84] focus:outline-none"
-                          />
-                        </div>
-                      ))}
-
-                      <div className="sm:col-span-3">
-                        <label className="block text-[11px] font-bold text-[#555062]">
-                          Price (RM)
-                        </label>
-                        <input
-                          type="text"
-                          inputMode="decimal"
-                          value={variant.priceRm}
-                          onChange={(e) =>
-                            updateVariantField(idx, { priceRm: e.target.value })
-                          }
-                          className="mt-1 w-full rounded-lg border border-[#CFCBD9] bg-white px-2.5 py-1.5 text-xs font-bold text-[#14121A] focus:border-[#4E2A84] focus:outline-none"
-                        />
-                      </div>
-
-                      <div className="sm:col-span-2">
-                        <label className="block text-[11px] font-bold text-[#555062]">
-                          Qty {reserved > 0 ? `(min ${reserved})` : ""}
-                        </label>
-                        <input
-                          type="number"
-                          min={reserved}
-                          max={999}
-                          value={variant.quantity}
-                          onChange={(e) =>
-                            updateVariantField(idx, { quantity: e.target.value })
-                          }
-                          className="mt-1 w-full rounded-lg border border-[#CFCBD9] bg-white px-2.5 py-1.5 text-xs font-bold text-[#14121A] focus:border-[#4E2A84] focus:outline-none"
-                        />
-                      </div>
-
-                      <div className="flex items-center justify-between gap-2 sm:col-span-3 sm:justify-end">
-                        <label className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#14121A]">
-                          <input
-                            type="checkbox"
-                            checked={variant.active}
-                            onChange={(e) =>
-                              updateVariantField(idx, {
-                                active: e.target.checked,
-                              })
-                            }
-                            className="h-3.5 w-3.5 accent-[#0F766E]"
-                          />
-                          <span
-                            className={
-                              variant.active
-                                ? "text-[#0F766E]"
-                                : "text-[#6E6A7C]"
-                            }
-                          >
-                            {variant.active ? "Active" : "Inactive"}
-                          </span>
-                        </label>
-
-                        {isLocked ? (
-                          <span
-                            title="Referenced by an active order or reservation — deactivate instead of removing"
-                            className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#6E6A7C]"
-                          >
-                            <Lock className="h-3.5 w-3.5" aria-hidden="true" />
-                            <span>Locked</span>
-                          </span>
-                        ) : (
-                          <button
-                            type="button"
-                            onClick={() => removeVariantRow(idx)}
-                            aria-label={`Remove variant ${idx + 1}`}
-                            className="rounded-lg p-1.5 text-[#6E6A7C] hover:text-[#B42318]"
-                          >
-                            <Trash2 className="h-4 w-4" aria-hidden="true" />
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-
-              <button
-                type="button"
-                onClick={addVariantRow}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-[#4E2A84] bg-white px-3.5 py-1.5 text-xs font-bold text-[#4E2A84] hover:bg-[#4E2A84] hover:text-white press-feedback"
-              >
-                <Plus className="h-3.5 w-3.5" aria-hidden="true" />
-                <span>Add Variant</span>
-              </button>
-            </div>
-          ) : null}
-        </div>
+        <VariationsInventoryManager
+          enabled={hasVariants}
+          onToggleEnabled={setHasVariants}
+          groups={variationGroups}
+          variants={variants}
+          photoGroupName={photoGroupName}
+          optionPhotoMap={optionPhotoMap}
+          sharedPhotos={sharedPhotos}
+          defaultPriceRm={priceRm || "15.00"}
+          canEditToggle={listing.lockedVariantIds.length === 0}
+          onChangeState={(next) => {
+            setVariationGroups(next.groups);
+            setVariants(next.variants);
+            setPhotoGroupName(next.photoGroupName);
+            setOptionPhotoMap(next.optionPhotoMap);
+          }}
+          onUploadSharedPhoto={handleUploadSharedPhoto}
+        />
       ) : null}
 
       {/* Listing Photos Manager */}
@@ -734,22 +846,94 @@ export function EditListingForm({
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
             <h2 className="text-base font-extrabold italic text-[#14121A]">
-              Listing Photos ({keptPhotos.length + newPhotoPreviews.length}/
+              Listing Photos ({keptPhotos.length + newPhotos.length}/
               {MAX_LISTING_PHOTOS})
             </h2>
             <p className="mt-0.5 text-xs text-[#6E6A7C]">
-              The first photo is your cover image. Reorder, replace cover, or
+              The first photo is your cover image. Drag photos to reorder, replace cover, or
               add up to {MAX_LISTING_PHOTOS} photos total.
             </p>
           </div>
         </div>
+
+        {photoError ? (
+          <p className="mt-2 text-xs font-semibold text-[#BA1A1A]">
+            {photoError}
+          </p>
+        ) : null}
+
+        {pendingKeptRemovalIdx !== null && keptPhotos[pendingKeptRemovalIdx] ? (
+          <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-2.5 text-xs text-amber-900">
+            <div className="flex items-start gap-2">
+              <AlertTriangle
+                className="mt-0.5 h-4 w-4 shrink-0 text-amber-700"
+                aria-hidden="true"
+              />
+              <span>
+                Photo #{pendingKeptRemovalIdx + 1} is assigned to variation
+                option{" "}
+                <strong>
+                  {getAssignedPhotoOptions(
+                    keptPhotos[pendingKeptRemovalIdx]!.path
+                  ).join(", ")}
+                </strong>
+                . Removing it will clear those variation photos.
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setPendingKeptRemovalIdx(null)}
+                className="rounded-lg border border-amber-300 bg-white px-2.5 py-1 text-[11px] font-bold text-amber-900 hover:bg-amber-100"
+              >
+                Keep Photo
+              </button>
+              <button
+                type="button"
+                onClick={() => removePhotoConfirmed(pendingKeptRemovalIdx)}
+                className="rounded-lg bg-[#B42318] px-2.5 py-1 text-[11px] font-bold text-white hover:bg-[#991B1B]"
+              >
+                Remove Photo
+              </button>
+            </div>
+          </div>
+        ) : null}
 
         {keptPhotos.length > 0 ? (
           <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
             {keptPhotos.map((photo, idx) => (
               <div
                 key={photo.path}
-                className="overflow-hidden rounded-xl border border-[#E6E3EE] bg-[#FAFAFC]"
+                draggable
+                onDragStart={(e) => {
+                  setDragPhotoIdx(idx);
+                  e.dataTransfer.effectAllowed = "move";
+                }}
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  e.dataTransfer.dropEffect = "move";
+                  if (dragOverIdx !== idx) setDragOverIdx(idx);
+                }}
+                onDragLeave={() => {
+                  if (dragOverIdx === idx) setDragOverIdx(null);
+                }}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  if (dragPhotoIdx !== null) {
+                    reorderPhoto(dragPhotoIdx, idx);
+                  }
+                  setDragPhotoIdx(null);
+                  setDragOverIdx(null);
+                }}
+                onDragEnd={() => {
+                  setDragPhotoIdx(null);
+                  setDragOverIdx(null);
+                }}
+                className={`cursor-grab overflow-hidden rounded-xl border bg-[#FAFAFC] transition active:cursor-grabbing ${
+                  dragOverIdx === idx && dragPhotoIdx !== idx
+                    ? "border-[#4E2A84] ring-2 ring-[#4E2A84]/30"
+                    : "border-[#E6E3EE]"
+                } ${dragPhotoIdx === idx ? "opacity-55" : ""}`}
               >
                 <div className="relative aspect-[4/3] w-full bg-[#F5F4F8]">
                   <Image
@@ -757,14 +941,21 @@ export function EditListingForm({
                     alt={`Listing photo ${idx + 1}`}
                     fill
                     unoptimized
+                    draggable={false}
                     sizes="220px"
-                    className="object-cover"
+                    className="object-cover select-none"
                   />
                   {idx === 0 ? (
                     <span className="absolute top-2 left-2 rounded-md bg-white/95 px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wider text-[#4E2A84]">
                       Cover
                     </span>
                   ) : null}
+                  <span
+                    title="Drag to reorder"
+                    className="absolute top-2 right-2 flex h-6 w-6 items-center justify-center rounded-md bg-white/85 text-[#555062] shadow-xs backdrop-blur-xs"
+                  >
+                    <GripVertical className="h-3.5 w-3.5" aria-hidden="true" />
+                  </span>
                 </div>
                 <div className="flex items-center justify-between gap-1 border-t border-[#ECEAF2] bg-white px-2 py-1.5 text-[11px]">
                   <div className="flex items-center gap-1">
@@ -834,21 +1025,29 @@ export function EditListingForm({
                 className="min-w-0 flex-1 text-xs text-[#4A4656] file:mr-3 file:rounded-lg file:border-0 file:bg-[#4E2A84] file:px-3 py-1.5 file:text-xs file:font-bold file:text-white hover:file:bg-[#3A1E66]"
               />
             </div>
-            {newPhotoPreviews.length > 0 ? (
+            {newPhotos.length > 0 ? (
               <div className="mt-3 grid grid-cols-2 gap-2.5 sm:grid-cols-4">
-                {newPhotoPreviews.map((src, i) => (
+                {newPhotos.map((np, i) => (
                   <div
-                    key={i}
-                    className="relative aspect-[4/3] overflow-hidden rounded-xl border border-[#E6E3EE] bg-[#F5F4F8]"
+                    key={np.id}
+                    className="group relative aspect-[4/3] overflow-hidden rounded-xl border border-[#E6E3EE] bg-[#F5F4F8]"
                   >
                     <Image
-                      src={src}
+                      src={np.previewUrl}
                       alt={`New photo preview ${i + 1}`}
                       fill
                       unoptimized
                       sizes="160px"
                       className="object-cover"
                     />
+                    <button
+                      type="button"
+                      onClick={() => removeNewPhoto(np.id)}
+                      aria-label={`Remove new photo ${i + 1}`}
+                      className="absolute top-1.5 right-1.5 flex h-6 w-6 items-center justify-center rounded-md bg-white/90 text-[#6E6A7C] shadow-xs hover:text-[#B42318]"
+                    >
+                      <X className="h-3.5 w-3.5" aria-hidden="true" />
+                    </button>
                   </div>
                 ))}
               </div>
@@ -865,18 +1064,24 @@ export function EditListingForm({
       {/* Rules & Save Actions */}
       <div className="rounded-2xl border border-[#E6E3EE] bg-white p-5 shadow-[0_1px_4px_rgba(20,18,26,0.03)] sm:p-6">
         <div className="space-y-3">
-          <label className="flex items-start gap-2.5 text-sm text-[#14121A]">
-            <input
-              type="checkbox"
-              name="allowOffers"
-              defaultChecked={listing.allowOffers}
-              className="mt-0.5 h-4 w-4 rounded border-[#CFCBD9] accent-[#4E2A84]"
-            />
-            <span>
-              <span className="font-bold">Allow buyer price offers</span>{" "}
-              <span className="text-xs text-[#6E6A7C]">(optional)</span>
-            </span>
-          </label>
+          {supportsBargaining ? (
+            <label className="flex cursor-pointer items-start gap-2.5 text-sm text-[#14121A]">
+              <input
+                type="checkbox"
+                name="allowOffers"
+                checked={allowOffers}
+                onChange={(e) => setAllowOffers(e.target.checked)}
+                className="mt-0.5 h-4 w-4 rounded border-[#CFCBD9] accent-[#4E2A84]"
+              />
+              <span>
+                <span className="font-bold">Allow price negotiation</span>{" "}
+                <span className="block text-xs text-[#6E6A7C]">
+                  Let buyers make offers and negotiate the final price through
+                  chat.
+                </span>
+              </span>
+            </label>
+          ) : null}
 
           <label className="flex items-start gap-2.5 text-sm text-[#14121A]">
             <input
@@ -897,29 +1102,37 @@ export function EditListingForm({
         </div>
 
         <div className="mt-5 flex flex-wrap items-center justify-between gap-3 border-t border-[#F0EDF5] pt-5">
-          {listing.status === "archived" ? (
-            <button
-              type="submit"
-              name="intent"
-              value="draft"
-              disabled={pending}
-              className="inline-flex items-center gap-1.5 rounded-xl border border-[#D5D1E3] bg-white px-4 py-2 text-xs font-bold text-[#14121A] hover:border-[#4E2A84] hover:text-[#4E2A84] disabled:opacity-60 press-feedback"
-            >
-              <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
-              <span>Restore to Draft</span>
-            </button>
-          ) : (
-            <button
-              type="submit"
-              name="intent"
-              value="archived"
-              disabled={pending}
-              className="inline-flex items-center gap-1.5 rounded-xl border border-[#E6E3EE] bg-white px-4 py-2 text-xs font-bold text-[#6E6A7C] hover:border-[#B42318]/40 hover:text-[#B42318] disabled:opacity-60 press-feedback"
-            >
-              <Archive className="h-3.5 w-3.5" aria-hidden="true" />
-              <span>Archive Listing</span>
-            </button>
-          )}
+          <div className="flex flex-wrap items-center gap-2.5">
+            {listing.status === "archived" ? (
+              <button
+                type="submit"
+                name="intent"
+                value="draft"
+                disabled={pending}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-[#D5D1E3] bg-white px-4 py-2 text-xs font-bold text-[#14121A] hover:border-[#4E2A84] hover:text-[#4E2A84] disabled:opacity-60 press-feedback"
+              >
+                <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
+                <span>Restore to Draft</span>
+              </button>
+            ) : (
+              <button
+                type="submit"
+                name="intent"
+                value="archived"
+                disabled={pending}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-[#E6E3EE] bg-white px-4 py-2 text-xs font-bold text-[#6E6A7C] hover:border-[#B42318]/40 hover:text-[#B42318] disabled:opacity-60 press-feedback"
+              >
+                <Archive className="h-3.5 w-3.5" aria-hidden="true" />
+                <span>Archive Listing</span>
+              </button>
+            )}
+            <DeleteListingButton
+              listingId={listing.id}
+              listingTitle={listing.title}
+              variant="button"
+              redirectTo="/seller"
+            />
+          </div>
 
           <div className="flex flex-wrap items-center gap-2.5">
             <button
@@ -947,5 +1160,73 @@ export function EditListingForm({
         </div>
       </div>
     </form>
+
+    {/* Live Listing Card Preview (Right Column) */}
+    <ListingCardPreview
+      coverUrl={previewCoverUrl}
+      title={title}
+      listingType={listingType}
+      categoryName={previewCategoryName}
+      areaName={previewAreaName}
+      condition={condition}
+      priceSen={previewPriceSen}
+      sellerDisplayName={sellerDisplayName}
+    />
+    </div>
+
+    {/* Edit Listing Success Confirmation Modal */}
+    {state.status === "success" && state.message && submitCount > dismissedCount ? (
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="edit-success-title"
+        className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4"
+      >
+        <div className="w-full max-w-md rounded-2xl border border-[#E6E3EE] bg-white p-6 shadow-xl">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[#EDFAF9] text-[#0F766E]">
+                <CheckCircle2 className="h-5 w-5" aria-hidden="true" />
+              </span>
+              <div>
+                <h2
+                  id="edit-success-title"
+                  className="text-base font-extrabold text-[#14121A]"
+                >
+                  Listing Updated!
+                </h2>
+                <p className="mt-0.5 text-xs text-[#6E6A7C]">{state.message}</p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setDismissedCount(submitCount)}
+              aria-label="Close confirmation"
+              className="rounded-lg p-1 text-[#6E6A7C] hover:bg-[#F5F4F8]"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+
+          <div className="mt-5 flex flex-wrap justify-end gap-2.5">
+            <button
+              type="button"
+              onClick={() => setDismissedCount(submitCount)}
+              className="rounded-xl border border-[#E6E3EE] bg-white px-3.5 py-2 text-xs font-bold text-[#14121A] hover:border-[#4E2A84] hover:text-[#4E2A84]"
+            >
+              Continue Editing
+            </button>
+            <Link
+              href="/seller"
+              className="inline-flex items-center gap-1.5 rounded-xl bg-[#4E2A84] px-4 py-2 text-xs font-bold text-white hover:bg-[#3A1E66]"
+            >
+              <span>Back to Seller Hub</span>
+              <ArrowRight className="h-3.5 w-3.5" />
+            </Link>
+          </div>
+        </div>
+      </div>
+    ) : null}
+    </>
   );
 }

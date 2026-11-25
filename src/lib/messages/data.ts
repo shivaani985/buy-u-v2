@@ -1,4 +1,5 @@
 import { resolvePublicStorageUrl } from "@/lib/format";
+import { formatVariationOptionLabel } from "@/lib/seller/variations";
 import { getPublicSupabaseEnv } from "@/lib/supabase/env";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { reconcileExpiredOfferReservations } from "@/lib/supabase/service";
@@ -27,10 +28,23 @@ export interface MessagePeerInfo {
   badge: string;
 }
 
+export interface LinkedListingVariant {
+  id: string;
+  label: string;
+  priceSen: number;
+  availableStock: number;
+  active: boolean;
+  imageUrl?: string | null;
+}
+
 export interface LinkedListingContext {
   id: string;
   title: string;
   kind: string;
+  isFood: boolean;
+  availabilityMode: string | null;
+  hasVariants: boolean;
+  variants: LinkedListingVariant[];
   status: string;
   priceSen: number;
   availableStock: number | null;
@@ -104,6 +118,9 @@ export interface RawOfferRow {
   id: string;
   conversation_id: string;
   listing_id: string;
+  variant_id?: string | null;
+  variant_snapshot?: Record<string, string> | null;
+  variant_image_path?: string | null;
   buyer_id: string;
   seller_id: string;
   offer_price_sen: number;
@@ -116,7 +133,11 @@ export interface RawOfferRow {
   reservation_released_at?: string | null;
 }
 
-export function mapRawOffer(row: RawOfferRow): OfferCardItem {
+export function mapRawOffer(
+  row: RawOfferRow,
+  variantLabel?: string | null,
+  variantImageUrl?: string | null
+): OfferCardItem {
   const status = (
     ["pending", "accepted", "declined", "cancelled", "expired"].includes(
       row.status
@@ -125,10 +146,22 @@ export function mapRawOffer(row: RawOfferRow): OfferCardItem {
       : "pending"
   ) as OfferStatus;
 
+  const fallbackSnapshotLabel =
+    !variantLabel &&
+    row.variant_snapshot &&
+    typeof row.variant_snapshot === "object"
+      ? Object.keys(row.variant_snapshot).length > 0
+        ? formatVariationOptionLabel(row.variant_snapshot)
+        : null
+      : null;
+
   return {
     id: row.id,
     conversationId: row.conversation_id,
     listingId: row.listing_id,
+    variantId: row.variant_id ?? null,
+    variantLabel: variantLabel ?? fallbackSnapshotLabel,
+    variantImageUrl: variantImageUrl ?? null,
     buyerId: row.buyer_id,
     sellerId: row.seller_id,
     offerPriceSen: Number(row.offer_price_sen ?? 0),
@@ -308,9 +341,7 @@ export async function getMessagesPageData(
       activeConversationId
         ? supabase
             .from("offers")
-            .select(
-              "id,conversation_id,listing_id,buyer_id,seller_id,offer_price_sen,status,order_id,created_at,responded_at"
-            )
+            .select("*")
             .eq("conversation_id", activeConversationId)
             .order("created_at", { ascending: true })
             .limit(100)
@@ -380,8 +411,17 @@ export async function getMessagesPageData(
     ? rawActiveMessages.slice(0, MESSAGE_PAGE_SIZE)
     : rawActiveMessages;
   const activeMessages = trimmedActiveDesc.reverse().map(mapRawMessage);
-  const activeOffers = ((activeOffersRes.data ?? []) as RawOfferRow[]).map(
-    mapRawOffer
+  const rawOfferRows = (activeOffersRes.data ?? []) as RawOfferRow[];
+  const activeOffers = rawOfferRows.map((row) =>
+    mapRawOffer(
+      row,
+      undefined,
+      resolvePublicStorageUrl(
+        "listings",
+        row.variant_image_path ?? null,
+        env.url
+      )
+    )
   );
 
   // Collect listing IDs to resolve titles + active listing right-pane details
@@ -407,6 +447,9 @@ export async function getMessagesPageData(
       id: string;
       title: string;
       kind: string;
+      is_food: boolean | null;
+      availability_mode: string | null;
+      has_variants: boolean | null;
       status: string;
       price_sen: number | null;
       quantity: number | null;
@@ -419,12 +462,15 @@ export async function getMessagesPageData(
   >();
 
   let activeAreaName: string | null = null;
+  let activeVariants: LinkedListingVariant[] = [];
+  const variantLabelMap = new Map<string, string>();
+  const variantImageMap = new Map<string, string | null>();
 
   if (listingIdsToFetch.size > 0) {
     const { data: lRows } = await supabase
       .from("listings")
       .select(
-        "id,title,kind,status,price_sen,quantity,reserved_quantity,image_paths,collection_area_id,seller_id,allow_offers"
+        "id,title,kind,is_food,availability_mode,has_variants,status,price_sen,quantity,reserved_quantity,image_paths,collection_area_id,seller_id,allow_offers"
       )
       .in("id", Array.from(listingIdsToFetch));
 
@@ -434,6 +480,9 @@ export async function getMessagesPageData(
           id: string;
           title: string;
           kind: string;
+          is_food: boolean | null;
+          availability_mode: string | null;
+          has_variants: boolean | null;
           status: string;
           price_sen: number | null;
           quantity: number | null;
@@ -447,6 +496,57 @@ export async function getMessagesPageData(
     );
 
     const activeRow = activeListingId ? listingsMap.get(activeListingId) : null;
+    if (activeRow?.has_variants) {
+      let vRes = await supabase
+        .from("listing_variants")
+        .select("id,option_values,price_sen,quantity,reserved_quantity,active,image_path")
+        .eq("listing_id", activeRow.id);
+      if (
+        vRes.error &&
+        (vRes.error.code === "42703" ||
+          /image_path/i.test(vRes.error.message ?? ""))
+      ) {
+        vRes = (await supabase
+          .from("listing_variants")
+          .select("id,option_values,price_sen,quantity,reserved_quantity,active")
+          .eq("listing_id", activeRow.id)) as unknown as typeof vRes;
+      }
+      const vRows = vRes.data;
+      activeVariants = (
+        (vRows ?? []) as Array<{
+          id: string;
+          option_values: Record<string, string> | null;
+          price_sen: number;
+          quantity: number;
+          reserved_quantity: number;
+          active: boolean | null;
+          image_path?: string | null;
+        }>
+      ).map((v) => {
+        const label =
+          v.option_values && typeof v.option_values === "object"
+            ? formatVariationOptionLabel(v.option_values)
+            : "Option";
+        const imageUrl = resolvePublicStorageUrl(
+          "listings",
+          v.image_path ?? null,
+          env.url
+        );
+        variantLabelMap.set(v.id, label);
+        variantImageMap.set(v.id, imageUrl);
+        return {
+          id: v.id,
+          label,
+          priceSen: Number(v.price_sen ?? 0),
+          availableStock: Math.max(
+            0,
+            Number(v.quantity ?? 0) - Math.max(0, Number(v.reserved_quantity ?? 0))
+          ),
+          active: v.active !== false,
+          imageUrl,
+        };
+      });
+    }
     if (activeRow?.collection_area_id) {
       const { data: areaRow } = await supabase
         .from("collection_areas")
@@ -505,6 +605,10 @@ export async function getMessagesPageData(
         id: activeListingRow.id,
         title: activeListingRow.title,
         kind: activeListingRow.kind,
+        isFood: Boolean(activeListingRow.is_food),
+        availabilityMode: activeListingRow.availability_mode ?? null,
+        hasVariants: Boolean(activeListingRow.has_variants),
+        variants: activeVariants,
         status: activeListingRow.status,
         priceSen: Number(activeListingRow.price_sen ?? 0),
         availableStock:
@@ -526,12 +630,31 @@ export async function getMessagesPageData(
       }
     : null;
 
+  const enrichedOffers = activeOffers.map((offer) => {
+    const nextLabel =
+      offer.variantId && variantLabelMap.has(offer.variantId)
+        ? variantLabelMap.get(offer.variantId) ?? offer.variantLabel ?? null
+        : offer.variantLabel ?? null;
+    const nextImageUrl =
+      offer.variantImageUrl ??
+      (offer.variantId && variantImageMap.has(offer.variantId)
+        ? variantImageMap.get(offer.variantId) ?? null
+        : activeListing && activeListing.id === offer.listingId
+          ? activeListing.imageUrl
+          : null);
+    return {
+      ...offer,
+      variantLabel: nextLabel,
+      variantImageUrl: nextImageUrl,
+    };
+  });
+
   return {
     eligibility,
     conversations,
     activeConversationId,
     activeMessages,
-    activeOffers,
+    activeOffers: enrichedOffers,
     hasOlderMessages,
     activeListing,
     totalUnread,

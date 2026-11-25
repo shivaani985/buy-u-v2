@@ -131,13 +131,57 @@ test("validateCreateOffer enforces RM 2.00 min, Pre-Loved allow_offers, no self-
   assert.equal(validateCreateOffer({ ...base, offerPriceSen: 199 }).ok, false);
   assert.equal(validateCreateOffer({ ...base, offerPriceSen: 1600 }).ok, false);
 
-  // Non-pre_loved or allow_offers=false rejected
+  // Expanded bargaining policy: Pre-Loved & non-food Student Business allowed; food/pre-order/service/allow_offers=false rejected
   assert.equal(
-    validateCreateOffer({ ...base, listingKind: "business" }).ok,
+    validateCreateOffer({ ...base, listingKind: "business", listingIsFood: false }).ok,
+    true
+  );
+  assert.equal(
+    validateCreateOffer({ ...base, listingKind: "business", listingIsFood: true }).ok,
+    false
+  );
+  assert.equal(
+    validateCreateOffer({
+      ...base,
+      listingKind: "business",
+      listingIsFood: false,
+      listingAvailabilityMode: "pre_order",
+    }).ok,
+    false
+  );
+  assert.equal(
+    validateCreateOffer({ ...base, listingKind: "service" }).ok,
     false
   );
   assert.equal(
     validateCreateOffer({ ...base, allowOffers: false }).ok,
+    false
+  );
+
+  // Variant-based product bargaining requires valid active variantId
+  const VARIANT_ID = "77777777-7777-4777-8777-777777777777";
+  assert.equal(
+    validateCreateOffer({ ...base, listingKind: "business", hasVariants: true, variantId: null }).ok,
+    false
+  );
+  assert.equal(
+    validateCreateOffer({
+      ...base,
+      listingKind: "business",
+      hasVariants: true,
+      variantId: VARIANT_ID,
+      variantActive: true,
+    }).ok,
+    true
+  );
+  assert.equal(
+    validateCreateOffer({
+      ...base,
+      listingKind: "business",
+      hasVariants: true,
+      variantId: VARIANT_ID,
+      variantActive: false,
+    }).ok,
     false
   );
 
@@ -571,8 +615,17 @@ test("offer INSERT guard blocks forged status/server fields, overrides future ti
     }).ok,
     false
   );
+  // Expanded eligibility: non-food business allowed; food/service/allow_offers=false/invalid price rejected
   assert.equal(
-    simulateOfferInsertGuard({ ...base, listingKind: "business" }).ok,
+    simulateOfferInsertGuard({ ...base, listingKind: "business", listingIsFood: false }).ok,
+    true
+  );
+  assert.equal(
+    simulateOfferInsertGuard({ ...base, listingKind: "business", listingIsFood: true }).ok,
+    false
+  );
+  assert.equal(
+    simulateOfferInsertGuard({ ...base, listingKind: "service" }).ok,
     false
   );
   assert.equal(

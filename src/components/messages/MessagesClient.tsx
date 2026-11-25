@@ -43,6 +43,7 @@ import type {
 import {
   computeOfferExpiresAt,
   computeReservationExpiresAt,
+  isBargainingEligibleListing,
   mergeChatTimeline,
   resolveEffectiveOfferStatus,
   type OfferCardItem,
@@ -67,6 +68,8 @@ interface MessagesClientProps {
   initialHasOlder: boolean;
   activeListing: LinkedListingContext | null;
   hasExplicitConversationParam: boolean;
+  initialOpenOffer?: boolean;
+  initialVariantId?: string | null;
 }
 
 interface OptimisticAttachment {
@@ -147,13 +150,28 @@ export function MessagesClient({
   initialHasOlder,
   activeListing,
   hasExplicitConversationParam,
+  initialOpenOffer = false,
+  initialVariantId = null,
 }: MessagesClientProps) {
   const [conversations, setConversations] =
     useState<ConversationListItem[]>(initialConversations);
   const [messages, setMessages] = useState<ChatMessageItem[]>(initialMessages);
   const [offers, setOffers] = useState<OfferCardItem[]>(initialOffers);
   const [nowMs, setNowMs] = useState<number>(() => getCurrentTimestampMs());
-  const [offerPanelOpen, setOfferPanelOpen] = useState(false);
+  const [offerPanelOpen, setOfferPanelOpen] = useState(
+    Boolean(initialOpenOffer)
+  );
+  const defaultOfferVariant =
+    activeListing?.hasVariants && activeListing.variants.length > 0
+      ? activeListing.variants.find(
+          (v) => v.id === initialVariantId && v.active
+        ) ??
+        activeListing.variants.find((v) => v.active && v.availableStock > 0) ??
+        activeListing.variants[0]
+      : null;
+  const [selectedOfferVariantId, setSelectedOfferVariantId] = useState<
+    string | null
+  >(defaultOfferVariant?.id ?? null);
   const [offerAmountRm, setOfferAmountRm] = useState("");
   const [offerFormError, setOfferFormError] = useState<string | null>(null);
   const [isSubmittingOffer, setIsSubmittingOffer] = useState(false);
@@ -455,6 +473,25 @@ export function MessagesClient({
                 id: raw.id,
                 conversationId: raw.conversation_id,
                 listingId: raw.listing_id ?? "",
+                variantId: (raw as { variant_id?: string | null }).variant_id ?? null,
+                variantLabel: (() => {
+                  const vId = (raw as { variant_id?: string | null }).variant_id;
+                  const match = vId
+                    ? activeListing?.variants.find((v) => v.id === vId)
+                    : null;
+                  if (match) return match.label;
+                  const snap = (raw as { variant_snapshot?: Record<string, string> | null }).variant_snapshot;
+                  return snap && typeof snap === "object"
+                    ? Object.values(snap).filter(Boolean).join(" · ") || null
+                    : null;
+                })(),
+                variantImageUrl: (() => {
+                  const vId = (raw as { variant_id?: string | null }).variant_id;
+                  const match = vId
+                    ? activeListing?.variants.find((v) => v.id === vId)
+                    : null;
+                  return match?.imageUrl ?? activeListing?.imageUrl ?? null;
+                })(),
                 buyerId: raw.buyer_id ?? "",
                 sellerId: raw.seller_id ?? "",
                 offerPriceSen: Number(raw.offer_price_sen ?? 0),
@@ -751,6 +788,7 @@ export function MessagesClient({
       const res = await createOfferAction({
         conversationId: activeConversation.id,
         listingId: activeListing.id,
+        variantId: activeListing.hasVariants ? selectedOfferVariantId : null,
         amountRm: offerAmountRm,
       });
 
@@ -801,15 +839,37 @@ export function MessagesClient({
     }
   }
 
+  const activeOfferVariant =
+    activeListing?.hasVariants && activeListing.variants.length > 0
+      ? activeListing.variants.find((v) => v.id === selectedOfferVariantId) ??
+        null
+      : null;
+
+  const activeOfferListedPriceSen = activeOfferVariant
+    ? activeOfferVariant.priceSen
+    : activeListing?.priceSen ?? 0;
+
+  const activeOfferStock = activeListing?.hasVariants
+    ? activeOfferVariant?.active
+      ? activeOfferVariant.availableStock
+      : 0
+    : activeListing?.availableStock ?? 0;
+
   const canMakeOffer = Boolean(
     activeConversation &&
       !activeConversation.isBlocked &&
       activeListing &&
       activeListing.status === "published" &&
-      activeListing.kind === "pre_loved" &&
+      isBargainingEligibleListing({
+        kind: activeListing.kind,
+        isFood: activeListing.isFood,
+        availabilityMode: activeListing.availabilityMode,
+      }) &&
       activeListing.allowOffers &&
       activeListing.sellerId.toLowerCase() !== currentUserId.toLowerCase() &&
-      (activeListing.availableStock ?? 0) >= 1
+      (activeListing.hasVariants
+        ? activeListing.variants.some((v) => v.active && v.availableStock >= 1)
+        : (activeListing.availableStock ?? 0) >= 1)
   );
 
   const hasActivePendingOffer = Boolean(
@@ -900,10 +960,10 @@ export function MessagesClient({
 
           <div className="mt-3 overflow-hidden rounded-xl border border-[#E6E3EE] bg-[#F7F6FA]">
             <div className="aspect-[4/3] w-full">
-              {activeListing.imageUrl ? (
+              {(activeOfferVariant?.imageUrl || activeListing.imageUrl) ? (
                 // eslint-disable-next-line @next/next/no-img-element
                 <img
-                  src={activeListing.imageUrl}
+                  src={activeOfferVariant?.imageUrl || activeListing.imageUrl || ""}
                   alt={activeListing.title}
                   className="h-full w-full object-cover"
                 />
@@ -1421,7 +1481,7 @@ export function MessagesClient({
               <div ref={messagesEndRef} />
             </div>
 
-            {/* Compact Collapsible Make an Offer Panel (Pre-Loved allow_offers only) */}
+            {/* Compact Collapsible Bargain / Offer Panel (Pre-Loved & non-food Student Business) */}
             {canMakeOffer && activeListing ? (
               <div className="border-t border-[#ECEAF3] bg-[#FAF9FC] px-3.5 py-2.5">
                 <div className="flex items-center justify-between gap-2">
@@ -1432,15 +1492,15 @@ export function MessagesClient({
                       setOfferPanelOpen((v) => !v);
                     }}
                     aria-expanded={offerPanelOpen}
-                    className="inline-flex items-center gap-1.5 text-xs font-bold text-[#4E2A84] transition hover:underline"
+                    className="press-feedback inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-[#4E2A84]/25 bg-[#F4F1FA] px-3 py-1 text-xs font-bold text-[#4E2A84] transition-colors hover:bg-[#4E2A84] hover:text-white"
                   >
                     <Tag className="h-3.5 w-3.5" aria-hidden="true" />
                     <span>
-                      {offerPanelOpen ? "Hide Offer Form" : "Make an Offer"}
+                      {offerPanelOpen ? "Hide Bargain Form" : "Bargain / Make an Offer"}
                     </span>
                   </button>
                   <span className="text-[11px] text-[#6B6779]">
-                    Listed at {formatSenToRm(activeListing.priceSen)} · Min RM
+                    Listed at {formatSenToRm(activeOfferListedPriceSen)} · Min RM
                     2.00
                   </span>
                 </div>
@@ -1456,29 +1516,69 @@ export function MessagesClient({
                         it or wait for a response before sending another.
                       </p>
                     ) : (
-                      <div className="flex flex-wrap items-center gap-2">
-                        <label htmlFor="offer-amount-rm" className="sr-only">
-                          Offer amount in RM
-                        </label>
-                        <div className="flex min-w-[140px] flex-1 items-center rounded-xl border border-[#DCD9E6] bg-white px-3 py-1.5 focus-within:border-[#4E2A84]">
-                          <span className="mr-1.5 text-xs font-bold text-[#6B6779]">
-                            RM
-                          </span>
-                          <input
-                            id="offer-amount-rm"
-                            type="text"
-                            inputMode="decimal"
-                            value={offerAmountRm}
-                            onChange={(e) => setOfferAmountRm(e.target.value)}
-                            placeholder="e.g. 12.00"
-                            disabled={isSubmittingOffer}
-                            className="w-full bg-transparent text-sm font-semibold text-[#14121A] placeholder:text-[#7A7588] focus:outline-none"
-                          />
-                        </div>
+                      <div className="space-y-2">
+                        {activeListing.hasVariants &&
+                        activeListing.variants.length > 0 ? (
+                          <div>
+                            <label
+                              htmlFor="offer-variant-select"
+                              className="mb-1 block text-[11px] font-semibold text-[#555062]"
+                            >
+                              Select Variant
+                            </label>
+                            <select
+                              id="offer-variant-select"
+                              value={selectedOfferVariantId ?? ""}
+                              onChange={(e) =>
+                                setSelectedOfferVariantId(e.target.value)
+                              }
+                              disabled={isSubmittingOffer}
+                              className="h-9 w-full cursor-pointer rounded-xl border border-[#DCD9E6] bg-white px-3 text-xs font-semibold text-[#14121A] outline-none focus:border-[#4E2A84]"
+                            >
+                              {activeListing.variants.map((v) => (
+                                <option
+                                  key={v.id}
+                                  value={v.id}
+                                  disabled={!v.active || v.availableStock < 1}
+                                >
+                                  {v.label} — {formatSenToRm(v.priceSen)} (
+                                  {!v.active || v.availableStock < 1
+                                    ? "Out of stock"
+                                    : `${v.availableStock} left`}
+                                  )
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        ) : null}
+
+                        <div className="flex flex-wrap items-center gap-2">
+                          <label htmlFor="offer-amount-rm" className="sr-only">
+                            Offer amount in RM
+                          </label>
+                          <div className="flex min-w-[140px] flex-1 items-center rounded-xl border border-[#DCD9E6] bg-white px-3 py-1.5 focus-within:border-[#4E2A84]">
+                            <span className="mr-1.5 text-xs font-bold text-[#6B6779]">
+                              RM
+                            </span>
+                            <input
+                              id="offer-amount-rm"
+                              type="text"
+                              inputMode="decimal"
+                              autoFocus={Boolean(initialOpenOffer)}
+                              value={offerAmountRm}
+                              onChange={(e) => setOfferAmountRm(e.target.value)}
+                              placeholder="e.g. 12.00"
+                              disabled={
+                                isSubmittingOffer || activeOfferStock < 1
+                              }
+                              className="w-full bg-transparent text-sm font-semibold text-[#14121A] placeholder:text-[#7A7588] focus:outline-none"
+                            />
+                          </div>
                         <button
                           type="submit"
                           disabled={
                             isSubmittingOffer ||
+                            activeOfferStock < 1 ||
                             offerAmountRm.trim().length === 0
                           }
                           className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-xl bg-[#4E2A84] px-4 text-xs font-bold text-white transition hover:bg-[#3F216B] disabled:cursor-not-allowed disabled:bg-[#C9C4D6]"
@@ -1491,6 +1591,7 @@ export function MessagesClient({
                           ) : null}
                           <span>Send Offer</span>
                         </button>
+                        </div>
                       </div>
                     )}
 

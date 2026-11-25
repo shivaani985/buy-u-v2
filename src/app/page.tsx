@@ -5,7 +5,7 @@ import { EditorialHero } from "@/components/home/EditorialHero";
 import { HomeListingSection } from "@/components/home/HomeListingSection";
 import { ServicesAndFreeColumns } from "@/components/home/ServicesAndFreeColumns";
 import { getCategories, getListings } from "@/lib/catalog";
-import { getSessionSummary } from "@/lib/supabase/server";
+import { createSupabaseServerClient, getSessionSummary } from "@/lib/supabase/server";
 
 interface HomePageProps {
   searchParams: Promise<{ demo?: string }>;
@@ -20,6 +20,22 @@ export default async function HomePage({ searchParams }: HomePageProps) {
     getCategories({ useDemo }),
     getListings({ useDemo }),
   ]);
+
+  let favouriteIds: string[] = [];
+  if (!useDemo && session.isActiveMember && session.profile?.id) {
+    const supabase = await createSupabaseServerClient();
+    if (supabase) {
+      const { data: favRows } = await supabase
+        .from("favourites")
+        .select("listing_id")
+        .eq("user_id", session.profile.id);
+      if (favRows) {
+        favouriteIds = (favRows as { listing_id: string }[]).map(
+          (r) => r.listing_id
+        );
+      }
+    }
+  }
 
   const serviceListings = listingsResult.data.filter(
     (item) => item.listingType === "service"
@@ -68,6 +84,8 @@ export default async function HomePage({ searchParams }: HomePageProps) {
         source={listingsResult.source}
         notice={listingsResult.notice}
         useDemo={useDemo}
+        favouriteIds={favouriteIds}
+        canFavourite={session.isActiveMember}
       />
 
       {/* 4. Side-by-Side Student Services & Free Items Columns (Banner + Previews) */}

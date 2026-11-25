@@ -3,7 +3,11 @@ import Link from "next/link";
 import { AlertCircle, ArrowLeft, Lock, RefreshCw } from "lucide-react";
 import { CheckoutClient } from "@/components/checkout/CheckoutClient";
 import { getCartPageData } from "@/lib/buyer/cart-data";
-import { buildCheckoutPreparation } from "@/lib/buyer/checkout";
+import {
+  buildCheckoutPreparation,
+  filterCartSummaryByIds,
+} from "@/lib/buyer/checkout";
+import { isValidUuid } from "@/lib/buyer/validation";
 import { getSessionSummary } from "@/lib/supabase/server";
 
 export const metadata: Metadata = {
@@ -12,10 +16,60 @@ export const metadata: Metadata = {
     "Review your UMSKAL campus seller orders and collection details before payment.",
 };
 
-export default async function CheckoutPage() {
-  const session = await getSessionSummary();
+export default async function CheckoutPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ items?: string }>;
+}) {
+  const [session, sp] = await Promise.all([getSessionSummary(), searchParams]);
+  const hasExplicitItemsParam = typeof sp.items === "string";
+  const rawTokens = hasExplicitItemsParam
+    ? sp.items!
+        .split(",")
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0)
+    : [];
+
+  let selectionError: string | null = null;
+  let selectedCartItemIds: string[] | null = null;
+
+  if (hasExplicitItemsParam) {
+    const uniqueTokens = Array.from(new Set(rawTokens));
+    if (
+      rawTokens.length === 0 ||
+      uniqueTokens.length !== rawTokens.length ||
+      uniqueTokens.some((id) => !isValidUuid(id))
+    ) {
+      selectionError =
+        "Your checkout item selection is invalid. Return to your cart and select the items you want to purchase.";
+    } else {
+      selectedCartItemIds = [...uniqueTokens].sort();
+    }
+  }
+
   const { eligibility, summary, error } = await getCartPageData(session);
-  const preparation = buildCheckoutPreparation(summary);
+  if (!selectionError && selectedCartItemIds) {
+    const liveIds = new Set(
+      summary.groups.flatMap((g) => g.items.map((it) => it.id))
+    );
+    if (selectedCartItemIds.some((id) => !liveIds.has(id))) {
+      selectionError =
+        "One or more selected cart items are no longer in your cart. Return to your cart to review your selection.";
+    }
+  }
+
+  // Always submit exact reviewed cart item IDs even if user navigated directly to /checkout
+  const effectiveSelectedIds =
+    selectionError !== null
+      ? null
+      : selectedCartItemIds ??
+        summary.groups
+          .flatMap((g) => g.items.map((it) => it.id))
+          .sort();
+
+  const filteredSummary = filterCartSummaryByIds(summary, effectiveSelectedIds);
+  const preparation = buildCheckoutPreparation(filteredSummary);
+  const pageError = error || selectionError;
 
   const profile = session.profile;
   const roleLabel =
@@ -79,7 +133,7 @@ export default async function CheckoutPage() {
             </div>
           </div>
         </section>
-      ) : error ? (
+      ) : pageError ? (
         <section
           role="alert"
           className="rounded-2xl border border-[#E6E3EE] bg-white p-6 sm:p-8"
@@ -93,7 +147,7 @@ export default async function CheckoutPage() {
               <h2 className="text-base font-bold text-[#14121A]">
                 Could not prepare checkout
               </h2>
-              <p className="mt-1 text-sm text-[#6B6779]">{error}</p>
+              <p className="mt-1 text-sm text-[#6B6779]">{pageError}</p>
               <div className="mt-4 flex flex-wrap items-center gap-3">
                 <Link
                   href="/checkout"
@@ -115,7 +169,9 @@ export default async function CheckoutPage() {
       ) : (
         <CheckoutClient
           initialPreparation={preparation}
+          selectedCartItemIds={effectiveSelectedIds}
           buyer={{
+            userId: eligibility.userId ?? "",
             displayName:
               profile?.display_name?.trim() ||
               profile?.full_name?.trim() ||

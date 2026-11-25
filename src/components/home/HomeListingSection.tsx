@@ -5,9 +5,11 @@ import {
   LogIn,
   MapPin,
   Package,
+  Star,
   UserPlus,
 } from "lucide-react";
 import { ListingImage } from "@/components/shared/ListingImage";
+import { FavouriteButton } from "@/components/shared/FavouriteButton";
 import {
   formatListingType,
   formatRelativeTime,
@@ -20,6 +22,8 @@ interface HomeListingSectionProps {
   source: CatalogDataSource;
   notice?: string;
   useDemo?: boolean;
+  favouriteIds?: string[];
+  canFavourite?: boolean;
 }
 
 const BADGE_STYLES: Record<Listing["listingType"], string> = {
@@ -30,7 +34,15 @@ const BADGE_STYLES: Record<Listing["listingType"], string> = {
   free: "bg-[#F3F2F6] text-[#14121A]",
 };
 
-function HomeListingCard({ listing }: { listing: Listing }) {
+function HomeListingCard({
+  listing,
+  isFavourited = false,
+  canFavourite = false,
+}: {
+  listing: Listing;
+  isFavourited?: boolean;
+  canFavourite?: boolean;
+}) {
   const detailHref = listing.isDemo
     ? `/listings/${encodeURIComponent(listing.slug)}?demo=1`
     : `/listings/${encodeURIComponent(listing.slug)}`;
@@ -55,17 +67,17 @@ function HomeListingCard({ listing }: { listing: Listing }) {
 
   return (
     <article className="group flex flex-col overflow-hidden rounded-2xl border border-[#E6E3EE] bg-white shadow-[0_2px_8px_rgba(20,18,26,0.04)] transition-all hover:-translate-y-0.5 hover:border-[#4E2A84]/40 hover:shadow-[0_6px_16px_rgba(78,42,132,0.09)]">
-      <Link href={detailHref} className="flex flex-1 flex-col">
-        {/* 1. Image with RM price & stock/condition overlay */}
-        <div className="relative aspect-[4/3] w-full overflow-hidden bg-[#F5F4F8]">
+      {/* 1. Image with translucent RM price, stock/condition & favourite heart */}
+      <div className="relative aspect-[4/3] w-full overflow-hidden bg-[#F5F4F8]">
+        <Link href={detailHref} className="block h-full w-full">
           <ListingImage
             src={listing.imageUrl}
             alt={listing.imageAlt}
             fallback={fallback}
           />
 
-          {/* Prominent RM Price Overlay */}
-          <div className="absolute bottom-2 left-2 rounded-lg bg-[#14121A]/90 px-2.5 py-0.5 shadow-sm backdrop-blur-xs">
+          {/* Translucent RM Price Overlay */}
+          <div className="absolute bottom-2 left-2 rounded-lg border border-white/15 bg-[#14121A]/60 px-2.5 py-0.5 shadow-sm backdrop-blur-md">
             <span className="tabular-price text-[14px] font-extrabold tracking-tight text-white sm:text-[15px]">
               {formatSenToRm(listing.priceSen)}
             </span>
@@ -88,10 +100,20 @@ function HomeListingCard({ listing }: { listing: Listing }) {
               {listing.condition}
             </span>
           ) : null}
-        </div>
+        </Link>
 
-        {/* Card Body: Strict Hierarchy */}
-        <div className="flex flex-1 flex-col justify-between p-3">
+        {/* Bottom-Right Interactive Favourite Heart */}
+        <FavouriteButton
+          listingId={listing.id}
+          initialFavourited={isFavourited}
+          canFavourite={canFavourite}
+          isDemo={listing.isDemo}
+          className="absolute bottom-2 right-2 z-10"
+        />
+      </div>
+
+      {/* Card Body: Strict Hierarchy */}
+      <Link href={detailHref} className="flex flex-1 flex-col justify-between p-3">
           <div>
             {/* 2. Product Name — larger, bold */}
             <h3 className="line-clamp-2 text-[15.5px] font-extrabold leading-snug tracking-[-0.01em] text-[#14121A] group-hover:text-[#4E2A84]">
@@ -115,6 +137,29 @@ function HomeListingCard({ listing }: { listing: Listing }) {
                 {listing.categoryName}
               </span>
             </div>
+
+            {listing.listingType !== "free" ? (
+              <div className="mt-1.5 flex items-center gap-1.5 text-[11px] font-semibold text-[#5B5668]">
+                <Star
+                  className={`h-3.5 w-3.5 shrink-0 ${
+                    listing.rating != null
+                      ? "fill-amber-400 text-amber-500"
+                      : "text-[#C5C1D0]"
+                  }`}
+                  aria-hidden="true"
+                />
+                <span>
+                  {listing.rating != null
+                    ? `${listing.rating.toFixed(1)} (${listing.reviewCount ?? 0})`
+                    : "No shop rating yet"}
+                </span>
+                {(listing.salesCount ?? 0) > 0 ? (
+                  <span className="text-[#8E899E]">
+                    · {listing.salesCount} sold
+                  </span>
+                ) : null}
+              </div>
+            ) : null}
           </div>
 
           {/* 5. Seller information — secondary footer */}
@@ -134,7 +179,6 @@ function HomeListingCard({ listing }: { listing: Listing }) {
               </span>
             </div>
           ) : null}
-        </div>
       </Link>
     </article>
   );
@@ -145,6 +189,8 @@ export function HomeListingSection({
   source,
   notice,
   useDemo = false,
+  favouriteIds = [],
+  canFavourite = false,
 }: HomeListingSectionProps) {
   const viewAllHref = useDemo ? "/marketplace?demo=1" : "/marketplace";
 
@@ -267,7 +313,12 @@ export function HomeListingSection({
         ) : (
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
             {featured.map((listing) => (
-              <HomeListingCard key={listing.id} listing={listing} />
+              <HomeListingCard
+                key={listing.id}
+                listing={listing}
+                isFavourited={favouriteIds.includes(listing.id)}
+                canFavourite={canFavourite}
+              />
             ))}
           </div>
         )}

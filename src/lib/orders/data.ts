@@ -4,6 +4,7 @@ import {
   type OrderDisputeSummaryView,
 } from "@/lib/disputes/data";
 import { resolvePublicStorageUrl } from "@/lib/format";
+import { formatVariationOptionLabel } from "@/lib/seller/variations";
 import { getPublicSupabaseEnv } from "@/lib/supabase/env";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { getServerServiceClient } from "@/lib/supabase/service";
@@ -13,9 +14,14 @@ export interface BuyerOrderItemView {
   id: string;
   listingId: string | null;
   title: string;
+  variantLabel: string | null;
   unitSen: number;
   quantity: number;
   imageUrl: string | null;
+  isService: boolean;
+  serviceMode: string | null;
+  serviceRequirements: string | null;
+  serviceAttachmentPaths: string[];
 }
 
 export interface BuyerOrderPaymentView {
@@ -72,6 +78,7 @@ export interface BuyerOrderView {
   refund: BuyerOrderRefundView | null;
   reviews: BuyerOrderReviewView[];
   items: BuyerOrderItemView[];
+  isServiceOrder: boolean;
 }
 
 export interface BuyerPendingCheckoutView {
@@ -174,7 +181,9 @@ export async function getBuyerOrdersData(
     await Promise.all([
       supabase
         .from("order_items")
-        .select("id,order_id,listing_id,title_snapshot,unit_sen,quantity,image_path")
+        .select(
+          "id,order_id,listing_id,title_snapshot,variant_snapshot,unit_sen,quantity,image_path,is_service,service_mode,service_requirements,service_attachment_paths"
+        )
         .in("order_id", orderIds),
       supabase
         .from("public_profiles")
@@ -325,18 +334,36 @@ export async function getBuyerOrdersData(
     order_id: string;
     listing_id: string | null;
     title_snapshot: string;
+    variant_snapshot?: Record<string, string> | null;
     unit_sen: number;
     quantity: number;
     image_path: string | null;
+    is_service?: boolean | null;
+    service_mode?: string | null;
+    service_requirements?: string | null;
+    service_attachment_paths?: string[] | null;
   }>) {
     const list = itemsByOrder.get(row.order_id) ?? [];
+    const variantLabel =
+      row.variant_snapshot &&
+      typeof row.variant_snapshot === "object" &&
+      Object.keys(row.variant_snapshot).length > 0
+        ? formatVariationOptionLabel(row.variant_snapshot)
+        : null;
     list.push({
       id: row.id,
       listingId: row.listing_id,
       title: row.title_snapshot,
+      variantLabel,
       unitSen: Number(row.unit_sen ?? 0),
       quantity: Number(row.quantity ?? 1),
       imageUrl: resolvePublicStorageUrl("listings", row.image_path, env.url),
+      isService: Boolean(row.is_service),
+      serviceMode: row.service_mode ?? null,
+      serviceRequirements: row.service_requirements ?? null,
+      serviceAttachmentPaths: Array.isArray(row.service_attachment_paths)
+        ? row.service_attachment_paths
+        : [],
     });
     itemsByOrder.set(row.order_id, list);
   }
@@ -355,30 +382,34 @@ export async function getBuyerOrdersData(
     if (s.shop_name?.trim()) sellerNameMap.set(s.seller_id, s.shop_name.trim());
   }
 
-  const allOrders: BuyerOrderView[] = orderRows.map((o) => ({
-    id: o.id,
-    orderCode: o.order_code,
-    source: o.source,
-    checkoutSessionId: o.checkout_session_id,
-    sellerId: o.seller_id,
-    sellerName: sellerNameMap.get(o.seller_id) ?? "UMSKAL Seller",
-    status: o.status,
-    subtotalSen: Number(o.subtotal_sen ?? 0),
-    fpxFeeSen: Number(o.fpx_fee_sen ?? 0),
-    totalPaidSen: Number(o.total_paid_sen ?? 0),
-    collectionAreaName: o.collection_area_name?.trim() || "UMSKAL Campus",
-    paymentDeadline: o.payment_deadline,
-    paidAt: o.paid_at,
-    handedOverAt: o.handed_over_at,
-    completedAt: o.completed_at,
-    createdAt: o.created_at,
-    pickupPin: pinByOrder.get(o.id) ?? null,
-    latestPayment: latestPaymentByOrder.get(o.id) ?? null,
-    dispute: disputesByOrder.get(o.id) ?? null,
-    refund: refundByOrder.get(o.id) ?? null,
-    reviews: reviewsByOrder.get(o.id) ?? [],
-    items: itemsByOrder.get(o.id) ?? [],
-  }));
+  const allOrders: BuyerOrderView[] = orderRows.map((o) => {
+    const items = itemsByOrder.get(o.id) ?? [];
+    return {
+      id: o.id,
+      orderCode: o.order_code,
+      source: o.source,
+      checkoutSessionId: o.checkout_session_id,
+      sellerId: o.seller_id,
+      sellerName: sellerNameMap.get(o.seller_id) ?? "UMSKAL Seller",
+      status: o.status,
+      subtotalSen: Number(o.subtotal_sen ?? 0),
+      fpxFeeSen: Number(o.fpx_fee_sen ?? 0),
+      totalPaidSen: Number(o.total_paid_sen ?? 0),
+      collectionAreaName: o.collection_area_name?.trim() || "UMSKAL Campus",
+      paymentDeadline: o.payment_deadline,
+      paidAt: o.paid_at,
+      handedOverAt: o.handed_over_at,
+      completedAt: o.completed_at,
+      createdAt: o.created_at,
+      pickupPin: pinByOrder.get(o.id) ?? null,
+      latestPayment: latestPaymentByOrder.get(o.id) ?? null,
+      dispute: disputesByOrder.get(o.id) ?? null,
+      refund: refundByOrder.get(o.id) ?? null,
+      reviews: reviewsByOrder.get(o.id) ?? [],
+      items,
+      isServiceOrder: items.some((it) => it.isService),
+    };
+  });
 
   const pendingCheckouts: BuyerPendingCheckoutView[] = [];
   const groupedPendingSessionIds = new Set<string>();

@@ -6,6 +6,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
   Bell,
+  Heart,
   LogOut,
   Menu,
   MessageCircle,
@@ -504,6 +505,16 @@ export function SiteHeader({
                     </Link>
 
                     <Link
+                      href="/favourites"
+                      role="menuitem"
+                      onClick={() => setAccountMenuOpen(false)}
+                      className="flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm font-semibold text-[#14121A] hover:bg-[#F4F1FA] hover:text-[#4E2A84] transition-colors"
+                    >
+                      <Heart className="h-4 w-4 text-[#E11D48]" aria-hidden="true" />
+                      <span>Favourites</span>
+                    </Link>
+
+                    <Link
                       href="/messages"
                       role="menuitem"
                       onClick={() => setAccountMenuOpen(false)}
@@ -646,6 +657,15 @@ export function SiteHeader({
                 {link.label}
               </Link>
             ))}
+
+            <Link
+              href="/favourites"
+              onClick={() => setMobileOpen(false)}
+              className="flex items-center gap-2 rounded-lg px-3 py-2.5 text-sm font-semibold text-[#14121A] hover:bg-[#F4F2FA] hover:text-[#4E2A84]"
+            >
+              <Heart className="h-4 w-4 text-[#E11D48]" aria-hidden="true" />
+              <span>Favourites</span>
+            </Link>
 
             <Link
               href="/messages"

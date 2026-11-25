@@ -16,6 +16,7 @@ import {
   adminResolveDisputeAction,
 } from "@/app/disputes/actions";
 import { DisputeDetailCard } from "@/components/disputes/DisputeDetailCard";
+import { ServiceOrderDetailsBlock } from "@/components/orders/ServiceOrderDetailsBlock";
 import type { AdminDisputeItemView } from "@/lib/disputes/data";
 import type {
   DisputeResolutionType,
@@ -195,6 +196,11 @@ export function AdminDisputesClient({ disputes }: AdminDisputesClientProps) {
                     <span className="font-bold text-[#4E2A84]">
                       #{d.orderCode}
                     </span>
+                    {d.isServiceOrder ? (
+                      <span className="inline-flex items-center rounded-full bg-[#F3ECFC] px-2 py-0.5 text-[10.5px] font-bold text-[#4E2A84]">
+                        Service Order
+                      </span>
+                    ) : null}
                     <span className="text-[#C7C3D4]">&middot;</span>
                     <span className="inline-flex items-center gap-1 text-[#4A4656]">
                       <User className="h-3.5 w-3.5 text-[#4E2A84]" />
@@ -213,6 +219,11 @@ export function AdminDisputesClient({ disputes }: AdminDisputesClientProps) {
                 </div>
 
                 <DisputeDetailCard dispute={d} />
+                <ServiceOrderDetailsBlock
+                  orderId={d.orderId}
+                  items={d.items}
+                  compact
+                />
 
                 {/* Internal Admin Notes & Resolution Controls */}
                 <div className="space-y-3 border-t border-[#ECEAF3] bg-[#FAF9FC] px-5 py-4 text-xs">

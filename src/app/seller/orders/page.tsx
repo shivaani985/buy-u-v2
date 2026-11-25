@@ -24,10 +24,13 @@ export default async function SellerOrdersPage() {
   }
 
   const { orders, error } = await getSellerOrdersData(session);
+  const newOrderCount = orders.filter(
+    (o) => o.status === "paid" || o.status === "ready_for_pickup"
+  ).length;
 
   return (
     <div className="mx-auto w-full max-w-[1200px] space-y-6 px-4 py-6 sm:px-6 lg:px-10">
-      <SellerNav />
+      <SellerNav newOrderCount={newOrderCount} />
 
       <div>
         <h1 className="text-2xl font-extrabold tracking-[-0.02em] text-[#14121A] sm:text-3xl">

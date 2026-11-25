@@ -243,8 +243,9 @@ export function AdminFinancialsClient({ data }: AdminFinancialsClientProps) {
                         Return / Restock
                       </p>
                       <p className="font-semibold text-[#14121A]">
-                        {r.returnStatus.replace(/_/g, " ")} &middot;{" "}
-                        {r.restockStatus.replace(/_/g, " ")}
+                        {r.isServiceOrder
+                          ? "N/A (Service Order)"
+                          : `${r.returnStatus.replace(/_/g, " ")} · ${r.restockStatus.replace(/_/g, " ")}`}
                       </p>
                     </div>
                   </div>
@@ -259,28 +260,31 @@ export function AdminFinancialsClient({ data }: AdminFinancialsClientProps) {
                   <div className="mt-3 flex flex-wrap gap-2">
                     {r.status !== "succeeded" ? (
                       <>
-                        <button
-                          type="button"
-                          disabled={busyKey !== null}
-                          onClick={() =>
-                            runAction(`ret:${r.id}`, () =>
-                              adminConfigureRefundReturnAction({
-                                refundId: r.id,
-                                returnRequired: !r.returnRequired,
-                                returnInstructions: !r.returnRequired
-                                  ? "Return item to seller at campus collection point and click Mark Item Returned."
-                                  : undefined,
-                              })
-                            )
-                          }
-                          className="rounded-xl border border-[#E6E3EE] bg-white px-3 py-1.5 font-bold text-[#4A4656] hover:border-[#4E2A84]"
-                        >
-                          {r.returnRequired
-                            ? "Waive Return Requirement"
-                            : "Require Physical Return"}
-                        </button>
+                        {!r.isServiceOrder ? (
+                          <button
+                            type="button"
+                            disabled={busyKey !== null}
+                            onClick={() =>
+                              runAction(`ret:${r.id}`, () =>
+                                adminConfigureRefundReturnAction({
+                                  refundId: r.id,
+                                  returnRequired: !r.returnRequired,
+                                  returnInstructions: !r.returnRequired
+                                    ? "Return item to seller at campus collection point and click Mark Item Returned."
+                                    : undefined,
+                                })
+                              )
+                            }
+                            className="rounded-xl border border-[#E6E3EE] bg-white px-3 py-1.5 font-bold text-[#4A4656] hover:border-[#4E2A84]"
+                          >
+                            {r.returnRequired
+                              ? "Waive Return Requirement"
+                              : "Require Physical Return"}
+                          </button>
+                        ) : null}
 
-                        {r.returnRequired &&
+                        {!r.isServiceOrder &&
+                        r.returnRequired &&
                         r.returnStatus !== "return_confirmed" &&
                         r.returnStatus !== "return_exception" ? (
                           <button
@@ -340,7 +344,8 @@ export function AdminFinancialsClient({ data }: AdminFinancialsClientProps) {
                       </>
                     ) : null}
 
-                    {r.refundType === "full_refund" &&
+                    {!r.isServiceOrder &&
+                    r.refundType === "full_refund" &&
                     r.restockStatus === "pending_decision" ? (
                       <>
                         <button

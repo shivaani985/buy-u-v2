@@ -134,6 +134,7 @@ export interface AnalyticsDatasetInput {
     title_snapshot: string;
     unit_sen: number;
     quantity: number;
+    is_service?: boolean | null;
   }>;
   checkoutSessions: Array<{
     id: string;
@@ -421,9 +422,30 @@ export function computeSellerAnalytics(
     };
   });
 
-  const sellerServices = data.serviceRequests.filter(
+  const sellerServiceListingIds = new Set(
+    sellerListings.filter((l) => l.kind === "service").map((l) => l.id)
+  );
+  const periodServiceOrders = periodOrders.filter((o) => {
+    const items = itemsByOrder.get(o.id) ?? [];
+    return items.some(
+      (oi) =>
+        Boolean(oi.is_service) ||
+        (oi.listing_id !== null && sellerServiceListingIds.has(oi.listing_id))
+    );
+  });
+  const sellerLegacyServices = data.serviceRequests.filter(
     (sr) => sr.seller_id === sellerId && inRange(sr.created_at, window.startMs, window.endMs)
   );
+  const sellerServiceTotal = periodServiceOrders.length + sellerLegacyServices.length;
+  const sellerServiceCompleted =
+    periodServiceOrders.filter((o) => o.status === "completed").length +
+    sellerLegacyServices.filter((s) => s.status === "completed").length;
+  const sellerServiceAccepted =
+    periodServiceOrders.length +
+    sellerLegacyServices.filter((s) =>
+      ["accepted", "in_progress", "delivered", "completed"].includes(s.status)
+    ).length;
+
   const sellerReviews = data.reviews.filter((r) => r.seller_id === sellerId);
   const ratingSummary = computeRatingSummary(sellerReviews);
 
@@ -457,8 +479,8 @@ export function computeSellerAnalytics(
       activeListings: sellerListings.filter((l) => l.status === "published").length,
       totalViews: periodViews.length,
       totalFavourites: data.favourites.filter((f) => listingIds.has(f.listing_id)).length,
-      serviceRequests: sellerServices.length,
-      completedServices: sellerServices.filter((s) => s.status === "completed").length,
+      serviceRequests: sellerServiceTotal,
+      completedServices: sellerServiceCompleted,
       averageRating: ratingSummary.averageRating,
       reviewCount: ratingSummary.totalReviews,
     },
@@ -467,11 +489,11 @@ export function computeSellerAnalytics(
     topByRevenue: byRevenue.slice(0, 5),
     listingPerformance,
     serviceSummary: {
-      total: sellerServices.length,
-      accepted: sellerServices.filter((s) => ["accepted", "in_progress", "delivered", "completed"].includes(s.status)).length,
-      completed: sellerServices.filter((s) => s.status === "completed").length,
-      declined: sellerServices.filter((s) => s.status === "declined").length,
-      cancelled: sellerServices.filter((s) => s.status === "cancelled").length,
+      total: sellerServiceTotal,
+      accepted: sellerServiceAccepted,
+      completed: sellerServiceCompleted,
+      declined: sellerLegacyServices.filter((s) => s.status === "declined").length,
+      cancelled: sellerLegacyServices.filter((s) => s.status === "cancelled").length,
     },
     ratingSummary,
     insights,
@@ -665,11 +687,29 @@ export function computeAdminPlatformAnalytics(
     }
   }
 
-  const periodServices = data.serviceRequests.filter((s) => inRange(s.created_at, window.startMs, window.endMs));
-  const completedServices = periodServices.filter((s) => s.status === "completed").length;
-  const acceptedServices = periodServices.filter((s) =>
-    ["accepted", "in_progress", "delivered", "completed"].includes(s.status)
-  ).length;
+  const periodServiceOrders = periodOrders.filter((o) => {
+    const items = orderItemsByOrder.get(o.id) ?? [];
+    return items.some(
+      (oi) =>
+        Boolean(oi.is_service) ||
+        (oi.listing_id !== null && listingById.get(oi.listing_id)?.kind === "service")
+    );
+  });
+  const periodLegacyServices = data.serviceRequests.filter((s) =>
+    inRange(s.created_at, window.startMs, window.endMs)
+  );
+  // Paid service orders (orders table) and historical legacy requests (service_requests table) are disjoint; no double-counting.
+  const periodServices = [...periodLegacyServices];
+  const completedServices =
+    periodServiceOrders.filter((o) => o.status === "completed").length +
+    periodLegacyServices.filter((s) => s.status === "completed").length;
+  const acceptedServices =
+    periodServiceOrders.length +
+    periodLegacyServices.filter((s) =>
+      ["accepted", "in_progress", "delivered", "completed"].includes(s.status)
+    ).length;
+  const totalServiceTransactions =
+    periodServiceOrders.length + periodLegacyServices.length;
 
   const community = computeCommunityImpact({
     notices: data.freeNotices,
@@ -723,9 +763,9 @@ export function computeAdminPlatformAnalytics(
       .sort((a, b) => b.amountSen - a.amountSen),
     services: {
       activeServiceListings: data.listings.filter((l) => l.kind === "service" && l.status === "published").length,
-      totalRequests: periodServices.length,
+      totalRequests: totalServiceTransactions,
       completedServices,
-      acceptanceRatePct: periodServices.length > 0 ? Number(((acceptedServices / periodServices.length) * 100).toFixed(1)) : null,
+      acceptanceRatePct: totalServiceTransactions > 0 ? Number(((acceptedServices / totalServiceTransactions) * 100).toFixed(1)) : null,
       completionRatePct: acceptedServices > 0 ? Number(((completedServices / acceptedServices) * 100).toFixed(1)) : null,
     },
     community,

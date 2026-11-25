@@ -98,7 +98,7 @@ export default async function SellerWithdrawalsPage() {
 
   return (
     <div className="mx-auto w-full max-w-[1200px] space-y-6 px-4 py-6 sm:px-6 lg:px-10">
-      <SellerNav />
+      <SellerNav newOrderCount={hub.newOrderCount} />
       <div>
         <h1 className="text-2xl font-extrabold tracking-[-0.02em] text-[#14121A] sm:text-3xl">
           Earnings &amp; Withdrawals
