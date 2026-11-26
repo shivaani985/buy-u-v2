@@ -124,6 +124,7 @@ export default async function AccountPage() {
     bio?: string | null;
     faculty?: string | null;
     phone?: string | null;
+    matric_number?: string | null;
     notification_prefs?: { inquiries?: boolean; reviews?: boolean; community?: boolean } | null;
   }
   let blockedUsers: Array<{ id: string; displayName: string; createdAt: string }> = [];
@@ -134,14 +135,14 @@ export default async function AccountPage() {
     const [pRes, bRes] = await Promise.all([
       service
         .from("profiles")
-        .select("bio,faculty,phone,notification_prefs")
+        .select("bio,faculty,phone,matric_number,notification_prefs")
         .eq("id", profile.id)
         .maybeSingle()
         .then(async (res) => {
           if (!res.error) return res;
           return service
             .from("profiles")
-            .select("bio,faculty,phone")
+            .select("bio,faculty,phone,matric_number")
             .eq("id", profile.id)
             .maybeSingle();
         }),
@@ -374,6 +375,7 @@ export default async function AccountPage() {
             },
           }}
           blockedUsers={blockedUsers}
+          canSetMatric={role === "student" && session.isEmailVerified && session.isActiveMember && rawExtra?.matric_number === null}
         />
       ) : null}
     </div>

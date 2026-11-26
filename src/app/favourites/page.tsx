@@ -3,7 +3,7 @@ import Link from "next/link";
 import { Heart, Lock, ShoppingBag, Wrench } from "lucide-react";
 import { ListingCard } from "@/components/marketplace/ListingCard";
 import { resolvePublicStorageUrl } from "@/lib/format";
-import { computeRatingSummary } from "@/lib/marketplace/phase8";
+import { loadListingRatingAndSoldMap } from "@/lib/reviews/presentation";
 import { getPublicSupabaseEnv } from "@/lib/supabase/env";
 import { getSessionSummary } from "@/lib/supabase/server";
 import { getServerServiceClient } from "@/lib/supabase/service";
@@ -99,35 +99,21 @@ export default async function FavouritesPage() {
         created_at: string;
       }>;
 
-      const listingIds = rawListings.map((r) => r.id);
       const sellerIds = Array.from(new Set(rawListings.map((r) => r.seller_id)));
 
-      const [profRes, revRes, salesRes] = await Promise.all([
+      const [profRes, metricsMap] = await Promise.all([
         sellerIds.length > 0
           ? service
               .from("profiles")
               .select("id,display_name,full_name,faculty")
               .in("id", sellerIds)
           : Promise.resolve({ data: [] }),
-        sellerIds.length > 0
-          ? service
-              .from("reviews")
-              .select("listing_id,seller_id,rating,hidden")
-              .in("seller_id", sellerIds)
-              .eq("hidden", false)
-          : Promise.resolve({ data: [] }),
-        listingIds.length > 0
-          ? service
-              .from("order_items")
-              .select("listing_id,quantity,orders!inner(status)")
-              .in("listing_id", listingIds)
-              .in("orders.status", [
-                "paid",
-                "ready_for_pickup",
-                "handed_over",
-                "completed",
-              ])
-          : Promise.resolve({ data: [] }),
+        rawListings.length > 0
+          ? loadListingRatingAndSoldMap(
+              service,
+              rawListings.map((r) => ({ listingId: r.id, sellerId: r.seller_id }))
+            )
+          : Promise.resolve(new Map()),
       ]);
 
       const catMap = new Map(
@@ -159,36 +145,6 @@ export default async function FavouritesPage() {
         ])
       );
 
-      const salesCountMap = new Map<string, number>();
-      for (const s of (salesRes.data ?? []) as Array<{
-        listing_id: string;
-        quantity: number | null;
-      }>) {
-        salesCountMap.set(
-          s.listing_id,
-          (salesCountMap.get(s.listing_id) ?? 0) +
-            Math.max(1, Number(s.quantity ?? 1))
-        );
-      }
-
-      const itemRevs = new Map<string, Array<{ rating: number; hidden: boolean }>>();
-      const sellerRevs = new Map<string, Array<{ rating: number; hidden: boolean }>>();
-      for (const rv of (revRes.data ?? []) as Array<{
-        listing_id: string | null;
-        seller_id: string;
-        rating: number;
-        hidden: boolean;
-      }>) {
-        if (rv.listing_id) {
-          const arr = itemRevs.get(rv.listing_id) ?? [];
-          arr.push(rv);
-          itemRevs.set(rv.listing_id, arr);
-        }
-        const sArr = sellerRevs.get(rv.seller_id) ?? [];
-        sArr.push(rv);
-        sellerRevs.set(rv.seller_id, sArr);
-      }
-
       const listingById = new Map(rawListings.map((r) => [r.id, r]));
       for (const id of favIds) {
         const r = listingById.get(id);
@@ -198,11 +154,7 @@ export default async function FavouritesPage() {
           Array.isArray(r.image_paths) && r.image_paths.length > 0
             ? r.image_paths[0]
             : null;
-        const salesCount = salesCountMap.get(r.id) ?? 0;
-        const itemSummary = computeRatingSummary(itemRevs.get(r.id) ?? []);
-        const shopSummary = computeRatingSummary(sellerRevs.get(r.seller_id) ?? []);
-        const useShopRating = salesCount === 0 || itemSummary.totalReviews === 0;
-        const activeSummary = useShopRating ? shopSummary : itemSummary;
+        const metrics = metricsMap.get(r.id);
 
         const imageUrl = env
           ? resolvePublicStorageUrl("listings", firstImg, env.url)
@@ -235,9 +187,10 @@ export default async function FavouritesPage() {
           imageAlt: r.title,
           createdAt: r.published_at || r.created_at,
           isDemo: false,
-          salesCount,
-          rating: activeSummary.averageRating,
-          reviewCount: activeSummary.totalReviews,
+          salesCount: metrics?.totalSold ?? 0,
+          rating: metrics?.effectiveRating ?? null,
+          reviewCount: metrics?.effectiveReviewCount ?? 0,
+          ratingSource: metrics?.ratingSource ?? "none",
         });
       }
     }

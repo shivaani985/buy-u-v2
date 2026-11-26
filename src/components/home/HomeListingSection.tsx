@@ -139,23 +139,30 @@ function HomeListingCard({
             </div>
 
             {listing.listingType !== "free" ? (
-              <div className="mt-1.5 flex items-center gap-1.5 text-[11px] font-semibold text-[#5B5668]">
+              <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-[11px] font-semibold text-[#5B5668]">
                 <Star
-                  className={`h-3.5 w-3.5 shrink-0 ${
+                  className="h-3.5 w-3.5 shrink-0"
+                  style={
                     listing.rating != null
-                      ? "fill-amber-400 text-amber-500"
-                      : "text-[#C5C1D0]"
-                  }`}
+                      ? { color: "#F4B400", fill: "#F4B400" }
+                      : { color: "#C5C1D0" }
+                  }
                   aria-hidden="true"
                 />
                 <span>
                   {listing.rating != null
                     ? `${listing.rating.toFixed(1)} (${listing.reviewCount ?? 0})`
-                    : "No shop rating yet"}
+                    : "Not rated yet"}
                 </span>
+                {listing.rating != null && listing.ratingSource === "shop" ? (
+                  <span className="rounded bg-[#F4F1FA] px-1.5 py-0.5 text-[9.5px] font-bold text-[#4E2A84]">
+                    Shop Rating
+                  </span>
+                ) : null}
                 {(listing.salesCount ?? 0) > 0 ? (
                   <span className="text-[#8E899E]">
-                    · {listing.salesCount} sold
+                    &middot; {listing.salesCount}{" "}
+                    {listing.listingType === "service" ? "completed" : "sold"}
                   </span>
                 ) : null}
               </div>

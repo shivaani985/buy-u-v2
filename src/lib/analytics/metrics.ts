@@ -167,7 +167,7 @@ export interface AnalyticsDatasetInput {
     created_at: string;
     completed_at?: string | null;
   }>;
-  freeNotices: Array<{ id: string; contributor_id: string; status: string; spot_id: string | null; created_at: string }>;
+  freeNotices: Array<{ id: string; contributor_id: string; status: string; spot_id: string | null; created_at: string; pickup_location?: string | null; expires_at?: string; renewed_at?: string | null }>;
   freeClaims: Array<{
     notice_id: string;
     donor_id: string;
@@ -502,7 +502,8 @@ export function computeSellerAnalytics(
 
 export function computeAdminPlatformAnalytics(
   data: AnalyticsDatasetInput,
-  window: AnalyticsDateWindow
+  window: AnalyticsDateWindow,
+  nowMs = Date.now(),
 ) {
   const csById = new Map(data.checkoutSessions.map((c) => [c.id, c]));
   const payByOrder = new Map(data.legacyPayments.map((p) => [p.order_id, p]));
@@ -711,6 +712,16 @@ export function computeAdminPlatformAnalytics(
   const totalServiceTransactions =
     periodServiceOrders.length + periodLegacyServices.length;
 
+  const noticeboardPosts = data.freeNotices.filter((post) => Boolean(post.pickup_location));
+  const noticeboard = {
+    asOf: nowMs,
+    total: noticeboardPosts.length,
+    active: noticeboardPosts.filter((post) => post.status === "active" && Date.parse(post.expires_at ?? "") > nowMs).length,
+    expired: noticeboardPosts.filter((post) => post.status === "active" && Date.parse(post.expires_at ?? "") <= nowMs).length,
+    contributors: new Set(noticeboardPosts.map((post) => post.contributor_id)).size,
+    renewed: noticeboardPosts.filter((post) => post.renewed_at).length,
+  };
+
   const community = computeCommunityImpact({
     notices: data.freeNotices,
     claims: data.freeClaims.filter((c) => inRange(c.collected_at ?? c.created_at, window.startMs, window.endMs)),
@@ -750,7 +761,7 @@ export function computeAdminPlatformAnalytics(
       preLoved: data.listings.filter((l) => l.kind === "pre_loved").length,
       studentBusiness: data.listings.filter((l) => l.kind === "business").length,
       services: data.listings.filter((l) => l.kind === "service").length,
-      freeItems: data.freeNotices.filter((n) => n.status === "active" || n.status === "closed").length,
+      freeItems: noticeboard.total,
     },
     salesTrend: Array.from(salesByDay.entries())
       .map(([day, amountSen]) => ({ day, amountSen }))
@@ -768,6 +779,8 @@ export function computeAdminPlatformAnalytics(
       acceptanceRatePct: totalServiceTransactions > 0 ? Number(((acceptedServices / totalServiceTransactions) * 100).toFixed(1)) : null,
       completionRatePct: acceptedServices > 0 ? Number(((completedServices / acceptedServices) * 100).toFixed(1)) : null,
     },
+    noticeboard,
+    // Historical confirmed claims are kept separate from noticeboard activity.
     community,
     engagement: {
       totalViews: data.views.filter((v) => inRange(v.viewed_at, window.startMs, window.endMs)).length,

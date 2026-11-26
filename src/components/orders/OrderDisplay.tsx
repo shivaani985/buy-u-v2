@@ -1,9 +1,10 @@
 import Link from "next/link";
-import { ArrowLeft, Package } from "lucide-react";
+import { ArrowLeft, Package, RotateCcw } from "lucide-react";
 import type { ReactNode } from "react";
 import { formatSenToRm } from "@/lib/format";
 import { formatMytDateTime } from "@/lib/financials/policy";
 import type { OrderStatusBadge } from "@/lib/orders/lifecycle";
+import type { ItemRepurchaseState } from "@/lib/reviews/presentation";
 import { ListingImage } from "@/components/shared/ListingImage";
 
 export const orderButton =
@@ -21,6 +22,7 @@ export interface OrderDisplayItem {
   unitSen: number;
   imageUrl: string | null;
   isService: boolean;
+  repurchase?: ItemRepurchaseState;
 }
 
 export function OrderBadge({ badge }: { badge: OrderStatusBadge }) {
@@ -73,6 +75,31 @@ export function OrderItems({ items, compact = false }: { items: OrderDisplayItem
             <p className="tabular-nums mt-1 text-xs font-medium text-[#6E6A7C]">
               {item.quantity} &times; {formatSenToRm(item.unitSen)}
             </p>
+            {!compact && item.repurchase ? (
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                {item.repurchase.href ? (
+                  <Link
+                    href={item.repurchase.href}
+                    className="inline-flex min-h-8 cursor-pointer items-center gap-1.5 rounded-lg border border-[#4E2A84]/30 bg-[#F6F2FC] px-2.5 py-1 text-xs font-bold text-[#4E2A84] transition-colors hover:border-[#4E2A84] hover:bg-[#4E2A84] hover:text-white"
+                  >
+                    <RotateCcw className="h-3 w-3" aria-hidden="true" />
+                    <span>{item.repurchase.buttonLabel}</span>
+                  </Link>
+                ) : (
+                  <span
+                    aria-disabled="true"
+                    className="inline-flex min-h-8 cursor-not-allowed items-center rounded-lg border border-[#E6E3EE] bg-[#F5F4F8] px-2.5 py-1 text-xs font-bold text-[#858094]"
+                  >
+                    {item.repurchase.buttonLabel}
+                  </span>
+                )}
+                {item.repurchase.reason ? (
+                  <span className="text-[11px] text-[#6E6A7C]">
+                    {item.repurchase.reason}
+                  </span>
+                ) : null}
+              </div>
+            ) : null}
           </div>
           <span
             className={`tabular-price shrink-0 text-sm font-extrabold text-[#14121A] ${

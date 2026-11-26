@@ -1,3 +1,4 @@
+import { FreeNoticeVisibility } from "@/components/free-items/FreeNoticeVisibility";
 import Link from "next/link";
 import { MapPin, Star } from "lucide-react";
 import { FavouriteButton } from "@/components/shared/FavouriteButton";
@@ -30,7 +31,9 @@ export function ListingCard({
 }: ListingCardProps) {
   const detailHref = listing.isDemo
     ? `/listings/${encodeURIComponent(listing.slug)}?demo=1`
-    : `/listings/${encodeURIComponent(listing.slug)}`;
+    : listing.listingType === "free"
+      ? `/free-items?post=${listing.id}#post-${listing.id}`
+      : `/listings/${encodeURIComponent(listing.slug)}`;
 
   const sellerName = listing.sellerDisplayName || listing.sellerBadge || "UMS Member";
   const sellerInitials = sellerName
@@ -51,7 +54,7 @@ export function ListingCard({
     </div>
   );
 
-  return (
+  const card = (
     <article className="group flex flex-col overflow-hidden rounded-2xl border border-[#E6E3EE] bg-white shadow-[0_2px_8px_rgba(20,18,26,0.04)] transition-all duration-200 hover:-translate-y-0.5 hover:border-[#4E2A84]/40 hover:shadow-[0_8px_20px_rgba(78,42,132,0.09)]">
       {/* Image with translucent RM price, type/condition badges & interactive favourite heart */}
       <div className="relative aspect-[4/3] w-full overflow-hidden bg-[#F5F4F8]">
@@ -89,13 +92,15 @@ export function ListingCard({
         </Link>
 
         {/* Bottom-right Interactive Favourite Heart */}
-        <FavouriteButton
-          listingId={listing.id}
-          initialFavourited={isFavourited}
-          canFavourite={canFavourite}
-          isDemo={listing.isDemo}
-          className="absolute bottom-2 right-2 z-10"
-        />
+        {listing.listingType !== "free" && (
+          <FavouriteButton
+            listingId={listing.id}
+            initialFavourited={isFavourited}
+            canFavourite={canFavourite}
+            isDemo={listing.isDemo}
+            className="absolute bottom-2 right-2 z-10"
+          />
+        )}
       </div>
 
       {/* Card Body */}
@@ -128,23 +133,30 @@ export function ListingCard({
           </div>
 
           {listing.listingType !== "free" ? (
-            <div className="mt-2 flex items-center gap-1.5 text-[11px] font-semibold text-[#5B5668]">
+            <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px] font-semibold text-[#5B5668]">
               <Star
-                className={`h-3.5 w-3.5 shrink-0 ${
+                className="h-3.5 w-3.5 shrink-0"
+                style={
                   listing.rating != null
-                    ? "fill-amber-400 text-amber-500"
-                    : "text-[#C5C1D0]"
-                }`}
+                    ? { color: "#F4B400", fill: "#F4B400" }
+                    : { color: "#C5C1D0" }
+                }
                 aria-hidden="true"
               />
               <span>
                 {listing.rating != null
                   ? `${listing.rating.toFixed(1)} (${listing.reviewCount ?? 0})`
-                  : "No shop rating yet"}
+                  : "Not rated yet"}
               </span>
+              {listing.rating != null && listing.ratingSource === "shop" ? (
+                <span className="rounded bg-[#F4F1FA] px-1.5 py-0.5 text-[9.5px] font-bold text-[#4E2A84]">
+                  Shop Rating
+                </span>
+              ) : null}
               {(listing.salesCount ?? 0) > 0 ? (
                 <span className="text-[#8E899E]">
-                  · {listing.salesCount} sold
+                  &middot; {listing.salesCount}{" "}
+                  {listing.listingType === "service" ? "completed" : "sold"}
                 </span>
               ) : null}
             </div>
@@ -168,4 +180,6 @@ export function ListingCard({
       </Link>
     </article>
   );
+  const visibility = listing.freeVisibility;
+  return visibility ? <FreeNoticeVisibility key={visibility.expiresAt} {...visibility}>{card}</FreeNoticeVisibility> : card;
 }

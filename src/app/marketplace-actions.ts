@@ -5,9 +5,11 @@ import { evaluateBuyerEligibility } from "@/lib/buyer/validation";
 import { isValidUuid } from "@/lib/disputes/validation";
 import {
   REPORT_REASONS,
-  validateFreeNoticeInput,
-  validateReviewInput,
 } from "@/lib/marketplace/phase8";
+import {
+  REVIEW_MEDIA_BUCKET,
+  validateReviewSubmissionInput,
+} from "@/lib/reviews/validation";
 import { evaluateSellerEligibility } from "@/lib/seller/validation";
 import {
   createSupabaseServerClient,
@@ -61,270 +63,6 @@ export async function updateServiceRequestAction(_input: {
   };
 }
 
-// -----------------------------------------------------------------------------
-// Phase 8B: Free Items & Community Donations (free_notice_drafts + publish_free_notice_atomic)
-// -----------------------------------------------------------------------------
-export async function saveOrPublishFreeNoticeAction(input: {
-  id?: string | null;
-  title: string;
-  description: string;
-  condition: string;
-  quantity: number;
-  spotId: string;
-  categoryId?: string | null;
-  collectionInstructions?: string | null;
-  imagePaths?: string[];
-  mode: "draft" | "published";
-}): Promise<MarketplaceActionResult> {
-  const session = await getSessionSummary();
-  const elig = evaluateSellerEligibility(session);
-  const uid = session.profile?.id;
-  if (!elig.eligible) {
-    return {
-      ok: false,
-      message: elig.message || "Only active verified UMS students can publish free items.",
-    };
-  }
-  if (!uid) {
-    return { ok: false, message: "Account not found." };
-  }
-
-  const cleanImages = (input.imagePaths ?? []).map((p) => p.trim()).filter(Boolean).slice(0, 5);
-  const check = validateFreeNoticeInput({
-    title: input.title,
-    description: input.description,
-    condition: input.condition,
-    quantity: Number(input.quantity),
-    spotId: input.spotId,
-    categoryId: input.categoryId,
-    collectionInstructions: input.collectionInstructions,
-    imagePaths: cleanImages,
-    mode: input.mode,
-  });
-  if (!check.ok) return { ok: false, message: check.error };
-
-  const supabase = await createSupabaseServerClient();
-  if (!supabase) return { ok: false, message: "Database unavailable." };
-
-  if (input.mode === "draft") {
-    const draftPayload = {
-      contributor_id: uid,
-      title: input.title.trim(),
-      description: input.description.trim(),
-      condition: input.condition?.trim() || "Good",
-      quantity: Math.max(1, Math.min(99, Math.round(Number(input.quantity) || 1))),
-      spot_id: input.spotId?.trim() || null,
-      category_id: input.categoryId?.trim() || null,
-      collection_instructions: input.collectionInstructions?.trim() || null,
-      image_paths: cleanImages,
-      updated_at: new Date().toISOString(),
-    };
-
-    if (input.id && isValidUuid(input.id)) {
-      const { error } = await supabase
-        .from("free_notice_drafts")
-        .update(draftPayload)
-        .eq("id", input.id)
-        .eq("contributor_id", uid);
-      if (error) return { ok: false, message: "Could not update free-item draft." };
-    } else {
-      const { error } = await supabase.from("free_notice_drafts").insert(draftPayload);
-      if (error) return { ok: false, message: "Could not save free-item draft." };
-    }
-
-    revalidatePath("/free-items");
-    return {
-      ok: true,
-      message: "Free item draft saved persistently. You can resume it anytime.",
-    };
-  }
-
-  const { error } = await supabase.rpc("publish_free_notice_atomic", {
-    p_title: input.title.trim(),
-    p_description: input.description.trim(),
-    p_condition: input.condition.trim(),
-    p_quantity: Math.max(1, Math.min(99, Math.round(Number(input.quantity) || 1))),
-    p_spot_id: input.spotId.trim(),
-    p_category_id: input.categoryId?.trim() || null,
-    p_collection_instructions: input.collectionInstructions?.trim() || null,
-    p_image_paths: cleanImages,
-    p_draft_id: input.id && isValidUuid(input.id) ? input.id : null,
-  });
-
-  if (error) {
-    if (error.message.includes("IMAGES_REQUIRED")) {
-      return { ok: false, message: "Upload 1 to 5 photos before publishing a free item." };
-    }
-    if (error.message.includes("INVALID_FREE_CONDITION")) {
-      return { ok: false, message: "Select a valid condition (New/Unused, Like New, Good, or Fair)." };
-    }
-    if (error.message.includes("DUPLICATE_IMAGE_PATHS")) {
-      return { ok: false, message: "Duplicate photo paths are not allowed." };
-    }
-    if (error.message.includes("INVALID_FREE_IMAGE_PATH") || error.message.includes("FREE_IMAGE_OBJECT_NOT_FOUND")) {
-      return { ok: false, message: "Uploaded photo could not be verified in storage. Please re-upload." };
-    }
-    if (error.message.includes("DRAFT_NOT_FOUND_OR_ALREADY_PUBLISHED")) {
-      return { ok: false, message: "This draft was already published or is no longer available." };
-    }
-    if (error.message.includes("INVALID_DONATION_SPOT")) {
-      return { ok: false, message: "Select an active campus donation spot." };
-    }
-    if (error.message.includes("INVALID_CATEGORY")) {
-      return { ok: false, message: "Select an active product category." };
-    }
-    return { ok: false, message: "Could not publish free item right now." };
-  }
-
-  revalidatePath("/free-items");
-  return {
-    ok: true,
-    message: "Free item published to the community board.",
-  };
-}
-
-export async function manageFreeNoticeAction(input: {
-  noticeId: string;
-  action: "edit" | "close";
-  title?: string;
-  description?: string;
-  condition?: string;
-  quantity?: number;
-  collectionInstructions?: string | null;
-}): Promise<MarketplaceActionResult> {
-  if (!isValidUuid(input.noticeId)) {
-    return { ok: false, message: "Invalid free item reference." };
-  }
-  const session = await getSessionSummary();
-  const elig = evaluateSellerEligibility(session);
-  if (!elig.eligible) {
-    return { ok: false, message: elig.message || "Active student access required." };
-  }
-
-  const supabase = await createSupabaseServerClient();
-  if (!supabase) return { ok: false, message: "Database unavailable." };
-
-  const { error } = await supabase.rpc("manage_free_notice_atomic", {
-    p_notice_id: input.noticeId,
-    p_action: input.action,
-    p_title: input.title?.trim() || null,
-    p_description: input.description?.trim() || null,
-    p_condition: input.condition?.trim() || null,
-    p_quantity: typeof input.quantity === "number" ? Math.round(input.quantity) : null,
-    p_collection_instructions: input.collectionInstructions ?? null,
-  });
-
-  if (error) {
-    if (error.message.includes("QUANTITY_BELOW_RESERVED")) {
-      return { ok: false, message: "Cannot reduce quantity below currently reserved units." };
-    }
-    if (error.message.includes("CANNOT_CLOSE_WITH_ACTIVE_RESERVATIONS")) {
-      return { ok: false, message: "Complete or cancel active reservations before closing this notice." };
-    }
-    if (error.message.includes("FREE_NOTICE_MODERATED_HIDDEN")) {
-      return { ok: false, message: "Moderated free items cannot be edited directly." };
-    }
-    return { ok: false, message: "Could not update free item right now." };
-  }
-
-  revalidatePath("/free-items");
-  return {
-    ok: true,
-    message: input.action === "close" ? "Free item closed." : "Free item updated.",
-  };
-}
-
-export async function createFreeClaimAction(input: {
-  noticeId: string;
-  quantity: number;
-  note?: string;
-}): Promise<MarketplaceActionResult> {
-  if (!isValidUuid(input.noticeId)) {
-    return { ok: false, message: "Invalid free item reference." };
-  }
-  const session = await getSessionSummary();
-  const elig = evaluateBuyerEligibility(session);
-  if (!elig.eligible) {
-    return { ok: false, message: elig.reason || "Sign in with an active UMS account." };
-  }
-
-  const supabase = await createSupabaseServerClient();
-  if (!supabase) return { ok: false, message: "Database unavailable." };
-
-  // P0.15: Commit stale reservation release independently before claiming so a claim error cannot roll it back
-  const service = getServerServiceClient();
-  if (service) {
-    await service.rpc("expire_stale_free_claims_atomic", { p_notice_id: input.noticeId });
-  }
-
-  const { data, error } = await supabase.rpc("create_free_notice_claim_atomic", {
-    p_notice_id: input.noticeId,
-    p_quantity: Math.max(1, Math.round(Number(input.quantity) || 1)),
-    p_note: input.note?.trim() || null,
-  });
-
-  if (error) {
-    if (error.message.includes("CANNOT_CLAIM_OWN_ITEM")) {
-      return { ok: false, message: "You cannot claim your own donated item." };
-    }
-    if (error.message.includes("DUPLICATE_ACTIVE_CLAIM")) {
-      return { ok: false, message: "You already have an active claim on this item." };
-    }
-    if (error.message.includes("INSUFFICIENT_FREE_QUANTITY")) {
-      return { ok: false, message: "Requested quantity exceeds available units." };
-    }
-    if (error.message.includes("INTERACTION_BLOCKED")) {
-      return { ok: false, message: "You cannot claim items from this member." };
-    }
-    return { ok: false, message: "Could not submit claim right now." };
-  }
-
-  const row = (Array.isArray(data) ? data[0] : data) as { out_claim_code?: string } | undefined;
-  revalidatePath("/free-items");
-  return {
-    ok: true,
-    reference: row?.out_claim_code,
-    message: `Claim ${row?.out_claim_code ?? ""} submitted. Waiting for donor confirmation.`,
-  };
-}
-
-export async function updateFreeClaimAction(input: {
-  claimId: string;
-  action: "accept" | "decline" | "handover" | "collect" | "cancel";
-  reason?: string;
-}): Promise<MarketplaceActionResult> {
-  if (!isValidUuid(input.claimId)) {
-    return { ok: false, message: "Invalid claim reference." };
-  }
-  const supabase = await createSupabaseServerClient();
-  if (!supabase) return { ok: false, message: "Database unavailable." };
-
-  const { data, error } = await supabase.rpc("update_free_notice_claim_atomic", {
-    p_claim_id: input.claimId,
-    p_action: input.action,
-    p_reason: input.reason?.trim() || null,
-  });
-
-  if (error) {
-    if (error.message.includes("INSUFFICIENT_FREE_QUANTITY")) {
-      return { ok: false, message: "Not enough unreserved units left to accept this claim." };
-    }
-    if (error.message.includes("RECIPIENT_ACCOUNT_INACTIVE")) {
-      return { ok: false, message: "Cannot accept claim because the recipient's account is no longer active." };
-    }
-    return { ok: false, message: "Could not update free item claim." };
-  }
-
-  const row = (Array.isArray(data) ? data[0] : data) as { out_status?: string } | undefined;
-  revalidatePath("/free-items");
-  if (row?.out_status === "expired") {
-    return {
-      ok: false,
-      message: "This reservation expired after 48 hours and reserved units were released.",
-    };
-  }
-  return { ok: true, message: `Claim updated (${input.action}).` };
-}
 
 // -----------------------------------------------------------------------------
 // Phase 8D: Verified Reviews & Seller Responses
@@ -335,27 +73,40 @@ export async function submitVerifiedReviewAction(input: {
   serviceRequestId?: string | null;
   rating: number;
   comment: string;
+  isAnonymous?: boolean;
+  imagePaths?: string[] | null;
+  videoPath?: string | null;
 }): Promise<MarketplaceActionResult> {
   const session = await getSessionSummary();
   const elig = evaluateBuyerEligibility(session);
-  if (!elig.eligible) {
+  if (!elig.eligible || !elig.userId) {
     return { ok: false, message: elig.reason || "Active member access required." };
   }
-  const check = validateReviewInput({ rating: input.rating, comment: input.comment });
+  const check = validateReviewSubmissionInput({
+    rating: input.rating,
+    comment: input.comment,
+    imagePaths: input.imagePaths,
+    videoPath: input.videoPath,
+    ownerUserId: elig.userId,
+  });
   if (!check.ok) return { ok: false, message: check.error };
 
   const supabase = await createSupabaseServerClient();
   if (!supabase) return { ok: false, message: "Database unavailable." };
 
+  const listingUuid = input.listingId && isValidUuid(input.listingId) ? input.listingId : null;
   const { error } = await supabase.rpc("submit_verified_review_atomic", {
     p_order_id: input.orderId && isValidUuid(input.orderId) ? input.orderId : null,
-    p_listing_id: input.listingId && isValidUuid(input.listingId) ? input.listingId : null,
+    p_listing_id: listingUuid,
     p_service_request_id:
       input.serviceRequestId && isValidUuid(input.serviceRequestId)
         ? input.serviceRequestId
         : null,
     p_rating: check.rating,
     p_comment: check.comment,
+    p_is_anonymous: Boolean(input.isAnonymous),
+    p_image_paths: check.imagePaths,
+    p_video_path: check.videoPath,
   });
 
   if (error) {
@@ -365,9 +116,18 @@ export async function submitVerifiedReviewAction(input: {
     if (error.message.includes("NOT_ELIGIBLE")) {
       return { ok: false, message: "Only completed verified transactions can be reviewed." };
     }
+    if (error.message.includes("REVIEW_MEDIA") || error.message.includes("TOO_MANY_REVIEW")) {
+      return { ok: false, message: "One or more uploaded photos or videos could not be verified. Please re-upload." };
+    }
     return { ok: false, message: "Could not submit review right now." };
   }
 
+  revalidatePath("/");
+  revalidatePath("/marketplace");
+  revalidatePath("/services");
+  revalidatePath("/favourites");
+  if (listingUuid) revalidatePath(`/listings/${listingUuid}`);
+  revalidatePath("/store/[sellerId]", "page");
   revalidatePath("/orders");
   revalidatePath("/orders/[orderId]", "page");
   revalidatePath("/seller/orders/[orderId]", "page");
@@ -380,34 +140,90 @@ export async function editVerifiedReviewAction(input: {
   reviewId: string;
   rating: number;
   comment: string;
+  isAnonymous?: boolean;
+  imagePaths?: string[] | null;
+  videoPath?: string | null;
 }): Promise<MarketplaceActionResult> {
   if (!isValidUuid(input.reviewId)) {
     return { ok: false, message: "Invalid review reference." };
   }
   const session = await getSessionSummary();
   const elig = evaluateBuyerEligibility(session);
-  if (!elig.eligible) {
+  if (!elig.eligible || !elig.userId) {
     return { ok: false, message: elig.reason || "Active member access required." };
   }
-  const check = validateReviewInput({ rating: input.rating, comment: input.comment });
+  const check = validateReviewSubmissionInput({
+    rating: input.rating,
+    comment: input.comment,
+    imagePaths: input.imagePaths,
+    videoPath: input.videoPath,
+    ownerUserId: elig.userId,
+  });
   if (!check.ok) return { ok: false, message: check.error };
 
   const supabase = await createSupabaseServerClient();
   if (!supabase) return { ok: false, message: "Database unavailable." };
 
+  const service = getServerServiceClient();
+  let previousPaths: string[] = [];
+  let listingIdForRevalidate: string | null = null;
+  if (service) {
+    const { data: prevRow } = await service
+      .from("reviews")
+      .select("listing_id,image_paths,video_path")
+      .eq("id", input.reviewId)
+      .eq("buyer_id", elig.userId)
+      .maybeSingle();
+    const typed = prevRow as {
+      listing_id?: string | null;
+      image_paths?: string[] | null;
+      video_path?: string | null;
+    } | null;
+    if (typed) {
+      listingIdForRevalidate = typed.listing_id ?? null;
+      previousPaths = [
+        ...(Array.isArray(typed.image_paths) ? typed.image_paths : []),
+        ...(typed.video_path ? [typed.video_path] : []),
+      ];
+    }
+  }
+
   const { error } = await supabase.rpc("edit_verified_review_atomic", {
     p_review_id: input.reviewId,
     p_rating: check.rating,
     p_comment: check.comment,
+    p_is_anonymous: Boolean(input.isAnonymous),
+    p_image_paths: check.imagePaths,
+    p_video_path: check.videoPath,
   });
 
   if (error) {
     if (error.message.includes("REVIEW_MODERATED") || error.message.includes("REVIEW_HIDDEN_LOCKED")) {
       return { ok: false, message: "Moderated reviews cannot be edited." };
     }
+    if (error.message.includes("REVIEW_MEDIA") || error.message.includes("TOO_MANY_REVIEW")) {
+      return { ok: false, message: "One or more attached photos or videos could not be verified." };
+    }
     return { ok: false, message: "Could not update review right now." };
   }
 
+  if (service && previousPaths.length > 0) {
+    const retained = new Set([
+      ...check.imagePaths,
+      ...(check.videoPath ? [check.videoPath] : []),
+    ]);
+    const removed = previousPaths.filter((p) => !retained.has(p));
+    if (removed.length > 0) {
+      await service.storage.from(REVIEW_MEDIA_BUCKET).remove(removed).catch(() => {});
+    }
+  }
+
+  revalidatePath("/");
+  revalidatePath("/marketplace");
+  revalidatePath("/services");
+  revalidatePath("/favourites");
+  if (listingIdForRevalidate) revalidatePath(`/listings/${listingIdForRevalidate}`);
+  revalidatePath("/store/[sellerId]", "page");
   revalidatePath("/orders");
   revalidatePath("/orders/[orderId]", "page");
   revalidatePath("/seller/orders/[orderId]", "page");
@@ -521,6 +337,28 @@ export async function markNotificationsReadAction(
   if (error) return { ok: false, message: "Could not update notifications." };
   revalidatePath("/notifications");
   return { ok: true, message: "Notifications updated." };
+}
+
+/** Fill a missing matric number once, without making the profile ID editable. */
+export async function completeMatricNumberAction(raw: string): Promise<MarketplaceActionResult> {
+  const session = await getSessionSummary();
+  const profile = session.profile;
+  if (!evaluateSellerEligibility(session).eligible || !profile) {
+    return { ok: false, message: "Verified student access is required." };
+  }
+  const matric = typeof raw === "string" ? raw.trim().toUpperCase() : "";
+  if (!/^[A-Z0-9-]{4,20}$/.test(matric)) {
+    return { ok: false, message: "Enter a valid matric number (4–20 letters, numbers, or hyphens)." };
+  }
+  const service = getServerServiceClient();
+  if (!service) return { ok: false, message: "Profile update is temporarily unavailable." };
+  const { data, error } = await service.from("profiles").update({ matric_number: matric })
+    .eq("id", profile.id).eq("status", "active").eq("university_role", "student")
+    .is("matric_number", null).select("id").maybeSingle();
+  if (error || !data) return { ok: false, message: "The matric number could not be added. Refresh your profile and try again." };
+  revalidatePath("/account");
+  revalidatePath("/free-items");
+  return { ok: true, message: "Student profile saved." };
 }
 
 export async function updateAccountProfileAction(input: {
@@ -677,6 +515,8 @@ export async function adminModerateFreeNoticeAction(input: {
   if (error) return { ok: false, message: "Could not moderate free item." };
   revalidatePath("/admin");
   revalidatePath("/free-items");
+  revalidatePath("/");
+  revalidatePath("/marketplace");
   return {
     ok: true,
     message: input.hide ? "Free item hidden and audited." : "Free item restored and audited.",

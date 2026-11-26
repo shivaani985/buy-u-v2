@@ -2,10 +2,17 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { BadgeCheck, Star, Store } from "lucide-react";
+import { ReviewCard } from "@/components/reviews/ReviewCard";
 import { PublicStorefrontActions } from "@/components/storefront/PublicStorefrontActions";
 import { isValidUuid } from "@/lib/disputes/validation";
-import { formatSenToRm, formatShortDate, resolvePublicStorageUrl } from "@/lib/format";
+import { formatSenToRm, resolvePublicStorageUrl } from "@/lib/format";
 import { computeRatingSummary } from "@/lib/marketplace/phase8";
+import {
+  sanitizePublicReviewRow,
+  type PublicReviewItem,
+} from "@/lib/reviews/presentation";
+import { REVIEW_STAR_COLOR } from "@/lib/reviews/validation";
+import { formatVariationOptionLabel } from "@/lib/seller/variations";
 import { getPublicSupabaseEnv } from "@/lib/supabase/env";
 import { getSessionSummary } from "@/lib/supabase/server";
 import { getServerServiceClient } from "@/lib/supabase/service";
@@ -68,26 +75,29 @@ export default async function PublicStorefrontPage({
       .limit(20),
     service
       .from("reviews")
-      .select("id,buyer_id,rating,comment,seller_response,order_id,service_request_id,hidden,created_at")
+      .select(
+        "id,buyer_id,listing_id,rating,comment,seller_response,order_id,service_request_id,hidden,is_anonymous,image_paths,video_path,edited_at,created_at"
+      )
       .eq("seller_id", sellerId)
       .eq("hidden", false)
       .order("created_at", { ascending: false })
-      .limit(30)
+      .limit(50)
       .then(async (res) => {
         if (!res.error) return res;
         return service
           .from("reviews")
-          .select("id,buyer_id,rating,comment,order_id,hidden,created_at")
+          .select("id,buyer_id,listing_id,rating,comment,seller_response,order_id,service_request_id,hidden,created_at")
           .eq("seller_id", sellerId)
           .eq("hidden", false)
           .order("created_at", { ascending: false })
-          .limit(30);
+          .limit(50);
       }),
     service
       .from("orders")
       .select("id", { count: "exact", head: true })
       .eq("seller_id", sellerId)
-      .eq("status", "completed"),
+      .eq("status", "completed")
+      .not("paid_at", "is", null),
   ]);
 
   if (!profRes.data) notFound();
@@ -129,17 +139,87 @@ export default async function PublicStorefrontPage({
   const products = listings.filter((l) => l.kind !== "service");
   const services = listings.filter((l) => l.kind === "service");
   const freeItems = (freeRes.data ?? []) as Array<{ id: string; title: string; condition: string }>;
-  const reviews = (revRes.data ?? []) as Array<{
+  const rawReviews = (revRes.data ?? []) as Array<{
     id: string;
+    buyer_id: string;
+    listing_id?: string | null;
     rating: number;
-    comment: string;
+    comment: string | null;
     seller_response?: string | null;
     order_id?: string | null;
     service_request_id?: string | null;
     hidden: boolean;
+    is_anonymous?: boolean | null;
+    image_paths?: string[] | null;
+    video_path?: string | null;
+    edited_at?: string | null;
     created_at: string;
   }>;
-  const ratingSummary = computeRatingSummary(reviews);
+  const ratingSummary = computeRatingSummary(rawReviews);
+
+  const reviewerIds = Array.from(
+    new Set(rawReviews.filter((r) => !r.is_anonymous && r.buyer_id).map((r) => r.buyer_id))
+  );
+  const reviewOrderIds = Array.from(
+    new Set(rawReviews.map((r) => r.order_id).filter((id): id is string => Boolean(id)))
+  );
+
+  const [revProfilesRes, revOrderItemsRes] = await Promise.all([
+    reviewerIds.length > 0
+      ? service.from("profiles").select("id,display_name,full_name,avatar_url").in("id", reviewerIds)
+      : Promise.resolve({ data: [] }),
+    reviewOrderIds.length > 0
+      ? service
+          .from("order_items")
+          .select("order_id,listing_id,variant_snapshot")
+          .in("order_id", reviewOrderIds)
+      : Promise.resolve({ data: [] }),
+  ]);
+
+  const revProfileMap = new Map<
+    string,
+    { display_name: string | null; full_name: string | null; avatar_url: string | null }
+  >();
+  for (const p of (revProfilesRes.data ?? []) as Array<{
+    id: string;
+    display_name: string | null;
+    full_name: string | null;
+    avatar_url: string | null;
+  }>) {
+    revProfileMap.set(p.id, p);
+  }
+
+  const revVariantMap = new Map<string, string>();
+  for (const oi of (revOrderItemsRes.data ?? []) as Array<{
+    order_id: string;
+    listing_id: string | null;
+    variant_snapshot?: Record<string, string> | null;
+  }>) {
+    if (
+      oi.variant_snapshot &&
+      typeof oi.variant_snapshot === "object" &&
+      Object.keys(oi.variant_snapshot).length > 0
+    ) {
+      revVariantMap.set(`${oi.order_id}:${oi.listing_id ?? ""}`, formatVariationOptionLabel(oi.variant_snapshot));
+    }
+  }
+
+  const reviews: PublicReviewItem[] = rawReviews
+    .map((r) =>
+      sanitizePublicReviewRow({
+        review: {
+          ...r,
+          listing_id: r.listing_id ?? null,
+        },
+        profile: !r.is_anonymous ? revProfileMap.get(r.buyer_id) ?? null : null,
+        purchasedVariantLabel: r.order_id
+          ? revVariantMap.get(`${r.order_id}:${r.listing_id ?? ""}`) ?? null
+          : null,
+        viewerUserId: session.profile?.id ?? null,
+        storageBaseUrl: storageBase,
+      })
+    )
+    .filter((r): r is PublicReviewItem => r !== null);
 
   let isBlocked = false;
   if (session.profile?.id && session.profile.id !== sellerId) {
@@ -199,10 +279,17 @@ export default async function PublicStorefrontPage({
             ) : null}
             <div className="flex flex-wrap gap-4 pt-1 text-xs font-semibold text-[#6B6779]">
               <span className="inline-flex items-center gap-1 text-[#14121A]">
-                <Star className="h-3.5 w-3.5 text-amber-500" />
+                <Star
+                  className="h-3.5 w-3.5"
+                  style={
+                    ratingSummary.averageRating !== null
+                      ? { color: REVIEW_STAR_COLOR, fill: REVIEW_STAR_COLOR }
+                      : { color: "#C5C1D0" }
+                  }
+                />
                 {ratingSummary.averageRating !== null
                   ? `${ratingSummary.averageRating.toFixed(1)} (${ratingSummary.totalReviews} verified reviews)`
-                  : "No verified reviews yet"}
+                  : "Not rated yet"}
               </span>
               <span>Completed Orders: {ordCountRes.count ?? 0}</span>
               {prof.faculty ? <span>Faculty: {prof.faculty}</span> : null}
@@ -287,23 +374,7 @@ export default async function PublicStorefrontPage({
         ) : (
           <div className="space-y-3">
             {reviews.map((r) => (
-              <div key={r.id} className="rounded-2xl border border-[#E6E3EE] bg-white p-4 text-xs">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex items-center gap-2">
-                    <span className="rounded-full bg-[#F3EEFA] px-2 py-0.5 text-[10px] font-extrabold text-[#4E2A84]">
-                      {r.service_request_id ? "Verified Service" : "Verified Purchase"}
-                    </span>
-                    <span className="font-extrabold text-amber-600">{"★".repeat(r.rating)} ({r.rating}/5)</span>
-                  </div>
-                  <span className="text-[11px] text-[#8B869B]">{formatShortDate(r.created_at)}</span>
-                </div>
-                <p className="mt-2 text-[#14121A]">{r.comment}</p>
-                {r.seller_response ? (
-                  <p className="mt-2 rounded-lg bg-[#FAF9FC] p-2 text-[11px] text-[#4E2A84]">
-                    <strong>Seller Reply:</strong> {r.seller_response}
-                  </p>
-                ) : null}
-              </div>
+              <ReviewCard key={r.id} review={r} />
             ))}
           </div>
         )}

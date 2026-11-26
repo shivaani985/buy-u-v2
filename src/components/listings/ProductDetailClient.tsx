@@ -33,7 +33,13 @@ import {
   type AddToCartActionState,
 } from "@/app/listings/actions";
 import { startConversationAction } from "@/app/messages/actions";
-import { submitReportAction } from "@/app/marketplace-actions";
+import {
+  editVerifiedReviewAction,
+  submitReportAction,
+  submitVerifiedReviewAction,
+} from "@/app/marketplace-actions";
+import { ReviewCard } from "@/components/reviews/ReviewCard";
+import { ReviewDialog } from "@/components/reviews/ReviewDialog";
 import { ListingImage } from "@/components/shared/ListingImage";
 import type { ProductDetail } from "@/lib/buyer/data";
 import type { BuyerEligibilityResult } from "@/lib/buyer/validation";
@@ -44,28 +50,38 @@ import {
 } from "@/lib/format";
 import {
   REPORT_REASONS,
-  type RatingSummary,
 } from "@/lib/marketplace/phase8";
 import { isBargainingEligibleListing } from "@/lib/messages/offers";
 import { formatServiceModeLabel } from "@/lib/orders/service-attachments";
+import type {
+  ListingRatingAndSoldMetrics,
+  PublicReviewItem,
+} from "@/lib/reviews/presentation";
+import { REVIEW_STAR_COLOR } from "@/lib/reviews/validation";
 import {
   formatVariationOptionLabel,
   resolveBuyerVariationState,
 } from "@/lib/seller/variations";
 
-export interface SellerReviewItem {
-  id: string;
-  rating: number;
-  comment: string;
-  sellerResponse: string | null;
-  createdAt: string;
+export interface WriteReviewOrderContext {
+  orderId: string;
+  orderCode: string;
+  listingId: string;
+  itemTitle: string;
+  variantLabel: string | null;
+  imageUrl: string | null;
+  isService: boolean;
 }
 
 interface ProductDetailClientProps {
   product: ProductDetail;
   buyerEligibility: BuyerEligibilityResult;
-  ratingSummary: RatingSummary;
-  sellerReviews: SellerReviewItem[];
+  ratingMetrics: ListingRatingAndSoldMetrics;
+  listingReviews: PublicReviewItem[];
+  preselectedVariantId?: string | null;
+  prevVariantLabel?: string | null;
+  writeReviewOrder?: WriteReviewOrderContext | null;
+  buyerDisplayName?: string;
 }
 
 type DetailTab = "overview" | "reviews";
@@ -102,18 +118,51 @@ function getInitials(name: string): string {
 export function ProductDetailClient({
   product,
   buyerEligibility,
-  ratingSummary,
-  sellerReviews,
+  ratingMetrics,
+  listingReviews,
+  preselectedVariantId = null,
+  prevVariantLabel = null,
+  writeReviewOrder = null,
+  buyerDisplayName = "UMS Buyer",
 }: ProductDetailClientProps) {
   const router = useRouter();
-  const [activePhotoIndex, setActivePhotoIndex] = useState(0);
+  const initialPreselectedVariant =
+    preselectedVariantId && product.hasVariants
+      ? product.variants.find(
+          (v) => v.id === preselectedVariantId && v.active && v.availableStock > 0
+        ) ?? null
+      : null;
+
+  const [activePhotoIndex, setActivePhotoIndex] = useState<number>(() => {
+    if (initialPreselectedVariant?.imageUrl) {
+      const photosInit = [...product.imageUrls];
+      for (const v of product.variants) {
+        if (v.imageUrl && !photosInit.includes(v.imageUrl)) photosInit.push(v.imageUrl);
+      }
+      const idx = photosInit.indexOf(initialPreselectedVariant.imageUrl);
+      if (idx >= 0) return idx;
+    }
+    return 0;
+  });
   const [zoomOpen, setZoomOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<DetailTab>("overview");
   const [copiedShare, setCopiedShare] = useState(false);
+  const [reviewModalMode, setReviewModalMode] = useState<
+    { type: "create" } | { type: "edit"; review: PublicReviewItem } | null
+  >(null);
+  const [reviewActionBusy, setReviewActionBusy] = useState(false);
+  const [reviewActionError, setReviewActionError] = useState<string | null>(null);
+  const [reviewSuccessNotice, setReviewSuccessNotice] = useState<string | null>(null);
 
   const [selectedOptions, setSelectedOptions] = useState<
     Record<string, string | null>
-  >({});
+  >(() =>
+    initialPreselectedVariant ? { ...initialPreselectedVariant.optionValues } : {}
+  );
+  const showUnavailablePrevVariantBanner = Boolean(
+    (preselectedVariantId && !initialPreselectedVariant && product.hasVariants) ||
+      (prevVariantLabel && product.hasVariants)
+  );
   const [quantity, setQuantity] = useState(1);
 
   const [isFavourited, setIsFavourited] = useState(product.isFavourited);
@@ -612,6 +661,53 @@ export function ProductDetailClient({
                 </span>
               </div>
 
+              {/* Phase 10R: Listing Rating / Shop Rating Fallback + Total Sold */}
+              {!product.isFreeNotice ? (
+                <div className="mt-2.5 flex flex-wrap items-center gap-2 text-xs font-semibold text-[#555062]">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setActiveTab("reviews");
+                      document.getElementById("listing-reviews-panel")?.scrollIntoView({ behavior: "smooth" });
+                    }}
+                    className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-[#ECEAF2] bg-[#FAF9FC] px-2.5 py-1 transition-colors hover:border-[#4E2A84]/40"
+                  >
+                    <Star
+                      className="h-3.5 w-3.5 shrink-0"
+                      style={
+                        ratingMetrics.effectiveRating !== null
+                          ? { color: REVIEW_STAR_COLOR, fill: REVIEW_STAR_COLOR }
+                          : { color: "#C5C1D0" }
+                      }
+                      aria-hidden="true"
+                    />
+                    {ratingMetrics.effectiveRating !== null ? (
+                      <>
+                        <span className="font-extrabold text-[#14121A]">
+                          {ratingMetrics.effectiveRating.toFixed(1)}
+                        </span>
+                        <span className="text-[#6B6779]">
+                          ({ratingMetrics.effectiveReviewCount}{" "}
+                          {ratingMetrics.effectiveReviewCount === 1 ? "review" : "reviews"})
+                        </span>
+                        {ratingMetrics.ratingSource === "shop" ? (
+                          <span className="rounded bg-[#F4F1FA] px-1.5 py-0.5 text-[10px] font-bold text-[#4E2A84]">
+                            Shop Rating
+                          </span>
+                        ) : null}
+                      </>
+                    ) : (
+                      <span className="text-[#6B6779]">Not rated yet</span>
+                    )}
+                  </button>
+
+                  <span className="inline-flex items-center rounded-lg border border-[#ECEAF2] bg-white px-2.5 py-1 font-bold text-[#14121A]">
+                    {ratingMetrics.totalSold}{" "}
+                    {isService ? "completed" : "sold"}
+                  </span>
+                </div>
+              ) : null}
+
               {/* Quick Handover & Spec Chips */}
               <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-[#4A4656]">
                 <span className="inline-flex items-center gap-1.5 rounded-lg border border-[#E6E3EE] bg-white px-2.5 py-1 font-medium">
@@ -636,6 +732,21 @@ export function ProductDetailClient({
               </div>
 
               {/* Variations Selector */}
+              {showUnavailablePrevVariantBanner ? (
+                <div
+                  role="status"
+                  className="mt-4 flex items-start gap-2 rounded-xl border border-amber-300 bg-amber-50 px-3.5 py-2.5 text-xs font-semibold text-amber-950"
+                >
+                  <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-amber-700" aria-hidden="true" />
+                  <span>
+                    Your previously purchased variation
+                    {prevVariantLabel && prevVariantLabel !== "unavailable"
+                      ? ` (${prevVariantLabel})`
+                      : ""}{" "}
+                    is currently unavailable. Select an available option below.
+                  </span>
+                </div>
+              ) : null}
               {variationState && variationState.groups.length > 0 ? (
                 <div className="mt-4 space-y-3 rounded-2xl border border-[#ECEAF2] bg-[#FAF9FC] p-3.5 sm:p-4">
                   <div className="flex items-center justify-between gap-2">
@@ -834,7 +945,7 @@ export function ProductDetailClient({
                   </div>
                 ) : !isPurchasable ? (
                   <div className="rounded-2xl border border-[#E6E3EE] bg-white p-4 text-xs sm:text-sm text-[#4A4656]">
-                    Free campus items are claimed directly with the poster and do not use the shopping cart.
+                    Free campus items can be collected directly on a first-come, first-served basis.
                   </div>
                 ) : isServicePaused ? (
                   <div className="flex items-start gap-2.5 rounded-2xl border border-[#F5C2C0] bg-[#FEF2F2] p-4 text-xs sm:text-sm text-[#991B1B]">
@@ -1135,16 +1246,17 @@ export function ProductDetailClient({
                       aria-hidden="true"
                     />
                     <span>{product.seller.badge}</span>
-                    {ratingSummary.averageRating !== null ? (
+                    {ratingMetrics.shopRatingSummary.averageRating !== null ? (
                       <>
                         <span aria-hidden="true">·</span>
                         <span className="inline-flex items-center gap-0.5 font-semibold text-[#14121A]">
                           <Star
-                            className="h-3 w-3 fill-[#F59E0B] text-[#F59E0B]"
+                            className="h-3 w-3"
+                            style={{ color: REVIEW_STAR_COLOR, fill: REVIEW_STAR_COLOR }}
                             aria-hidden="true"
                           />
-                          {ratingSummary.averageRating.toFixed(1)} (
-                          {ratingSummary.totalReviews})
+                          {ratingMetrics.shopRatingSummary.averageRating.toFixed(1)} (
+                          {ratingMetrics.shopRatingSummary.totalReviews}) Shop
                         </span>
                       </>
                     ) : null}
@@ -1199,9 +1311,9 @@ export function ProductDetailClient({
             }`}
           >
             <span>Reviews</span>
-            {ratingSummary.totalReviews > 0 ? (
+            {ratingMetrics.listingRatingSummary.totalReviews > 0 ? (
               <span className="rounded-full bg-[#F4F1FA] px-2 py-0.5 text-[11px] font-bold text-[#4E2A84]">
-                {ratingSummary.totalReviews}
+                {ratingMetrics.listingRatingSummary.totalReviews}
               </span>
             ) : null}
           </button>
@@ -1331,70 +1443,116 @@ export function ProductDetailClient({
           </div>
         ) : null}
 
-        {/* Tab Panel 2: Reviews Only */}
+        {/* Tab Panel 2: Verified Reviews */}
         {activeTab === "reviews" ? (
           <div
+            id="listing-reviews-panel"
             role="tabpanel"
-            className="mt-4 rounded-2xl border border-[#E6E3EE] bg-white p-5 sm:p-6"
+            className="mt-4 space-y-5 rounded-2xl border border-[#E6E3EE] bg-white p-5 sm:p-6"
           >
-            {ratingSummary.averageRating !== null ? (
-              <div className="mb-4 flex items-center gap-2">
-                <Star
-                  className="h-4 w-4 fill-[#F59E0B] text-[#F59E0B]"
-                  aria-hidden="true"
-                />
-                <span className="text-base font-extrabold text-[#14121A]">
-                  {ratingSummary.averageRating.toFixed(1)}
-                </span>
-                <span className="text-xs font-medium text-[#6B6779]">
-                  ({ratingSummary.totalReviews}{" "}
-                  {ratingSummary.totalReviews === 1 ? "review" : "reviews"})
-                </span>
-              </div>
+            {reviewSuccessNotice ? (
+              <p
+                role="status"
+                className="rounded-xl border border-[#00A3A6]/35 bg-[#EDFAF9] px-3.5 py-2.5 text-xs font-semibold text-[#006A6D]"
+              >
+                {reviewSuccessNotice}
+              </p>
             ) : null}
 
-            {sellerReviews.length > 0 ? (
-              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                {sellerReviews.map((review) => (
-                  <div
-                    key={review.id}
-                    className="rounded-xl border border-[#ECEAF3] bg-[#FAF9FC] p-3.5"
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-0.5">
-                        {[1, 2, 3, 4, 5].map((star) => (
-                          <Star
-                            key={star}
-                            className={`h-3.5 w-3.5 ${
-                              star <= review.rating
-                                ? "fill-[#F59E0B] text-[#F59E0B]"
-                                : "text-[#D5D0E0]"
-                            }`}
-                            aria-hidden="true"
-                          />
-                        ))}
-                      </div>
-                      <span className="text-[11px] text-[#6B6779]">
-                        {formatShortDate(review.createdAt)}
-                      </span>
-                    </div>
-                    {review.comment ? (
-                      <p className="mt-2 text-xs leading-relaxed text-[#14121A]">
-                        {review.comment}
-                      </p>
-                    ) : null}
-                    {review.sellerResponse ? (
-                      <p className="mt-2 border-l-2 border-[#008285] pl-2.5 text-[11px] text-[#555062]">
-                        <strong className="text-[#008285]">Seller:</strong>{" "}
-                        {review.sellerResponse}
-                      </p>
-                    ) : null}
+            {/* Summary Header */}
+            <div className="flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-[#ECEAF2] bg-[#FAF9FC] p-4">
+              <div className="flex items-center gap-4">
+                <div className="text-center">
+                  <p className="text-3xl font-extrabold tracking-tight text-[#14121A]">
+                    {ratingMetrics.effectiveRating !== null
+                      ? ratingMetrics.effectiveRating.toFixed(1)
+                      : "—"}
+                  </p>
+                  <div className="mt-1 flex items-center justify-center gap-0.5">
+                    {[1, 2, 3, 4, 5].map((star) => (
+                      <Star
+                        key={star}
+                        className="h-3.5 w-3.5"
+                        style={
+                          ratingMetrics.effectiveRating !== null &&
+                          star <= Math.round(ratingMetrics.effectiveRating)
+                            ? { color: REVIEW_STAR_COLOR, fill: REVIEW_STAR_COLOR }
+                            : { color: "#D5D0E0" }
+                        }
+                        aria-hidden="true"
+                      />
+                    ))}
                   </div>
+                </div>
+
+                <div className="space-y-1 text-xs">
+                  {ratingMetrics.ratingSource === "listing" ? (
+                    <p className="font-bold text-[#14121A]">
+                      {isService ? "Service Rating" : "Product Rating"} &middot;{" "}
+                      {ratingMetrics.listingRatingSummary.totalReviews}{" "}
+                      {ratingMetrics.listingRatingSummary.totalReviews === 1
+                        ? "verified review"
+                        : "verified reviews"}
+                    </p>
+                  ) : ratingMetrics.ratingSource === "shop" ? (
+                    <div className="space-y-0.5">
+                      <p className="font-bold text-[#14121A]">
+                        Shop Rating &middot;{" "}
+                        {ratingMetrics.shopRatingSummary.totalReviews}{" "}
+                        {ratingMetrics.shopRatingSummary.totalReviews === 1
+                          ? "verified shop review"
+                          : "verified shop reviews"}
+                      </p>
+                      <p className="text-[11px] text-[#6B6779]">
+                        This {isService ? "service" : "listing"} has no item reviews yet.
+                        Showing {product.seller.displayName}&apos;s overall Shop Rating.
+                      </p>
+                    </div>
+                  ) : (
+                    <p className="font-bold text-[#6B6779]">Not rated yet</p>
+                  )}
+                  <p className="text-[11px] font-semibold text-[#555062]">
+                    {ratingMetrics.totalSold}{" "}
+                    {isService ? "completed bookings" : "units sold"}
+                  </p>
+                </div>
+              </div>
+
+              {writeReviewOrder ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setReviewActionError(null);
+                    setReviewModalMode({ type: "create" });
+                  }}
+                  className="press-feedback inline-flex min-h-10 cursor-pointer items-center gap-1.5 rounded-xl bg-[#4E2A84] px-4 py-2 text-xs font-bold text-white hover:bg-[#3A1E66]"
+                >
+                  <Star className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span>Write Review</span>
+                </button>
+              ) : null}
+            </div>
+
+            {listingReviews.length > 0 ? (
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                {listingReviews.map((review) => (
+                  <ReviewCard
+                    key={review.id}
+                    review={review}
+                    onEdit={
+                      review.canEdit
+                        ? (rv) => {
+                            setReviewActionError(null);
+                            setReviewModalMode({ type: "edit", review: rv });
+                          }
+                        : undefined
+                    }
+                  />
                 ))}
               </div>
             ) : (
-              <p className="text-xs text-[#6B6779]">
-                No verified buyer reviews yet.
+              <p className="rounded-xl border border-dashed border-[#E6E3EE] bg-[#FAF9FC] px-4 py-6 text-center text-xs text-[#6B6779]">
+                No verified buyer reviews for this {isService ? "service" : "product"} yet.
               </p>
             )}
           </div>
@@ -1593,6 +1751,93 @@ export function ProductDetailClient({
             </button>
           </form>
         </div>
+      ) : null}
+      {/* Phase 10R: Review Write/Edit Dialog triggered from Product/Service Detail */}
+      {reviewModalMode ? (
+        <ReviewDialog
+          key={
+            reviewModalMode.type === "edit"
+              ? `pdp-edit-${reviewModalMode.review.id}`
+              : `pdp-new-${writeReviewOrder?.orderId ?? product.id}`
+          }
+          open
+          orderCode={writeReviewOrder?.orderCode ?? null}
+          buyerDisplayName={buyerDisplayName}
+          items={[
+            {
+              id: product.id,
+              listingId: product.id,
+              title: writeReviewOrder?.itemTitle ?? product.title,
+              variantLabel:
+                reviewModalMode.type === "edit"
+                  ? reviewModalMode.review.purchasedVariantLabel
+                  : writeReviewOrder?.variantLabel ?? null,
+              imageUrl: writeReviewOrder?.imageUrl ?? product.imageUrls[0] ?? null,
+              isService,
+            },
+          ]}
+          initialReview={
+            reviewModalMode.type === "edit"
+              ? {
+                  id: reviewModalMode.review.id,
+                  listingId: product.id,
+                  rating: reviewModalMode.review.rating,
+                  comment: reviewModalMode.review.comment,
+                  isAnonymous:
+                    reviewModalMode.review.ownEditableDraft?.isAnonymous ??
+                    reviewModalMode.review.isAnonymous,
+                  imagePaths:
+                    reviewModalMode.review.ownEditableDraft?.imagePaths ?? [],
+                  videoPath:
+                    reviewModalMode.review.ownEditableDraft?.videoPath ?? null,
+                }
+              : null
+          }
+          submitting={reviewActionBusy}
+          errorMessage={reviewActionError}
+          onClose={() => {
+            if (!reviewActionBusy) setReviewModalMode(null);
+          }}
+          onSubmit={async (payload) => {
+            setReviewActionBusy(true);
+            setReviewActionError(null);
+            try {
+              const res =
+                reviewModalMode.type === "edit"
+                  ? await editVerifiedReviewAction({
+                      reviewId: reviewModalMode.review.id,
+                      rating: payload.rating,
+                      comment: payload.comment,
+                      isAnonymous: payload.isAnonymous,
+                      imagePaths: payload.imagePaths,
+                      videoPath: payload.videoPath,
+                    })
+                  : writeReviewOrder
+                    ? await submitVerifiedReviewAction({
+                        orderId: writeReviewOrder.orderId,
+                        listingId: product.id,
+                        rating: payload.rating,
+                        comment: payload.comment,
+                        isAnonymous: payload.isAnonymous,
+                        imagePaths: payload.imagePaths,
+                        videoPath: payload.videoPath,
+                      })
+                    : { ok: false, message: "Eligible completed order not found." };
+
+              if (!res.ok) {
+                setReviewActionError(res.message);
+                return;
+              }
+              setReviewModalMode(null);
+              setReviewSuccessNotice(res.message);
+              router.refresh();
+            } catch {
+              setReviewActionError("Network error while saving review. Please try again.");
+            } finally {
+              setReviewActionBusy(false);
+            }
+          }}
+        />
       ) : null}
     </div>
   );

@@ -5,6 +5,7 @@ import type { ReactNode } from "react";
 import { DisputeDetailCard } from "@/components/disputes/DisputeDetailCard";
 import { OrderContact } from "@/components/orders/OrderControls";
 import { OrderDetailsLayout, OrderItems, OrderSection, orderButton, orderPanel } from "@/components/orders/OrderDisplay";
+import { ReviewGallery } from "@/components/reviews/ReviewGallery";
 import { OrderFulfilment } from "@/components/orders/OrderFulfilment";
 import { SellerCompleteOrder } from "@/components/orders/SellerCompleteOrder";
 import { useOrderClock, useOrderRefresh } from "@/components/orders/useOrderClock";
@@ -86,9 +87,22 @@ export function SellerOrderDetails({ order, back, mode, serverNow, timeline }: {
         </div>
       </details>}
       {order.reviews.length > 0 && <OrderSection title="Verified purchase reviews">
-        {order.reviews.map((review) => <div key={review.id} className="mt-3 space-y-1 border-t border-border-crisp pt-3 text-sm">
-          <p className="font-bold">{review.rating}/5</p>
+        {order.reviews.map((review) => <div key={review.id} className="mt-3 space-y-1.5 border-t border-border-crisp pt-3 text-sm">
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="font-bold">{review.rating}/5</p>
+            {review.isAnonymous ? (
+              <span className="rounded-md bg-[#F4F1FA] px-2 py-0.5 text-[10px] font-bold text-[#4E2A84]">
+                Anonymous Buyer
+              </span>
+            ) : null}
+            {review.editedAt ? (
+              <span className="rounded-md bg-[#F4F3F7] px-2 py-0.5 text-[10px] font-semibold text-[#555062]">
+                Edited
+              </span>
+            ) : null}
+          </div>
           <p className="whitespace-pre-wrap break-words">{review.comment}</p>
+          {review.media && review.media.length > 0 ? <ReviewGallery media={review.media} compact /> : null}
           {review.sellerResponse && <p className="whitespace-pre-wrap break-words text-brand-purple">Your reply · {review.sellerResponse}</p>}
         </div>)}
       </OrderSection>}

@@ -44,8 +44,10 @@ export interface Listing {
   sellerFaculty: string | null;
   rating?: number | null;
   reviewCount?: number;
+  ratingSource?: "listing" | "shop" | "none";
   salesCount?: number;
   createdAt: string;
+  freeVisibility?: { expiresAt: string; snapshotAt: number };
   isDemo: boolean;
 }
 

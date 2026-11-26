@@ -3,7 +3,10 @@ import {
   buildPrivateDisputeEvidenceUrl,
   type DisputeStatus,
 } from "@/lib/disputes/validation";
-import { resolvePublicStorageUrl } from "@/lib/format";
+import {
+  loadOrderItemMediaContext,
+  resolveOrderItemImageWithContext,
+} from "@/lib/orders/item-context";
 import {
   evaluateSellerEligibility,
   type SellerEligibilityResult,
@@ -231,7 +234,7 @@ export async function getSellerDisputesData(
     supabase
       .from("order_items")
       .select(
-        "id,order_id,title_snapshot,quantity,unit_sen,image_path,is_service,service_mode,service_requirements,service_attachment_paths"
+        "id,order_id,listing_id,variant_id,variant_snapshot,title_snapshot,quantity,unit_sen,image_path,is_service,service_mode,service_requirements,service_attachment_paths"
       )
       .in("order_id", relevantOrderIds),
     supabase.from("public_profiles").select("id,display_name").in("id", buyerIds),
@@ -245,10 +248,12 @@ export async function getSellerDisputesData(
     if (b.display_name?.trim()) buyerNames.set(b.id, b.display_name.trim());
   }
 
-  const itemsByOrder = new Map<string, SellerDisputeItemView["items"]>();
-  for (const it of (itemsRes.data ?? []) as Array<{
+  const rawSellerDisputeItems = (itemsRes.data ?? []) as Array<{
     id: string;
     order_id: string;
+    listing_id: string | null;
+    variant_id?: string | null;
+    variant_snapshot?: Record<string, unknown> | null;
     title_snapshot: string;
     quantity: number;
     unit_sen: number;
@@ -257,14 +262,21 @@ export async function getSellerDisputesData(
     service_mode?: string | null;
     service_requirements?: string | null;
     service_attachment_paths?: string[] | null;
-  }>) {
+  }>;
+  const sellerItemMediaCtx = await loadOrderItemMediaContext(
+    supabase,
+    rawSellerDisputeItems
+  );
+
+  const itemsByOrder = new Map<string, SellerDisputeItemView["items"]>();
+  for (const it of rawSellerDisputeItems) {
     const list = itemsByOrder.get(it.order_id) ?? [];
     list.push({
       id: it.id,
       title: it.title_snapshot,
       quantity: Number(it.quantity ?? 1),
       unitSen: Number(it.unit_sen ?? 0),
-      imageUrl: resolvePublicStorageUrl("listings", it.image_path, env.url),
+      imageUrl: resolveOrderItemImageWithContext(it, sellerItemMediaCtx, env.url),
       isService: Boolean(it.is_service),
       serviceMode: it.service_mode ?? null,
       serviceRequirements: it.service_requirements ?? null,
@@ -336,7 +348,7 @@ export async function getAdminDisputesData(
     service
       .from("order_items")
       .select(
-        "id,order_id,title_snapshot,quantity,unit_sen,image_path,is_service,service_mode,service_requirements,service_attachment_paths"
+        "id,order_id,listing_id,variant_id,variant_snapshot,title_snapshot,quantity,unit_sen,image_path,is_service,service_mode,service_requirements,service_attachment_paths"
       )
       .in("order_id", orderIds),
   ]);
@@ -355,10 +367,29 @@ export async function getAdminDisputesData(
   const profileIds = Array.from(
     new Set(orders.flatMap((o) => [o.buyer_id, o.seller_id]))
   );
-  const { data: profiles } = await service
-    .from("profiles")
-    .select("id,display_name,full_name,email")
-    .in("id", profileIds);
+  const rawAdminDisputeItems = (itemsRes.data ?? []) as Array<{
+    id: string;
+    order_id: string;
+    listing_id: string | null;
+    variant_id?: string | null;
+    variant_snapshot?: Record<string, unknown> | null;
+    title_snapshot: string;
+    quantity: number;
+    unit_sen: number;
+    image_path: string | null;
+    is_service?: boolean | null;
+    service_mode?: string | null;
+    service_requirements?: string | null;
+    service_attachment_paths?: string[] | null;
+  }>;
+
+  const [{ data: profiles }, adminItemMediaCtx] = await Promise.all([
+    service
+      .from("profiles")
+      .select("id,display_name,full_name,email")
+      .in("id", profileIds),
+    loadOrderItemMediaContext(service, rawAdminDisputeItems),
+  ]);
 
   const nameMap = new Map<string, string>();
   for (const p of (profiles ?? []) as Array<{
@@ -374,25 +405,14 @@ export async function getAdminDisputesData(
   }
 
   const itemsByOrder = new Map<string, SellerDisputeItemView["items"]>();
-  for (const it of (itemsRes.data ?? []) as Array<{
-    id: string;
-    order_id: string;
-    title_snapshot: string;
-    quantity: number;
-    unit_sen: number;
-    image_path: string | null;
-    is_service?: boolean | null;
-    service_mode?: string | null;
-    service_requirements?: string | null;
-    service_attachment_paths?: string[] | null;
-  }>) {
+  for (const it of rawAdminDisputeItems) {
     const list = itemsByOrder.get(it.order_id) ?? [];
     list.push({
       id: it.id,
       title: it.title_snapshot,
       quantity: Number(it.quantity ?? 1),
       unitSen: Number(it.unit_sen ?? 0),
-      imageUrl: resolvePublicStorageUrl("listings", it.image_path, env.url),
+      imageUrl: resolveOrderItemImageWithContext(it, adminItemMediaCtx, env.url),
       isService: Boolean(it.is_service),
       serviceMode: it.service_mode ?? null,
       serviceRequirements: it.service_requirements ?? null,

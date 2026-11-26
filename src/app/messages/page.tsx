@@ -3,7 +3,8 @@ import Link from "next/link";
 import { AlertCircle, Lock, RefreshCw } from "lucide-react";
 import { MessagesClient } from "@/components/messages/MessagesClient";
 import { getMessagesPageData } from "@/lib/messages/data";
-import { getSessionSummary } from "@/lib/supabase/server";
+import { isValidUuid } from "@/lib/buyer/validation";
+import { createSupabaseServerClient, getSessionSummary } from "@/lib/supabase/server";
 
 export const metadata: Metadata = {
   title: "Messages",
@@ -14,6 +15,7 @@ interface MessagesPageProps {
   searchParams: Promise<{
     c?: string;
     listing?: string;
+    freeItem?: string;
     variant?: string;
     bargain?: string;
   }>;
@@ -31,6 +33,16 @@ export default async function MessagesPage({
     requestedConversationId: requestedConvId,
     requestedListingId,
   });
+
+  let freeItem: { id: string; title: string } | null = null;
+  const active = data.conversations.find((conversation) => conversation.id === requestedConvId);
+  if (active && data.eligibility.eligible && sp.freeItem && isValidUuid(sp.freeItem)) {
+    const supabase = await createSupabaseServerClient();
+    const result = await supabase?.from("free_notices").select("id,title")
+      .eq("id", sp.freeItem).eq("contributor_id", active.peer.id).eq("status", "active")
+      .not("pickup_location", "is", null).gt("expires_at", new Date().toISOString()).maybeSingle();
+    freeItem = result?.data ?? null;
+  }
 
   return (
     <div className="mx-auto w-full max-w-[1380px] px-4 py-6 sm:px-6 lg:px-10">
@@ -50,6 +62,11 @@ export default async function MessagesPage({
           </p>
         ) : null}
       </div>
+
+      {freeItem && <div className="mb-4 rounded-xl border border-border-crisp px-4 py-3 text-sm">
+        Free item · <Link className="font-bold text-brand-purple hover:underline"
+          href={`/free-items?post=${freeItem.id}#post-${freeItem.id}`}>{freeItem.title}</Link>
+      </div>}
 
       {!data.eligibility.eligible ? (
         <section className="rounded-2xl border border-[#E6E3EE] bg-white p-6 sm:p-8">

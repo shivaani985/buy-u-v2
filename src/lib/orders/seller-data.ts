@@ -3,7 +3,14 @@ import { isAuthoritativeOrderPaymentVerified } from "@/lib/financials/policy";
 import { isBlockingRefundStatus } from "@/lib/orders/lifecycle";
 import { getServerServiceClient } from "@/lib/supabase/service";
 import { getLatestDisputesByOrderIds, type OrderDisputeSummaryView } from "@/lib/disputes/data";
-import { resolvePublicStorageUrl } from "@/lib/format";
+import {
+  loadOrderItemMediaContext,
+  resolveOrderItemImageWithContext,
+} from "@/lib/orders/item-context";
+import {
+  buildReviewMediaProxyUrl,
+  type ReviewMediaAttachment,
+} from "@/lib/reviews/presentation";
 import { formatVariationOptionLabel } from "@/lib/seller/variations";
 import {
   evaluateSellerEligibility,
@@ -57,7 +64,15 @@ export interface SellerOrderView {
   allocatedSen: number | null;
   dispute: OrderDisputeSummaryView | null;
   refund: { id: string; status: string; amountSen: number; returnStatus: string; returnRequired: boolean } | null;
-  reviews: Array<{ id: string; rating: number; comment: string; sellerResponse: string | null }>;
+  reviews: Array<{
+    id: string;
+    rating: number;
+    comment: string;
+    sellerResponse: string | null;
+    isAnonymous?: boolean;
+    editedAt?: string | null;
+    media?: ReviewMediaAttachment[];
+  }>;
   items: SellerOrderItemView[];
   isServiceOrder: boolean;
 }
@@ -147,9 +162,15 @@ export async function getSellerOrdersData(
   const buyerIds = Array.from(new Set(rows.map((r) => r.buyer_id)));
 
   const [itemsRes, buyersRes, disputesRes, refundsRes, disputeDetails, reviewsRes, checkoutsRes, paymentsRes, adjustmentsRes, allocationsRes] = await Promise.all([
-    readOrderRelations(orderIds, (batch, start, end) => supabase.from("order_items")
-      .select("id,order_id,listing_id,title_snapshot,variant_snapshot,unit_sen,quantity,image_path,is_service,service_mode,service_requirements,service_attachment_paths,pickup_note,pickup_window_start")
-      .in("order_id", batch).order("id").range(start, end)),
+    readOrderRelations(orderIds, async (batch, start, end) => {
+      const res = await supabase.from("order_items")
+        .select("id,order_id,listing_id,variant_id,title_snapshot,variant_snapshot,unit_sen,quantity,image_path,is_service,service_mode,service_requirements,service_attachment_paths,pickup_note,pickup_window_start")
+        .in("order_id", batch).order("id").range(start, end);
+      if (!res.error) return res;
+      return supabase.from("order_items")
+        .select("id,order_id,listing_id,title_snapshot,variant_snapshot,unit_sen,quantity,image_path,is_service,service_mode,service_requirements,service_attachment_paths,pickup_note,pickup_window_start")
+        .in("order_id", batch).order("id").range(start, end);
+    }),
     readOrderRelations(buyerIds, (batch, start, end) => supabase.from("public_profiles")
       .select("id,display_name").in("id", batch).order("id").range(start, end)),
     readOrderRelations(orderIds, (batch, start, end) => supabase.from("order_disputes")
@@ -158,8 +179,13 @@ export async function getSellerOrdersData(
       .select("id,order_id,status,refund_amount_sen,return_status,return_required").in("order_id", batch)
       .order("created_at", { ascending: false }).order("id").range(start, end)),
     orderId ? getLatestDisputesByOrderIds([orderId]) : Promise.resolve(null),
-    orderId ? supabase.from("reviews").select("id,rating,comment,seller_response").eq("order_id", orderId).eq("hidden", false)
-      : Promise.resolve({ data: [] }),
+    orderId ? Promise.resolve().then(async () => {
+      const rev10r = await supabase.from("reviews")
+        .select("id,rating,comment,seller_response,is_anonymous,image_paths,video_path,edited_at")
+        .eq("order_id", orderId).eq("hidden", false);
+      if (!rev10r.error) return rev10r;
+      return supabase.from("reviews").select("id,rating,comment,seller_response").eq("order_id", orderId).eq("hidden", false);
+    }) : Promise.resolve({ data: [] }),
     service ? readOrderRelations(checkoutIds, (batch, start, end) => service.from("checkout_sessions")
       .select("id,buyer_id,status,payment_status,paid_at").in("id", batch).order("id").range(start, end))
       : Promise.resolve({ data: [] }),
@@ -179,11 +205,11 @@ export async function getSellerOrdersData(
     return { serverNow, eligibility, orders: [], error: "Could not load your order items or financial status right now." };
   }
 
-  const itemsByOrder = new Map<string, SellerOrderItemView[]>();
-  for (const row of (itemsRes.data ?? []) as Array<{
+  const rawSellerItems = (itemsRes.data ?? []) as Array<{
     id: string;
     order_id: string;
     listing_id: string | null;
+    variant_id?: string | null;
     title_snapshot: string;
     variant_snapshot?: Record<string, string> | null;
     unit_sen: number;
@@ -195,7 +221,12 @@ export async function getSellerOrdersData(
     pickup_window_start?: string | null;
     service_requirements?: string | null;
     service_attachment_paths?: string[] | null;
-  }>) {
+  }>;
+
+  const mediaContext = await loadOrderItemMediaContext(service ?? supabase, rawSellerItems);
+
+  const itemsByOrder = new Map<string, SellerOrderItemView[]>();
+  for (const row of rawSellerItems) {
     const list = itemsByOrder.get(row.order_id) ?? [];
     const variantLabel =
       row.variant_snapshot &&
@@ -210,7 +241,7 @@ export async function getSellerOrdersData(
       variantLabel,
       unitSen: Number(row.unit_sen ?? 0),
       quantity: Number(row.quantity ?? 1),
-      imageUrl: resolvePublicStorageUrl("listings", row.image_path, env.url),
+      imageUrl: resolveOrderItemImageWithContext(row, mediaContext, env.url),
       isService: Boolean(row.is_service),
       serviceMode: row.service_mode ?? null,
       pickupNote: row.pickup_note ?? null,
@@ -282,9 +313,37 @@ export async function getSellerOrdersData(
       dispute: disputeDetails?.get(o.id) ?? null,
       refund: refund ? { id: refund.id, status: refund.status, amountSen: refund.refund_amount_sen,
         returnStatus: refund.return_status, returnRequired: refund.return_required } : null,
-      reviews: (reviewsRes.data ?? []).map((row) => ({
-        id: row.id, rating: row.rating, comment: row.comment, sellerResponse: row.seller_response,
-      })),
+      reviews: (reviewsRes.data ?? []).map((row) => {
+        const typed = row as {
+          id: string;
+          rating: number;
+          comment: string;
+          seller_response: string | null;
+          is_anonymous?: boolean | null;
+          image_paths?: string[] | null;
+          video_path?: string | null;
+          edited_at?: string | null;
+        };
+        const imgs = Array.isArray(typed.image_paths) ? typed.image_paths.filter(Boolean) : [];
+        const hasVid = Boolean(typed.video_path && typed.video_path.trim());
+        return {
+          id: typed.id,
+          rating: typed.rating,
+          comment: typed.comment,
+          sellerResponse: typed.seller_response,
+          isAnonymous: Boolean(typed.is_anonymous),
+          editedAt: typed.edited_at ?? null,
+          media: [
+            ...imgs.map((_, index) => ({
+              kind: "image" as const,
+              url: buildReviewMediaProxyUrl({ reviewId: typed.id, kind: "image", index }),
+            })),
+            ...(hasVid
+              ? [{ kind: "video" as const, url: buildReviewMediaProxyUrl({ reviewId: typed.id, kind: "video" }) }]
+              : []),
+          ],
+        };
+      }),
       items,
       isServiceOrder: items.some((it) => it.isService),
     };

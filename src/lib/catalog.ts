@@ -1,6 +1,9 @@
+import { isValidUuid } from "@/lib/buyer/validation";
+import { freeNoticePhotoHref } from "@/lib/marketplace/free-noticeboard";
+import { readOrderPages } from "@/lib/orders/read";
 import { DEMO_CATEGORIES, DEMO_LISTINGS } from "./demo-data";
 import { resolvePublicStorageUrl } from "./format";
-import { computeRatingSummary } from "./marketplace/phase8";
+import { loadListingRatingAndSoldMap } from "./reviews/presentation";
 import { getPublicSupabaseEnv } from "./supabase/env";
 import {
   createSupabaseServerClient,
@@ -51,10 +54,12 @@ interface RawFreeNoticeRow {
   title: string;
   description: string | null;
   condition: string | null;
-  spot_id: string | null;
+  pickup_location: string;
   image_paths: string[] | null;
   status: string;
   published_at: string | null;
+  renewed_at: string | null;
+  expires_at: string;
   created_at: string;
 }
 
@@ -270,7 +275,8 @@ export async function getCategories(options?: {
  * Read-only published listings + free_notices fetch via authenticated member session.
  */
 export async function getListings(
-  filters: MarketplaceFilters = {}
+  filters: MarketplaceFilters = {},
+  freeNoticeId?: string,
 ): Promise<CatalogResult<Listing[]>> {
   const env = getPublicSupabaseEnv();
 
@@ -305,7 +311,13 @@ export async function getListings(
   }
 
   try {
-    const [listingsRes, categoriesRes, areasRes, freeRes, spotsRes] =
+    const freeSnapshotAt = Date.now();
+    let freeQuery = supabase.from("free_notices")
+      .select("id,contributor_id,title,description,condition,pickup_location,image_paths,status,created_at,published_at,renewed_at,expires_at")
+      .eq("status", "active").gt("expires_at", new Date(freeSnapshotAt).toISOString()).not("pickup_location", "is", null)
+      .order("id");
+    if (freeNoticeId && isValidUuid(freeNoticeId)) freeQuery = freeQuery.eq("id", freeNoticeId);
+    const [listingsRes, categoriesRes, areasRes, freeRes] =
       await Promise.all([
         supabase
           .from("listings")
@@ -317,15 +329,7 @@ export async function getListings(
           .limit(50),
         supabase.from("categories").select("id, name").eq("active", true),
         supabase.from("collection_areas").select("id, name").eq("active", true),
-        supabase
-          .from("free_notices")
-          .select(
-            "id, contributor_id, title, description, condition, spot_id, image_paths, status, created_at"
-          )
-          .eq("status", "active")
-          .order("created_at", { ascending: false })
-          .limit(20),
-        supabase.from("donation_spots").select("id, name").eq("active", true),
+        readOrderPages((start, end) => freeQuery.range(start, end)),
       ]);
 
     if (listingsRes.error) {
@@ -353,14 +357,6 @@ export async function getListings(
       areaMap.set(a.id, a.name);
     }
 
-    const spotMap = new Map<string, string>();
-    for (const s of (spotsRes.data ?? []) as Array<{
-      id: string;
-      name: string;
-    }>) {
-      spotMap.set(s.id, s.name);
-    }
-
     const listingRows = (listingsRes.data ?? []) as RawListingRow[];
     const freeRows = freeRes.error
       ? []
@@ -374,43 +370,21 @@ export async function getListings(
     ).filter(Boolean);
 
     const profileMap = new Map<string, RawPublicProfileRow>();
-    const shopRatingMap = new Map<
-      string,
-      { averageRating: number | null; totalReviews: number }
-    >();
-    const salesCountMap = new Map<string, number>();
-    const listingIds = listingRows.map((r) => r.id).filter(Boolean);
-    const sellerIds = Array.from(
-      new Set(listingRows.map((r) => r.seller_id).filter(Boolean))
-    );
     const serviceClient = getServerServiceClient();
 
-    const [profilesRes, reviewsRes, salesRes] = await Promise.all([
+    const [profilesRes, metricsMap] = await Promise.all([
       memberIds.length > 0
         ? supabase
             .from("public_profiles")
             .select("id, display_name, university_role, faculty")
             .in("id", memberIds)
         : Promise.resolve({ data: [], error: null }),
-      serviceClient && sellerIds.length > 0
-        ? serviceClient
-            .from("reviews")
-            .select("seller_id, rating, hidden")
-            .eq("hidden", false)
-            .in("seller_id", sellerIds)
-        : Promise.resolve({ data: [], error: null }),
-      serviceClient && listingIds.length > 0
-        ? serviceClient
-            .from("order_items")
-            .select("listing_id, quantity, orders!inner(status)")
-            .in("listing_id", listingIds)
-            .in("orders.status", [
-              "paid",
-              "ready_for_pickup",
-              "handed_over",
-              "completed",
-            ])
-        : Promise.resolve({ data: [], error: null }),
+      serviceClient && listingRows.length > 0
+        ? loadListingRatingAndSoldMap(
+            serviceClient,
+            listingRows.map((r) => ({ listingId: r.id, sellerId: r.seller_id }))
+          )
+        : Promise.resolve(new Map()),
     ]);
 
     if (!profilesRes.error && profilesRes.data) {
@@ -419,46 +393,10 @@ export async function getListings(
       }
     }
 
-    if (!reviewsRes.error && reviewsRes.data) {
-      const bySeller = new Map<
-        string,
-        Array<{ rating: number; hidden: boolean }>
-      >();
-      for (const r of reviewsRes.data as Array<{
-        seller_id: string;
-        rating: number;
-        hidden: boolean;
-      }>) {
-        const list = bySeller.get(r.seller_id) ?? [];
-        list.push(r);
-        bySeller.set(r.seller_id, list);
-      }
-      for (const [sid, list] of bySeller.entries()) {
-        const rs = computeRatingSummary(list);
-        shopRatingMap.set(sid, {
-          averageRating: rs.averageRating,
-          totalReviews: rs.totalReviews,
-        });
-      }
-    }
-
-    if (!salesRes.error && salesRes.data) {
-      for (const row of salesRes.data as Array<{
-        listing_id: string;
-        quantity: number | null;
-      }>) {
-        salesCountMap.set(
-          row.listing_id,
-          (salesCountMap.get(row.listing_id) ?? 0) +
-            Math.max(1, Number(row.quantity ?? 1))
-        );
-      }
-    }
-
     const mappedListings: Listing[] = listingRows.map((row) => {
       const listingType = mapListingType(row);
       const seller = profileMap.get(row.seller_id);
-      const shopRating = shopRatingMap.get(row.seller_id);
+      const metrics = metricsMap.get(row.id);
       const resolvedUrls = (row.image_paths ?? [])
         .map((p) => resolvePublicStorageUrl("listings", p, env.url))
         .filter((u): u is string => u !== null);
@@ -493,9 +431,10 @@ export async function getListings(
         sellerDisplayName: seller?.display_name || "UMS Campus Member",
         sellerBadge: formatRoleBadge(seller?.university_role),
         sellerFaculty: seller?.faculty ?? null,
-        rating: shopRating?.averageRating ?? null,
-        reviewCount: shopRating?.totalReviews ?? 0,
-        salesCount: salesCountMap.get(row.id) ?? 0,
+        rating: metrics?.effectiveRating ?? null,
+        reviewCount: metrics?.effectiveReviewCount ?? 0,
+        ratingSource: metrics?.ratingSource ?? "none",
+        salesCount: metrics?.totalSold ?? 0,
         createdAt: row.published_at ?? row.created_at,
         isDemo: false,
       };
@@ -504,8 +443,7 @@ export async function getListings(
     const mappedFree: Listing[] = freeRows.map((row) => {
       const contributor = profileMap.get(row.contributor_id);
       const resolvedUrls = (row.image_paths ?? [])
-        .map((p) => resolvePublicStorageUrl("free-items", p, env.url))
-        .filter((u): u is string => u !== null);
+        .map((_, index) => freeNoticePhotoHref(row.id, index));
 
       return {
         id: row.id,
@@ -516,8 +454,7 @@ export async function getListings(
         listingType: "free",
         categoryId: "free-items",
         categoryName: "Free Items",
-        campusArea:
-          (row.spot_id && spotMap.get(row.spot_id)) || "UMSKAL Donation Spot",
+        campusArea: row.pickup_location,
         condition: row.condition ?? "Free Giveaway",
         availableStock: null,
         imageUrl: resolvedUrls[0] ?? null,
@@ -526,7 +463,8 @@ export async function getListings(
         sellerDisplayName: contributor?.display_name || "UMS Campus Member",
         sellerBadge: formatRoleBadge(contributor?.university_role),
         sellerFaculty: contributor?.faculty ?? null,
-        createdAt: row.published_at ?? row.created_at,
+        createdAt: row.renewed_at ?? row.published_at ?? row.created_at,
+        freeVisibility: { expiresAt: row.expires_at, snapshotAt: freeSnapshotAt },
         isDemo: false,
       };
     });
@@ -550,7 +488,7 @@ export async function getListingById(
   idOrSlug: string,
   options?: { useDemo?: boolean }
 ): Promise<CatalogResult<Listing | null>> {
-  const result = await getListings({ useDemo: options?.useDemo });
+  const result = await getListings({ useDemo: options?.useDemo }, idOrSlug);
   if (
     result.source === "error" ||
     result.source === "auth_required" ||

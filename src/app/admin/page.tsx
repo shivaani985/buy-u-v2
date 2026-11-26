@@ -15,6 +15,7 @@ import {
 } from "@/lib/analytics/metrics";
 import { getAdminDisputesData } from "@/lib/disputes/data";
 import { getAdminFinancialsData } from "@/lib/financials/admin-data";
+import { buildReviewMediaProxyUrl, type ReviewMediaAttachment } from "@/lib/reviews/presentation";
 import { getSessionSummary } from "@/lib/supabase/server";
 import { getServerServiceClient } from "@/lib/supabase/service";
 
@@ -95,7 +96,6 @@ export default async function AdminPage({
     reviewsRes,
     catsRes,
     areasRes,
-    spotsRes,
     auditRes,
   ] = await Promise.all([
     getAdminDisputesData(session),
@@ -108,7 +108,7 @@ export default async function AdminPage({
       ? service.from("listings").select("id,title,kind,status,seller_id,price_sen").order("created_at", { ascending: false }).limit(100)
       : Promise.resolve({ data: [] }),
     service
-      ? service.from("free_notices").select("id,title,contributor_id,spot_id,status,created_at").order("created_at", { ascending: false }).limit(60)
+      ? service.from("free_notices").select("id,title,contributor_id,pickup_location,status,expires_at,created_at").order("created_at", { ascending: false }).limit(60)
       : Promise.resolve({ data: [] }),
     service
       ? service.from("reports").select("id,report_code,target_kind,target_id,reason,explanation,status,priority,created_at").order("created_at", { ascending: false }).limit(100).then(async (res) => {
@@ -117,11 +117,22 @@ export default async function AdminPage({
         })
       : Promise.resolve({ data: [] }),
     service
-      ? service.from("reviews").select("id,rating,comment,hidden,created_at").order("created_at", { ascending: false }).limit(100)
+      ? service
+          .from("reviews")
+          .select("id,rating,comment,hidden,is_anonymous,image_paths,video_path,edited_at,created_at")
+          .order("created_at", { ascending: false })
+          .limit(100)
+          .then(async (res) => {
+            if (!res.error) return res;
+            return service
+              .from("reviews")
+              .select("id,rating,comment,hidden,created_at")
+              .order("created_at", { ascending: false })
+              .limit(100);
+          })
       : Promise.resolve({ data: [] }),
     service ? service.from("categories").select("id,name,kind,active").order("sort_order") : Promise.resolve({ data: [] }),
     service ? service.from("collection_areas").select("id,name,active").order("name") : Promise.resolve({ data: [] }),
-    service ? service.from("donation_spots").select("id,name,active").order("name") : Promise.resolve({ data: [] }),
     service
       ? service.from("admin_audit_logs").select("id,action,target_kind,target_id,reason,details,created_at").order("created_at", { ascending: false }).limit(80)
       : Promise.resolve({ data: [] }),
@@ -211,28 +222,50 @@ export default async function AdminPage({
     rating: number;
     comment: string;
     hidden: boolean;
+    is_anonymous?: boolean | null;
+    image_paths?: string[] | null;
+    video_path?: string | null;
+    edited_at?: string | null;
     created_at: string;
-  }>).map((r) => ({
-    id: r.id,
-    rating: r.rating,
-    comment: r.comment,
-    hidden: Boolean(r.hidden),
-    createdAt: r.created_at,
-  }));
+  }>).map((r) => {
+    const imgs = Array.isArray(r.image_paths) ? r.image_paths.filter(Boolean) : [];
+    const hasVid = Boolean(r.video_path && r.video_path.trim());
+    const media: ReviewMediaAttachment[] = [
+      ...imgs.map((_, index) => ({
+        kind: "image" as const,
+        url: buildReviewMediaProxyUrl({ reviewId: r.id, kind: "image", index }),
+      })),
+      ...(hasVid
+        ? [{ kind: "video" as const, url: buildReviewMediaProxyUrl({ reviewId: r.id, kind: "video" }) }]
+        : []),
+    ];
+    return {
+      id: r.id,
+      rating: r.rating,
+      comment: r.comment,
+      hidden: Boolean(r.hidden),
+      isAnonymous: Boolean(r.is_anonymous),
+      editedAt: r.edited_at ?? null,
+      media,
+      createdAt: r.created_at,
+    };
+  });
 
   const freeNoticeRows = ((freeNoticesRes.data ?? []) as Array<{
     id: string;
     title: string;
     contributor_id: string;
-    spot_id: string;
+    pickup_location: string | null;
+    expires_at: string;
     status: string;
     created_at: string;
   }>).map((fn) => ({
     id: fn.id,
     title: fn.title,
     donorName: userNameMap.get(fn.contributor_id) ?? "UMS Student",
-    spotId: fn.spot_id,
+    pickupLocation: fn.pickup_location,
     status: fn.status,
+    expiresAt: fn.expires_at,
     createdAt: fn.created_at,
   }));
 
@@ -320,7 +353,6 @@ export default async function AdminPage({
           catalog={{
             categories: (catsRes.data ?? []) as Array<{ id: string; name: string; kind: string; active: boolean }>,
             collectionAreas: (areasRes.data ?? []) as Array<{ id: string; name: string; active: boolean }>,
-            donationSpots: (spotsRes.data ?? []) as Array<{ id: string; name: string; active: boolean }>,
           }}
           auditLogs={auditRows}
         />

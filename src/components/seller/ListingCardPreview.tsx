@@ -196,7 +196,7 @@ export function ListingCardPreview({
                   className="h-3.5 w-3.5 shrink-0 text-[#C5C1D0]"
                   aria-hidden="true"
                 />
-                <span>No shop rating yet</span>
+                <span>Not rated yet</span>
               </div>
             </div>
 

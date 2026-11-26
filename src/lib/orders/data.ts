@@ -4,7 +4,16 @@ import {
   getLatestDisputesByOrderIds,
   type OrderDisputeSummaryView,
 } from "@/lib/disputes/data";
-import { resolvePublicStorageUrl } from "@/lib/format";
+import {
+  loadOrderItemMediaContext,
+  resolveCompletedOrdersRepurchaseMap,
+  resolveOrderItemImageWithContext,
+} from "@/lib/orders/item-context";
+import {
+  buildReviewMediaProxyUrl,
+  type ItemRepurchaseState,
+  type ReviewMediaAttachment,
+} from "@/lib/reviews/presentation";
 import { formatVariationOptionLabel } from "@/lib/seller/variations";
 import { getPublicSupabaseEnv } from "@/lib/supabase/env";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
@@ -14,6 +23,7 @@ import type { AuthSessionSummary } from "@/types/marketplace";
 export interface BuyerOrderItemView {
   id: string;
   listingId: string | null;
+  variantId: string | null;
   title: string;
   variantLabel: string | null;
   unitSen: number;
@@ -25,6 +35,7 @@ export interface BuyerOrderItemView {
   pickupWindowStart: string | null;
   serviceRequirements: string | null;
   serviceAttachmentPaths: string[];
+  repurchase?: ItemRepurchaseState;
 }
 
 export interface BuyerOrderPaymentView {
@@ -56,6 +67,11 @@ export interface BuyerOrderReviewView {
   comment: string;
   sellerResponse: string | null;
   hidden: boolean;
+  isAnonymous: boolean;
+  imagePaths: string[];
+  videoPath: string | null;
+  media: ReviewMediaAttachment[];
+  editedAt: string | null;
   createdAt: string;
 }
 
@@ -66,6 +82,7 @@ export interface BuyerOrderView {
   checkoutSessionId: string | null;
   sellerId: string;
   sellerName: string;
+  buyerDisplayName: string;
   status: string;
   subtotalSen: number;
   fpxFeeSen: number;
@@ -191,9 +208,15 @@ export async function getBuyerOrdersData(
 
   const [itemsRes, profilesRes, storefrontsRes, paymentsRes, sessionsRes, disputesByOrder, refundsRes, reviewsRes] =
     await Promise.all([
-      readOrderRelations(orderIds, (batch, start, end) => supabase.from("order_items")
-        .select("id,order_id,listing_id,title_snapshot,variant_snapshot,unit_sen,quantity,image_path,is_service,service_mode,service_requirements,service_attachment_paths,pickup_note,pickup_window_start")
-        .in("order_id", batch).order("id").range(start, end)),
+      readOrderRelations(orderIds, async (batch, start, end) => {
+        const res = await supabase.from("order_items")
+          .select("id,order_id,listing_id,variant_id,title_snapshot,variant_snapshot,unit_sen,quantity,image_path,is_service,service_mode,service_requirements,service_attachment_paths,pickup_note,pickup_window_start")
+          .in("order_id", batch).order("id").range(start, end);
+        if (!res.error) return res;
+        return supabase.from("order_items")
+          .select("id,order_id,listing_id,title_snapshot,variant_snapshot,unit_sen,quantity,image_path,is_service,service_mode,service_requirements,service_attachment_paths,pickup_note,pickup_window_start")
+          .in("order_id", batch).order("id").range(start, end);
+      }),
       readOrderRelations(sellerIds, (batch, start, end) => supabase.from("public_profiles")
         .select("id,display_name").in("id", batch).order("id").range(start, end)),
       readOrderRelations(sellerIds, (batch, start, end) => supabase.from("storefronts")
@@ -212,14 +235,20 @@ export async function getBuyerOrdersData(
         .select("id,order_id,refund_code,refund_type,refund_amount_sen,status,refund_ref,return_required,return_status,return_instructions,completed_at")
         .in("order_id", batch).order("created_at", { ascending: false }).order("id").range(start, end)),
       readOrderRelations(orderIds, async (batch, start, end) => {
-        const reviews = await supabase.from("reviews")
+        if (service) {
+          const rev10r = await service.from("reviews")
+            .select("id,order_id,listing_id,rating,comment,seller_response,hidden,is_anonymous,image_paths,video_path,edited_at,created_at")
+            .eq("buyer_id", eligibility.userId).in("order_id", batch).order("created_at", { ascending: false }).order("id").range(start, end);
+          if (!rev10r.error) return rev10r;
+        }
+        const rpcRes = await supabase.rpc("get_my_reviews_for_orders", { p_order_ids: batch });
+        if (!rpcRes.error && Array.isArray(rpcRes.data)) {
+          return { data: rpcRes.data, error: null };
+        }
+        const fallback = await supabase.from("reviews")
           .select("id,order_id,listing_id,rating,comment,seller_response,hidden,created_at")
           .eq("buyer_id", eligibility.userId).in("order_id", batch).order("created_at", { ascending: false }).order("id").range(start, end);
-        if (!reviews.error) return reviews;
-        const fallback = await supabase.from("reviews")
-          .select("id,order_id,listing_id,rating,comment,hidden,created_at")
-          .eq("buyer_id", eligibility.userId).in("order_id", batch).order("created_at", { ascending: false }).order("id").range(start, end);
-        return { ...fallback, data: fallback.data?.map((review) => ({ ...review, seller_response: null })) ?? null };
+        return fallback;
       }),
     ]);
 
@@ -237,9 +266,26 @@ export async function getBuyerOrdersData(
       comment: string;
       seller_response?: string | null;
       hidden?: boolean | null;
+      is_anonymous?: boolean | null;
+      image_paths?: string[] | null;
+      video_path?: string | null;
+      edited_at?: string | null;
       created_at: string;
     }>) {
       if (!rv.order_id) continue;
+      const imagePaths = Array.isArray(rv.image_paths)
+        ? rv.image_paths.filter((p) => typeof p === "string" && p.trim().length > 0)
+        : [];
+      const videoPath = typeof rv.video_path === "string" && rv.video_path.trim() ? rv.video_path.trim() : null;
+      const media: ReviewMediaAttachment[] = [
+        ...imagePaths.map((_, index) => ({
+          kind: "image" as const,
+          url: buildReviewMediaProxyUrl({ reviewId: rv.id, kind: "image", index }),
+        })),
+        ...(videoPath
+          ? [{ kind: "video" as const, url: buildReviewMediaProxyUrl({ reviewId: rv.id, kind: "video" }) }]
+          : []),
+      ];
       const arr = reviewsByOrder.get(rv.order_id) ?? [];
       arr.push({
         id: rv.id,
@@ -249,6 +295,11 @@ export async function getBuyerOrdersData(
         comment: rv.comment,
         sellerResponse: rv.seller_response ?? null,
         hidden: Boolean(rv.hidden),
+        isAnonymous: Boolean(rv.is_anonymous),
+        imagePaths,
+        videoPath,
+        media,
+        editedAt: rv.edited_at ?? null,
         createdAt: rv.created_at,
       });
       reviewsByOrder.set(rv.order_id, arr);
@@ -313,11 +364,11 @@ export async function getBuyerOrdersData(
     }
   }
 
-  const itemsByOrder = new Map<string, BuyerOrderItemView[]>();
-  for (const row of (itemsRes.data ?? []) as Array<{
+  const rawItemRows = (itemsRes.data ?? []) as Array<{
     id: string;
     order_id: string;
     listing_id: string | null;
+    variant_id?: string | null;
     title_snapshot: string;
     variant_snapshot?: Record<string, string> | null;
     unit_sen: number;
@@ -329,7 +380,38 @@ export async function getBuyerOrdersData(
     pickup_window_start?: string | null;
     service_requirements?: string | null;
     service_attachment_paths?: string[] | null;
-  }>) {
+  }>;
+
+  const completedOrderIds = new Set(
+    orderRows.filter((o) => o.status === "completed").map((o) => o.id)
+  );
+  const mediaClient = service ?? supabase;
+  const [mediaContext, repurchaseMap] = await Promise.all([
+    loadOrderItemMediaContext(mediaClient, rawItemRows),
+    completedOrderIds.size > 0
+      ? resolveCompletedOrdersRepurchaseMap(
+          mediaClient,
+          eligibility.userId,
+          rawItemRows
+            .filter((row) => completedOrderIds.has(row.order_id))
+            .map((row) => ({
+              id: row.id,
+              listingId: row.listing_id,
+              variantId: row.variant_id ?? null,
+              variantLabel:
+                row.variant_snapshot &&
+                typeof row.variant_snapshot === "object" &&
+                Object.keys(row.variant_snapshot).length > 0
+                  ? formatVariationOptionLabel(row.variant_snapshot)
+                  : null,
+              isService: Boolean(row.is_service),
+            }))
+        )
+      : Promise.resolve(new Map<string, ItemRepurchaseState>()),
+  ]);
+
+  const itemsByOrder = new Map<string, BuyerOrderItemView[]>();
+  for (const row of rawItemRows) {
     const list = itemsByOrder.get(row.order_id) ?? [];
     const variantLabel =
       row.variant_snapshot &&
@@ -340,11 +422,12 @@ export async function getBuyerOrdersData(
     list.push({
       id: row.id,
       listingId: row.listing_id,
+      variantId: row.variant_id ?? null,
       title: row.title_snapshot,
       variantLabel,
       unitSen: Number(row.unit_sen ?? 0),
       quantity: Number(row.quantity ?? 1),
-      imageUrl: resolvePublicStorageUrl("listings", row.image_path, env.url),
+      imageUrl: resolveOrderItemImageWithContext(row, mediaContext, env.url),
       isService: Boolean(row.is_service),
       serviceMode: row.service_mode ?? null,
       pickupNote: row.pickup_note ?? null,
@@ -353,6 +436,7 @@ export async function getBuyerOrdersData(
       serviceAttachmentPaths: Array.isArray(row.service_attachment_paths)
         ? row.service_attachment_paths
         : [],
+      repurchase: repurchaseMap.get(row.id),
     });
     itemsByOrder.set(row.order_id, list);
   }
@@ -406,6 +490,11 @@ export async function getBuyerOrdersData(
     });
   }
 
+  const buyerDisplayName =
+    session.profile?.display_name?.trim() ||
+    session.profile?.full_name?.trim() ||
+    "UMS Buyer";
+
   const allOrders: BuyerOrderView[] = orderRows.map((o) => {
     const items = itemsByOrder.get(o.id) ?? [];
     const checkout = o.checkout_session_id ? checkouts.get(o.checkout_session_id) ?? null : null;
@@ -417,6 +506,7 @@ export async function getBuyerOrdersData(
       checkoutSessionId: o.checkout_session_id,
       sellerId: o.seller_id,
       sellerName: sellerNameMap.get(o.seller_id) ?? "UMSKAL Seller",
+      buyerDisplayName,
       status: o.status,
       subtotalSen: Number(o.subtotal_sen ?? 0),
       fpxFeeSen: Number(o.fpx_fee_sen ?? 0),

@@ -123,7 +123,7 @@ export async function loadAnalyticsDataset(): Promise<AnalyticsDatasetInput | nu
     fetchAllPaginated<AnalyticsDatasetInput["freeNotices"][number]>((from, to) =>
       service
         .from("free_notices")
-        .select("id,contributor_id,status,spot_id,created_at")
+        .select("id,contributor_id,status,spot_id,created_at,pickup_location,expires_at,renewed_at")
         .order("id", { ascending: true })
         .range(from, to)
     ),

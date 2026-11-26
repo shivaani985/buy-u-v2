@@ -5,7 +5,7 @@ import {
   type ServiceCatalogCard,
 } from "@/components/services/ServicesCatalogClient";
 import { resolvePublicStorageUrl } from "@/lib/format";
-import { computeRatingSummary } from "@/lib/marketplace/phase8";
+import { loadListingRatingAndSoldMap } from "@/lib/reviews/presentation";
 import { getPublicSupabaseEnv } from "@/lib/supabase/env";
 import { getSessionSummary } from "@/lib/supabase/server";
 import { getServerServiceClient } from "@/lib/supabase/service";
@@ -33,7 +33,7 @@ export default async function ServicesPage() {
   let favouritedIds: string[] = [];
 
   if (service) {
-    const [catRes, listRes, areaRes, revRes, favRes] = await Promise.all([
+    const [catRes, listRes, areaRes, favRes] = await Promise.all([
       service.from("categories").select("id,name").eq("kind", "service").eq("active", true).order("sort_order"),
       service
         .from("listings")
@@ -43,7 +43,6 @@ export default async function ServicesPage() {
         .order("created_at", { ascending: false })
         .limit(60),
       service.from("collection_areas").select("id,name").eq("active", true),
-      service.from("reviews").select("seller_id,rating,hidden").eq("hidden", false),
       userId
         ? service.from("favourites").select("listing_id").eq("user_id", userId)
         : Promise.resolve({ data: [] }),
@@ -72,19 +71,17 @@ export default async function ServicesPage() {
       created_at: string;
     }>;
 
-    const listingIds = rows.map((r) => r.id);
     const sellerIds = Array.from(new Set(rows.map((r) => r.seller_id)));
-    const [{ data: profs }, { data: salesRows }] = await Promise.all([
+    const [{ data: profs }, metricsMap] = await Promise.all([
       sellerIds.length
         ? service.from("profiles").select("id,display_name,full_name,faculty").in("id", sellerIds)
         : Promise.resolve({ data: [] }),
-      listingIds.length
-        ? service
-            .from("order_items")
-            .select("listing_id,quantity,orders!inner(status)")
-            .in("listing_id", listingIds)
-            .in("orders.status", ["paid", "ready_for_pickup", "handed_over", "completed"])
-        : Promise.resolve({ data: [] }),
+      rows.length > 0
+        ? loadListingRatingAndSoldMap(
+            service,
+            rows.map((r) => ({ listingId: r.id, sellerId: r.seller_id }))
+          )
+        : Promise.resolve(new Map()),
     ]);
 
     const sellerMap = new Map(
@@ -102,23 +99,8 @@ export default async function ServicesPage() {
       ])
     );
 
-    const salesCountMap = new Map<string, number>();
-    for (const s of (salesRows ?? []) as Array<{ listing_id: string; quantity: number | null }>) {
-      salesCountMap.set(
-        s.listing_id,
-        (salesCountMap.get(s.listing_id) ?? 0) + Math.max(1, Number(s.quantity ?? 1))
-      );
-    }
-
-    const revsBySeller = new Map<string, Array<{ rating: number; hidden: boolean }>>();
-    for (const r of (revRes.data ?? []) as Array<{ seller_id: string; rating: number; hidden: boolean }>) {
-      const arr = revsBySeller.get(r.seller_id) ?? [];
-      arr.push(r);
-      revsBySeller.set(r.seller_id, arr);
-    }
-
     cards = rows.map((r) => {
-      const rs = computeRatingSummary(revsBySeller.get(r.seller_id) ?? []);
+      const metrics = metricsMap.get(r.id);
       const seller = sellerMap.get(r.seller_id);
       const imageUrls = (r.image_paths ?? [])
         .map((p) => resolvePublicStorageUrl("listings", p, env?.url))
@@ -143,9 +125,10 @@ export default async function ServicesPage() {
         sellerDisplayName: seller?.name ?? "UMS Student Provider",
         sellerBadge: "Student",
         sellerFaculty: seller?.faculty ?? null,
-        rating: rs.averageRating,
-        reviewCount: rs.totalReviews,
-        salesCount: salesCountMap.get(r.id) ?? 0,
+        rating: metrics?.effectiveRating ?? null,
+        reviewCount: metrics?.effectiveReviewCount ?? 0,
+        ratingSource: metrics?.ratingSource ?? "none",
+        salesCount: metrics?.totalSold ?? 0,
         createdAt: r.published_at ?? r.created_at,
         isDemo: false,
         serviceMode: r.service_mode || "in_person",

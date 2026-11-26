@@ -1,8 +1,11 @@
 "use client";
 
+import { getNoticeboardStatus } from "@/lib/marketplace/free-noticeboard";
 import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { ReviewGallery } from "@/components/reviews/ReviewGallery";
+import type { ReviewMediaAttachment } from "@/lib/reviews/presentation";
 import {
   CheckCircle2,
   AlertCircle,
@@ -58,7 +61,8 @@ export interface AdminPortalProps {
     id: string;
     title: string;
     donorName: string;
-    spotId: string;
+    pickupLocation: string | null;
+    expiresAt: string;
     status: string;
     createdAt: string;
   }>;
@@ -78,12 +82,14 @@ export interface AdminPortalProps {
     rating: number;
     comment: string;
     hidden: boolean;
+    isAnonymous?: boolean;
+    editedAt?: string | null;
+    media?: ReviewMediaAttachment[];
     createdAt: string;
   }>;
   catalog: {
     categories: Array<{ id: string; name: string; kind: string; active: boolean }>;
     collectionAreas: Array<{ id: string; name: string; active: boolean }>;
-    donationSpots: Array<{ id: string; name: string; active: boolean }>;
   };
   auditLogs: Array<{
     id: string;
@@ -271,7 +277,7 @@ export function AdminPlatformPortalClient({
               { l: "Net Commission (2%)", v: formatCurrencySen(ov.netPlatformCommissionSen) },
               { l: "Average Order Value", v: formatCurrencySen(ov.averageOrderValueSen) },
               { l: "Completed Services", v: String(ov.completedServices) },
-              { l: "Completed Donations", v: `${ov.completedDonations} (${stats.community.totalUnitsDonated} units)` },
+              { l: "Free Item Posts", v: `${stats.noticeboard.total} (${stats.noticeboard.active} active)` },
             ].map((k) => (
               <div key={k.l} className="rounded-2xl border border-[#E6E3EE] bg-white px-4 py-3">
                 <p className="text-[11px] font-bold text-[#6B6779]">{k.l}</p>
@@ -360,7 +366,7 @@ export function AdminPlatformPortalClient({
               { l: "Avg Earnings / Active Business Seller", v: formatCurrencySen(ent.avgEarningsPerBusinessSellerSen) },
               { l: "Active Student Service Providers", v: String(ent.activeServiceProviders) },
               { l: "Pre-Loved Sellers / Completed Resales", v: `${ent.preLovedSellersCount} / ${ent.preLovedCompletedTransactions}` },
-              { l: "Repeat Buyers / Donors (Units)", v: `${ent.repeatBuyers} / ${ent.donorsCount} (${ent.donatedUnits}u)` },
+              { l: "Repeat Buyers", v: ent.repeatBuyers },
             ].map((k) => (
               <div key={k.l} className="rounded-2xl border border-[#E6E3EE] bg-white px-4 py-3">
                 <p className="text-[11px] font-bold text-[#6B6779]">{k.l}</p>
@@ -498,14 +504,14 @@ export function AdminPlatformPortalClient({
 
           <div className="overflow-x-auto rounded-2xl border border-[#E6E3EE] bg-white">
             <div className="border-b border-[#ECEAF3] bg-[#FAF9FC] px-4 py-2.5 text-xs font-extrabold text-[#14121A]">
-              Community Free Items Moderation ({freeNotices.length})
+              Free Items Moderation ({freeNotices.length})
             </div>
             <table className="w-full text-left text-xs">
               <thead className="border-b border-[#ECEAF3] bg-[#FAF9FC] text-[11px] font-bold text-[#6B6779]">
                 <tr>
                   <th className="px-4 py-2.5">Free Item</th>
                   <th className="px-4 py-2.5">Donor</th>
-                  <th className="px-4 py-2.5">Spot</th>
+                  <th className="px-4 py-2.5">Pickup Location</th>
                   <th className="px-4 py-2.5">Status</th>
                   <th className="px-4 py-2.5">Action</th>
                 </tr>
@@ -520,8 +526,8 @@ export function AdminPlatformPortalClient({
                     <tr key={fn.id}>
                       <td className="px-4 py-2.5 font-bold text-[#14121A]">{fn.title}</td>
                       <td className="px-4 py-2.5">{fn.donorName}</td>
-                      <td className="px-4 py-2.5">{fn.spotId}</td>
-                      <td className="px-4 py-2.5 font-bold capitalize">{fn.status}</td>
+                      <td className="px-4 py-2.5">{fn.pickupLocation ?? "Location unconfirmed"}</td>
+                      <td className="px-4 py-2.5 font-bold capitalize">{fn.pickupLocation ? getNoticeboardStatus(fn, stats.noticeboard.asOf) : `Legacy · ${fn.status}`}</td>
                       <td className="px-4 py-2.5">
                         <button
                           type="button"
@@ -625,11 +631,26 @@ export function AdminPlatformPortalClient({
           ) : (
             reviews.map((rv) => (
               <div key={rv.id} className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-[#E6E3EE] bg-white p-4 text-xs">
-                <div>
-                  <p className="font-bold text-[#14121A]">
-                    {"★".repeat(rv.rating)} ({rv.rating}/5) · {rv.hidden ? "Hidden" : "Published"}
-                  </p>
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="font-bold text-[#14121A]">
+                      {"★".repeat(rv.rating)} ({rv.rating}/5) · {rv.hidden ? "Hidden" : "Published"}
+                    </p>
+                    {rv.isAnonymous ? (
+                      <span className="rounded bg-[#F4F1FA] px-1.5 py-0.5 text-[10px] font-bold text-[#4E2A84]">
+                        Anonymous
+                      </span>
+                    ) : null}
+                    {rv.editedAt ? (
+                      <span className="rounded bg-[#F4F3F7] px-1.5 py-0.5 text-[10px] font-semibold text-[#555062]">
+                        Edited
+                      </span>
+                    ) : null}
+                  </div>
                   <p className="mt-0.5 text-[#4A4656]">{rv.comment}</p>
+                  {rv.media && rv.media.length > 0 ? (
+                    <ReviewGallery media={rv.media} compact />
+                  ) : null}
                 </div>
                 <button
                   type="button"
@@ -653,14 +674,13 @@ export function AdminPlatformPortalClient({
         </div>
       ) : null}
 
-      {/* TAB: CATEGORIES, COLLECTION AREAS & DONATION SPOTS */}
+      {/* TAB: CATEGORIES & COLLECTION AREAS */}
       {tab === "catalog" ? (
         <div className="grid gap-4 md:grid-cols-3">
           {(
             [
               ["Categories", "categories" as const, catalog.categories],
               ["Collection Areas", "collection_areas" as const, catalog.collectionAreas],
-              ["Donation Spots", "donation_spots" as const, catalog.donationSpots],
             ] as const
           ).map(([title, table, rows]) => (
             <div key={title} className="space-y-2 rounded-2xl border border-[#E6E3EE] bg-white p-4 text-xs">

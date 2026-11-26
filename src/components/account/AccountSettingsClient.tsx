@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { CheckCircle2, AlertCircle, Ban } from "lucide-react";
 import {
+  completeMatricNumberAction,
   toggleMemberBlockAction,
   updateAccountProfileAction,
 } from "@/app/marketplace-actions";
@@ -11,6 +12,7 @@ import {
 export function AccountSettingsClient({
   initial,
   blockedUsers,
+  canSetMatric,
 }: {
   initial: {
     displayName: string;
@@ -19,9 +21,11 @@ export function AccountSettingsClient({
     phone: string;
     prefs: { inquiries: boolean; reviews: boolean; community: boolean };
   };
+  canSetMatric: boolean;
   blockedUsers: Array<{ id: string; displayName: string; createdAt: string }>;
 }) {
   const router = useRouter();
+  const [matric, setMatric] = useState("");
   const [displayName, setDisplayName] = useState(initial.displayName);
   const [bio, setBio] = useState(initial.bio);
   const [faculty, setFaculty] = useState(initial.faculty);
@@ -34,13 +38,14 @@ export function AccountSettingsClient({
     e.preventDefault();
     setBusy(true);
     setFeedback(null);
-    const res = await updateAccountProfileAction({
+    let res = await updateAccountProfileAction({
       displayName,
       bio,
       faculty,
       phone,
       notificationPrefs: prefs,
     });
+    if (res.ok && canSetMatric && matric.trim()) res = await completeMatricNumberAction(matric);
     setBusy(false);
     setFeedback({ ok: res.ok, text: res.message });
     if (res.ok) router.refresh();
@@ -56,7 +61,7 @@ export function AccountSettingsClient({
 
   return (
     <div className="mt-8 grid gap-6 lg:grid-cols-2">
-      <form onSubmit={saveProfile} className="space-y-4 rounded-2xl border border-[#E6E3EE] bg-white p-5">
+      <form id="student-profile" onSubmit={saveProfile} className="space-y-4 rounded-2xl border border-[#E6E3EE] bg-white p-5">
         <h2 className="text-base font-extrabold text-[#14121A]">Profile &amp; Notification Settings</h2>
         <p className="text-xs text-[#6B6779]">
           Verified UMS email and university role are backend-managed and cannot be altered here.
@@ -86,6 +91,13 @@ export function AccountSettingsClient({
             className="w-full rounded-xl border border-[#DFDCE8] px-3 py-2 text-xs"
           />
         </div>
+        {canSetMatric && <label className="block space-y-1 text-xs font-bold text-[#4A4656]">
+          <span>Matric Number</span>
+          <input value={matric} onChange={(event) => setMatric(event.target.value)}
+            minLength={4} maxLength={20} autoComplete="off"
+            className="w-full rounded-xl border border-[#DFDCE8] px-3 py-2 text-xs" />
+          <span className="block font-normal">Required to post Free Items. Only you and authorized administrators can access it.</span>
+        </label>}
         <div className="space-y-1">
           <label className="text-xs font-bold text-[#4A4656]">Faculty / School (UMSKAL)</label>
           <input

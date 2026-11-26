@@ -49,6 +49,8 @@ export interface OrderListEntry {
   items: OrderDisplayItem[];
   isService?: boolean;
   canReview?: boolean;
+  hasEditableReview?: boolean;
+  repurchase?: OrderDisplayItem["repurchase"];
   recipientId?: string;
   listingId?: string | null;
   pin?: { failedAttempts: number; lockedUntil: string | null };
@@ -571,6 +573,29 @@ export function OrderList({
                       >
                         Write Review
                       </Link>
+                    ) : !seller &&
+                      entry.hasEditableReview &&
+                      presentation.tab === "completed" ? (
+                      <Link href={`${details}#reviews`} className={orderButton}>
+                        Edit Review
+                      </Link>
+                    ) : null}
+                    {!seller &&
+                    presentation.tab === "completed" &&
+                    entry.repurchase ? (
+                      entry.repurchase.href ? (
+                        <Link href={entry.repurchase.href} className={orderPrimary}>
+                          {entry.repurchase.buttonLabel}
+                        </Link>
+                      ) : (
+                        <span
+                          aria-disabled="true"
+                          title={entry.repurchase.reason}
+                          className="inline-flex min-h-10 cursor-not-allowed items-center justify-center rounded-xl border border-[#E6E3EE] bg-[#F5F4F8] px-3.5 py-2 text-xs font-bold text-[#858094] sm:text-sm"
+                        >
+                          {entry.repurchase.buttonLabel}
+                        </span>
+                      )
                     ) : null}
                     {!reviewing &&
                     presentation.tab === "refund-dispute" &&

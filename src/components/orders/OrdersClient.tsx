@@ -10,14 +10,27 @@ function preview(item: BuyerOrderItemView) {
 export function OrdersClient({ pendingCheckouts, orders, serverNow }: {
   pendingCheckouts: BuyerPendingCheckoutView[]; orders: BuyerOrderView[]; serverNow: number;
 }) {
-  const entries: OrderListEntry[] = orders.map((order) => ({
-    id: order.id, code: order.orderCode, name: order.sellerName, status: order.status, createdAt: order.createdAt,
-    amount: order.totalPaidSen, deadline: order.paymentDeadline, paymentStatus: order.latestPayment?.status,
-    hasFinancialIssue: isBuyerOrderBlocked(order), refundStatus: order.refund?.status,
-    items: order.items.map(preview), isService: order.isServiceOrder,
-    canReview: getUnreviewedItems(order).length > 0, recipientId: order.paymentVerified ? order.sellerId : undefined,
-    listingId: order.items[0]?.listingId,
-  }));
+  const entries: OrderListEntry[] = orders.map((order) => {
+    const singleRepurchase =
+      order.status === "completed" && order.items.length === 1
+        ? order.items[0]?.repurchase
+        : undefined;
+    const hasEditableReview =
+      order.status === "completed" &&
+      getUnreviewedItems(order).length === 0 &&
+      order.reviews.some((r) => !r.hidden);
+    return {
+      id: order.id, code: order.orderCode, name: order.sellerName, status: order.status, createdAt: order.createdAt,
+      amount: order.totalPaidSen, deadline: order.paymentDeadline, paymentStatus: order.latestPayment?.status,
+      hasFinancialIssue: isBuyerOrderBlocked(order), refundStatus: order.refund?.status,
+      items: order.items.map(preview), isService: order.isServiceOrder,
+      canReview: getUnreviewedItems(order).length > 0,
+      hasEditableReview,
+      repurchase: singleRepurchase,
+      recipientId: order.paymentVerified ? order.sellerId : undefined,
+      listingId: order.items[0]?.listingId,
+    };
+  });
   for (const checkout of pendingCheckouts) {
     const groups = new Map<string, { id: string; name: string; items: ReturnType<typeof preview>[] }>();
     for (const order of checkout.orders) {

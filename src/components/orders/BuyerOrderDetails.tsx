@@ -14,7 +14,10 @@ import { OrderContact, PaymentControls } from "@/components/orders/OrderControls
 import { OrderFulfilment } from "@/components/orders/OrderFulfilment";
 import { OrderAmounts, OrderDetailsLayout, OrderItems, OrderSection, orderButton, orderPanel } from "@/components/orders/OrderDisplay";
 import { useOrderClock, useOrderRefresh } from "@/components/orders/useOrderClock";
+import { ReviewDialog, type ReviewDialogItemOption } from "@/components/reviews/ReviewDialog";
+import { ReviewGallery } from "@/components/reviews/ReviewGallery";
 import { DISPUTE_REASONS, evaluateBuyerDisputeEligibility, type DisputeReasonCode } from "@/lib/disputes/validation";
+import { REVIEW_STAR_COLOR } from "@/lib/reviews/validation";
 import { formatMytDateTime } from "@/lib/financials/policy";
 import { formatSenToRm } from "@/lib/format";
 import type { BuyerOrderReviewView, BuyerOrderView } from "@/lib/orders/data";
@@ -58,9 +61,6 @@ export function BuyerOrderDetails({ order, back, mode, serverNow, startReview, t
   );
   const [editingReview, setEditingReview] =
     useState<BuyerOrderReviewView | null>(null);
-  const [reviewListingId, setReviewListingId] = useState<string>(() => startReview ? unreviewed[0]?.listingId ?? "" : "");
-  const [reviewRating, setReviewRating] = useState<number>(5);
-  const [reviewComment, setReviewComment] = useState<string>("");
   const [reviewFormError, setReviewFormError] = useState<string | null>(null);
   const [feedbackByKey, setFeedbackByKey] = useState<
     Record<string, { type: "info" | "error"; text: string }>
@@ -87,46 +87,47 @@ export function BuyerOrderDetails({ order, back, mode, serverNow, startReview, t
   const transactionRef = order.checkout?.transactionRef ?? order.latestPayment?.transactionRef;
 
   function openNewReviewDialog(order: BuyerOrderView) {
-    const nextItem = getUnreviewedItems(order)[0];
     setReviewingOrder(order);
     setEditingReview(null);
-    setReviewListingId(nextItem?.listingId ?? "");
-    setReviewRating(5);
-    setReviewComment("");
     setReviewFormError(null);
   }
 
   function openEditReviewDialog(order: BuyerOrderView, review: BuyerOrderReviewView) {
     setReviewingOrder(order);
     setEditingReview(review);
-    setReviewListingId(review.listingId ?? "");
-    setReviewRating(review.rating);
-    setReviewComment(review.comment);
     setReviewFormError(null);
   }
 
-  async function handleSubmitProductReview() {
+  async function handleSubmitProductReview(payload: {
+    listingId: string | null;
+    rating: number;
+    comment: string;
+    isAnonymous: boolean;
+    imagePaths: string[];
+    videoPath: string | null;
+  }) {
     if (!reviewingOrder) return;
-    const trimmed = reviewComment.trim();
-    if (trimmed.length < 5 || trimmed.length > 1000) {
-      setReviewFormError("Review comment must be 5 to 1,000 characters.");
-      return;
-    }
-    const order = reviewingOrder;
-    setBusyKey(`rev:${order.id}`);
+    const targetOrder = reviewingOrder;
+    setBusyKey(`rev:${targetOrder.id}`);
     setReviewFormError(null);
     try {
       const res = editingReview
         ? await editVerifiedReviewAction({
             reviewId: editingReview.id,
-            rating: reviewRating,
-            comment: trimmed,
+            rating: payload.rating,
+            comment: payload.comment,
+            isAnonymous: payload.isAnonymous,
+            imagePaths: payload.imagePaths,
+            videoPath: payload.videoPath,
           })
         : await submitVerifiedReviewAction({
-            orderId: order.id,
-            listingId: reviewListingId || order.items[0]?.listingId || null,
-            rating: reviewRating,
-            comment: trimmed,
+            orderId: targetOrder.id,
+            listingId: payload.listingId || targetOrder.items[0]?.listingId || null,
+            rating: payload.rating,
+            comment: payload.comment,
+            isAnonymous: payload.isAnonymous,
+            imagePaths: payload.imagePaths,
+            videoPath: payload.videoPath,
           });
       if (!res.ok) {
         setReviewFormError(res.message);
@@ -136,7 +137,7 @@ export function BuyerOrderDetails({ order, back, mode, serverNow, startReview, t
       setEditingReview(null);
       setFeedbackByKey((prev) => ({
         ...prev,
-        [`ord:${order.id}`]: { type: "info", text: res.message },
+        [`ord:${targetOrder.id}`]: { type: "info", text: res.message },
       }));
       router.refresh();
     } catch {
@@ -313,14 +314,53 @@ export function BuyerOrderDetails({ order, back, mode, serverNow, startReview, t
           {unreviewed.length > 0 && <button type="button" className={orderButton} onClick={() => openNewReviewDialog(order)}>
             <Star className="size-4" aria-hidden="true" />Write Review
           </button>}
-          {order.reviews.map((review) => <div key={review.id} className="mt-3 space-y-1 border-t border-border-crisp pt-3 text-sm">
-            <p className="font-bold">{review.rating}/5{order.items.find((item) => item.listingId === review.listingId)?.title
-              ? ` · ${order.items.find((item) => item.listingId === review.listingId)?.title}` : ""}</p>
-            <p className="whitespace-pre-wrap break-words">{review.comment}</p>
-            {review.sellerResponse && <p className="whitespace-pre-wrap break-words text-brand-purple">Seller reply · {review.sellerResponse}</p>}
-            {review.hidden ? <p className="text-ink-secondary">Hidden by moderation</p>
-              : <button type="button" className={orderButton} onClick={() => openEditReviewDialog(order, review)}>Edit Review</button>}
-          </div>)}
+          {order.reviews.map((review) => {
+            const matchedItem = order.items.find((item) => item.listingId === review.listingId);
+            return (
+              <div key={review.id} className="mt-3 space-y-2 border-t border-border-crisp pt-3 text-sm">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="inline-flex items-center gap-0.5" aria-label={`${review.rating} out of 5 stars`}>
+                      {[1, 2, 3, 4, 5].map((star) => (
+                        <Star
+                          key={star}
+                          className="h-3.5 w-3.5"
+                          style={
+                            star <= review.rating
+                              ? { color: REVIEW_STAR_COLOR, fill: REVIEW_STAR_COLOR }
+                              : { color: "#D5D0E0" }
+                          }
+                          aria-hidden="true"
+                        />
+                      ))}
+                    </span>
+                    {matchedItem?.title ? (
+                      <span className="font-bold text-[#14121A]">{matchedItem.title}</span>
+                    ) : null}
+                    {review.isAnonymous ? (
+                      <span className="rounded-md bg-[#F4F1FA] px-2 py-0.5 text-[10px] font-bold text-[#4E2A84]">
+                        Posted anonymously
+                      </span>
+                    ) : null}
+                    {review.editedAt ? (
+                      <span className="rounded-md bg-[#F4F3F7] px-2 py-0.5 text-[10px] font-semibold text-[#555062]">
+                        Edited
+                      </span>
+                    ) : null}
+                  </div>
+                  {!review.hidden ? (
+                    <button type="button" className={orderButton} onClick={() => openEditReviewDialog(order, review)}>
+                      Edit Review
+                    </button>
+                  ) : null}
+                </div>
+                <p className="whitespace-pre-wrap break-words">{review.comment}</p>
+                {review.media.length > 0 ? <ReviewGallery media={review.media} compact /> : null}
+                {review.sellerResponse && <p className="whitespace-pre-wrap break-words text-brand-purple">Seller reply · {review.sellerResponse}</p>}
+                {review.hidden ? <p className="text-ink-secondary">Hidden by moderation</p> : null}
+              </div>
+            );
+          })}
         </OrderSection>
       </div>}
       {/* Buyer Receipt Confirmation Dialog */}
@@ -537,143 +577,45 @@ export function BuyerOrderDetails({ order, back, mode, serverNow, startReview, t
           </div>
         </div>
       ) : null}
-      {/* P0.8: Buyer Verified Purchase Review Dialog (Create / Edit) */}
+      {/* Phase 10R: Redesigned Verified Purchase Review Modal / Sheet */}
       {reviewingOrder ? (
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="product-review-title"
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
-        >
-          <div className="w-full max-w-md rounded-2xl border border-[#E6E3EE] bg-white p-6 shadow-xl">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <span className="inline-block rounded-full bg-[#F3EEFA] px-2.5 py-0.5 text-[10px] font-extrabold text-[#4E2A84]">
-                  Verified Purchase
-                </span>
-                <h2
-                  id="product-review-title"
-                  className="mt-1 text-base font-extrabold text-[#14121A]"
-                >
-                  {editingReview
-                    ? `Edit Review · #${reviewingOrder.orderCode}`
-                    : `Review Order #${reviewingOrder.orderCode}`}
-                </h2>
-                <p className="mt-0.5 text-xs text-[#6B6779]">
-                  Seller: {reviewingOrder.sellerName}
-                </p>
-              </div>
-              <button
-                type="button"
-                aria-label="Close review dialog"
-                onClick={() => {
-                  setReviewingOrder(null);
-                  setEditingReview(null);
-                }}
-                className="rounded-lg p-1 text-[#6B6779] hover:bg-[#FAF9FC] hover:text-[#14121A]"
-              >
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-
-            <div className="mt-4 space-y-3.5">
-              {!editingReview && getUnreviewedItems(reviewingOrder).length > 1 ? (
-                <div>
-                  <label
-                    htmlFor="review-item-select"
-                    className="block text-xs font-bold text-[#14121A]"
-                  >
-                    Item to Review
-                  </label>
-                  <select
-                    id="review-item-select"
-                    value={reviewListingId}
-                    onChange={(e) => setReviewListingId(e.target.value)}
-                    className="mt-1 w-full rounded-xl border border-[#E6E3EE] bg-white px-3 py-2 text-xs font-semibold text-[#14121A] focus:border-[#4E2A84] focus:outline-none"
-                  >
-                    {getUnreviewedItems(reviewingOrder)
-                      .map((it) => (
-                        <option key={it.id} value={it.listingId ?? ""}>
-                          {it.title}
-                        </option>
-                      ))}
-                  </select>
-                </div>
-              ) : null}
-
-              <div>
-                <label
-                  htmlFor="review-rating-select"
-                  className="block text-xs font-bold text-[#14121A]"
-                >
-                  Star Rating (1–5)
-                </label>
-                <select
-                  id="review-rating-select"
-                  value={reviewRating}
-                  onChange={(e) => setReviewRating(Number(e.target.value))}
-                  className="mt-1 w-full rounded-xl border border-[#E6E3EE] bg-white px-3 py-2 text-xs font-semibold text-[#14121A] focus:border-[#4E2A84] focus:outline-none"
-                >
-                  {[5, 4, 3, 2, 1].map((n) => (
-                    <option key={n} value={n}>
-                      {"★".repeat(n)} ({n} {n === 1 ? "Star" : "Stars"})
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label
-                  htmlFor="review-comment-input"
-                  className="block text-xs font-bold text-[#14121A]"
-                >
-                  Your Honest Review (5&ndash;1,000 characters)
-                </label>
-                <textarea
-                  id="review-comment-input"
-                  rows={4}
-                  maxLength={1000}
-                  value={reviewComment}
-                  onChange={(e) => setReviewComment(e.target.value)}
-                  placeholder="Share item quality, campus handover experience, and accuracy..."
-                  className="mt-1 w-full rounded-xl border border-[#E6E3EE] bg-white px-3 py-2 text-xs text-[#14121A] focus:border-[#4E2A84] focus:outline-none"
-                />
-              </div>
-
-              {reviewFormError ? (
-                <p role="alert" className="text-xs font-semibold text-[#B42318]">
-                  {reviewFormError}
-                </p>
-              ) : null}
-            </div>
-
-            <div className="mt-5 flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => {
-                  setReviewingOrder(null);
-                  setEditingReview(null);
-                }}
-                className="rounded-xl border border-[#E6E3EE] bg-white px-4 py-2 text-xs font-bold text-[#14121A] hover:bg-[#FAF9FC]"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                disabled={busyKey === `rev:${reviewingOrder.id}`}
-                onClick={handleSubmitProductReview}
-                className="inline-flex items-center gap-1.5 rounded-xl bg-[#4E2A84] px-4 py-2 text-xs font-bold text-white hover:bg-[#3F216B] disabled:opacity-50"
-              >
-                {busyKey === `rev:${reviewingOrder.id}` ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                ) : (
-                  <Star className="h-3.5 w-3.5" />
-                )}
-                <span>{editingReview ? "Save Changes" : "Publish Review"}</span>
-              </button>
-            </div>
-          </div>
-        </div>
+        <ReviewDialog
+          key={editingReview ? `edit-${editingReview.id}` : `new-${reviewingOrder.id}`}
+          open
+          orderCode={reviewingOrder.orderCode}
+          buyerDisplayName={reviewingOrder.buyerDisplayName}
+          items={(editingReview
+            ? reviewingOrder.items.filter((it) => it.listingId === editingReview.listingId)
+            : getUnreviewedItems(reviewingOrder)
+          ).map<ReviewDialogItemOption>((it) => ({
+            id: it.id,
+            listingId: it.listingId,
+            title: it.title,
+            variantLabel: it.variantLabel,
+            imageUrl: it.imageUrl,
+            isService: it.isService,
+          }))}
+          initialReview={
+            editingReview
+              ? {
+                  id: editingReview.id,
+                  listingId: editingReview.listingId,
+                  rating: editingReview.rating,
+                  comment: editingReview.comment,
+                  isAnonymous: editingReview.isAnonymous,
+                  imagePaths: editingReview.imagePaths,
+                  videoPath: editingReview.videoPath,
+                }
+              : null
+          }
+          submitting={busyKey === `rev:${reviewingOrder.id}`}
+          errorMessage={reviewFormError}
+          onClose={() => {
+            setReviewingOrder(null);
+            setEditingReview(null);
+          }}
+          onSubmit={handleSubmitProductReview}
+        />
       ) : null}
     </OrderDetailsLayout>
   );

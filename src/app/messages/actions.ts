@@ -62,6 +62,7 @@ export async function startConversationAction(input: {
   listingId?: string | null;
   variantId?: string | null;
   orderId?: string | null;
+  freeNoticeId?: string | null;
   initialMessage?: string | null;
   openBargain?: boolean;
 }): Promise<StartConversationResult> {
@@ -81,9 +82,19 @@ export async function startConversationAction(input: {
   }
 
   const userId = eligibility.userId;
-  const rawOrderId = (input.orderId ?? "").trim();
+  const freeNoticeId = input.freeNoticeId?.trim() || null;
+  const rawOrderId = freeNoticeId ? "" : (input.orderId ?? "").trim();
   let validOrderId: string | null = null;
   let peerId = (input.sellerId ?? "").trim();
+
+  if (freeNoticeId) {
+    if (!isValidUuid(freeNoticeId)) return { ok: false, error: "Invalid free item reference." };
+    const { data: notice } = await supabase.from("free_notices").select("contributor_id")
+      .eq("id", freeNoticeId).eq("status", "active").not("pickup_location", "is", null)
+      .gt("expires_at", new Date().toISOString()).maybeSingle();
+    if (!notice) return { ok: false, error: "This free item post is no longer available." };
+    peerId = notice.contributor_id;
+  }
 
   // When an orderId is supplied, authorize participant membership and derive counterparty from the actual order
   if (rawOrderId.length > 0) {
@@ -128,7 +139,7 @@ export async function startConversationAction(input: {
   const check = validateStartConversation({
     eligibility,
     peerUserId: peerId,
-    listingId: input.listingId ?? null,
+    listingId: freeNoticeId ? null : input.listingId ?? null,
     isBlocked,
   });
 
@@ -182,7 +193,7 @@ export async function startConversationAction(input: {
     return { ok: false, error: "Conversation could not be initialized." };
   }
 
-  const trimmedInitial = (input.initialMessage ?? "").trim();
+  const trimmedInitial = freeNoticeId ? "" : (input.initialMessage ?? "").trim();
   if (trimmedInitial.length > 0) {
     // Prevent duplicate automatic greetings when reopening an existing conversation for this order/listing
     let msgQuery = supabase
@@ -217,6 +228,10 @@ export async function startConversationAction(input: {
       ? `&variant=${encodeURIComponent(input.variantId.trim())}`
       : "";
   const bargainParam = input.openBargain ? "&bargain=1" : "";
+
+  if (freeNoticeId) {
+    return { ok: true, conversationId, href: `/messages?c=${encodeURIComponent(conversationId)}&freeItem=${encodeURIComponent(freeNoticeId)}` };
+  }
 
   return {
     ok: true,

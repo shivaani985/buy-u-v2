@@ -65,3 +65,21 @@ The orders experience detects and displays late ToyyibPay payments as **Payment 
 - Define safe activation of eligible late-paid checkouts and checkout-level refund resolution.
 - Define multi-seller reconciliation and exceptional FPX fee refund policies.
 - Notify affected buyers and sellers when a case is resolved and record admin actions in the audit log.
+
+## 7. Phase 10G Free Items
+
+Free Items is a campus giveaway noticeboard. Eligible students post photos and an exact pickup location. Eligible UMS students and staff can browse, collect directly on a first-come, first-served basis, and optionally open a donor conversation. Signed-out visitors see the landing page and a sign-in prompt.
+
+Posts expire after 72 hours. Owners can edit or remove posts, or renew an expired post for another 72 hours after confirming availability. The Phase 8 donation and claim flow is historical. Its tables remain available for compatibility while the current app measures posts and contributors.
+
+See [Phase 10G acceptance](PHASE-10G-ACCEPTANCE.md) for the migration and owner verification steps.
+
+## 8. Phase 10R Reviews, Ratings & Repurchase
+
+Phase 10R upgrades post-purchase trust, ratings accuracy, repurchase flows, and historical variation image fidelity without adding new database tables:
+
+- Completed orders offer live-checked **Buy Again** (products, preselecting exact valid variation via `?variant=`) and **Book Again** (services), or muted **Product Unavailable** / **Service Unavailable** when deleted, archived, paused, or sold out.
+- Verified review composer uses an accessible responsive modal/sheet with interactive 5-star `#F4B400` rating labels, optional photo/video attachments in private `review-media` storage, **Review anonymously** toggle (server-masked names + strict zero-PII/zero-`buyer_id` projection), and unrestricted editing on non-moderated reviews (`Edited` badge).
+- Listing/service cards and detail pages distinguish item ratings from weighted **Shop Rating** fallback and **Not rated yet**, and compute **Total sold** strictly from completed, verified, non-fully-refunded unit quantities across variations.
+
+See [Phase 10R acceptance](PHASE-10R-ACCEPTANCE.md) for SQL rollout, verification, and manual test steps.

@@ -1,3 +1,4 @@
+import { FreeNoticeVisibility } from "@/components/free-items/FreeNoticeVisibility";
 import Image from "next/image";
 import Link from "next/link";
 import { ArrowRight, Gift, Lock, LogIn, MapPin, Wrench } from "lucide-react";
@@ -21,7 +22,9 @@ function CompactPreviewCard({
 }) {
   const detailHref = item.isDemo
     ? `/listings/${encodeURIComponent(item.slug)}?demo=1`
-    : `/listings/${encodeURIComponent(item.slug)}`;
+    : item.listingType === "free"
+      ? `/free-items?post=${item.id}#post-${item.id}`
+      : `/listings/${encodeURIComponent(item.slug)}`;
 
   const initials = (item.sellerDisplayName || "UM")
     .split(" ")
@@ -56,7 +59,7 @@ function CompactPreviewCard({
     </div>
   );
 
-  return (
+  const card = (
     <article
       className={`group flex flex-col overflow-hidden rounded-xl border border-[#E6E3EE] bg-white shadow-[0_2px_6px_rgba(20,18,26,0.04)] transition-all hover:-translate-y-0.5 ${hoverBorder}`}
     >
@@ -132,6 +135,8 @@ function CompactPreviewCard({
       </Link>
     </article>
   );
+  const visibility = item.freeVisibility;
+  return visibility ? <FreeNoticeVisibility key={visibility.expiresAt} {...visibility}>{card}</FreeNoticeVisibility> : card;
 }
 
 export function ServicesAndFreeColumns({
@@ -306,7 +311,7 @@ export function ServicesAndFreeColumns({
                 </p>
               </div>
               <Link
-                href="/login?next=%2Fmarketplace%3Ftype%3Dfree"
+                href="/login?next=%2Ffree-items"
                 className="inline-flex shrink-0 items-center gap-1 rounded-lg bg-[#008386] px-3 py-1.5 text-xs font-bold text-white hover:bg-[#00696B]"
               >
                 <LogIn className="h-3.5 w-3.5" aria-hidden="true" />
@@ -324,8 +329,7 @@ export function ServicesAndFreeColumns({
                     No free items shared right now
                   </p>
                   <p className="text-xs text-[#6E6A7C]">
-                    Check back soon for campus giveaways and donation-spot
-                    drops.
+                    Check back soon for campus giveaways.
                   </p>
                 </div>
               </div>

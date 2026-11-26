@@ -54,8 +54,11 @@ export async function GET(request: NextRequest) {
     { period: periodLabel, section: "Entrepreneurship", metric: "Student Business Earnings (Pre-Expense)", value: formatCurrencySen(stats.entrepreneurship.studentBusinessEarningsSen) },
     { period: periodLabel, section: "Entrepreneurship", metric: "Active Student Service Providers", value: String(stats.entrepreneurship.activeServiceProviders) },
     { period: periodLabel, section: "Community", metric: "Pre-Loved Completed Resales", value: String(stats.entrepreneurship.preLovedCompletedTransactions) },
-    { period: periodLabel, section: "Community", metric: "Completed Donations", value: String(stats.community.completedDonations) },
-    { period: periodLabel, section: "Community", metric: "Units Donated", value: String(stats.community.totalUnitsDonated) },
+    { period: "All time", section: "Free Items", metric: "Total posts", value: String(stats.noticeboard.total) },
+    { period: "Current", section: "Free Items", metric: "Active posts", value: String(stats.noticeboard.active) },
+    { period: "Current", section: "Free Items", metric: "Expired posts", value: String(stats.noticeboard.expired) },
+    { period: "All time", section: "Free Items", metric: "Unique contributors", value: String(stats.noticeboard.contributors) },
+    { period: "All time", section: "Free Items", metric: "Posts renewed at least once", value: String(stats.noticeboard.renewed) },
     { period: periodLabel, section: "Trust & Safety", metric: "Open Reports (Submitted/Under Review)", value: String(stats.trustAndSafety.openReports) },
     { period: periodLabel, section: "Trust & Safety", metric: "Active Disputes", value: String(stats.trustAndSafety.activeDisputes) },
   ]);
