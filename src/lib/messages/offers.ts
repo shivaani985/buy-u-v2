@@ -17,7 +17,17 @@ export type OfferStatus =
   | "accepted"
   | "declined"
   | "cancelled"
-  | "expired";
+  | "expired"
+  | "superseded";
+
+export function normalizeOfferStatus(status: string | null | undefined): OfferStatus {
+  if (status === "accepted" || status === "expired" || status === "superseded") {
+    return status;
+  }
+  if (status === "declined" || status === "rejected") return "declined";
+  if (status === "cancelled" || status === "withdrawn") return "cancelled";
+  return "pending";
+}
 
 export interface OfferCardItem {
   id: string;
@@ -28,6 +38,8 @@ export interface OfferCardItem {
   variantImageUrl?: string | null;
   buyerId: string;
   sellerId: string;
+  proposedBy?: string;
+  parentOfferId?: string | null;
   offerPriceSen: number;
   status: OfferStatus;
   orderId: string | null;
@@ -36,6 +48,12 @@ export interface OfferCardItem {
   expiresAt: string;
   reservationExpiresAt: string | null;
   reservationReleasedAt: string | null;
+}
+
+export function getOfferProposerId(
+  offer: Pick<OfferCardItem, "buyerId" | "proposedBy">
+): string {
+  return offer.proposedBy?.trim() || offer.buyerId;
 }
 
 /**
@@ -366,7 +384,7 @@ export function validateCreateOffer(input: {
   return { ok: true, offerPriceSen: input.offerPriceSen };
 }
 
-export type OfferActionType = "accept" | "decline" | "cancel";
+export type OfferActionType = "accept" | "decline" | "cancel" | "counter";
 
 export function validateOfferTransition(input: {
   action: OfferActionType;
@@ -378,6 +396,8 @@ export function validateOfferTransition(input: {
   listingIsFood?: boolean | null;
   listingAvailabilityMode?: string | null;
   allowOffers?: boolean;
+  listingPriceSen?: number;
+  counterPriceSen?: number | null;
   availableStock?: number;
   nowMs?: number;
 }): { ok: true } | { ok: false; error: string } {
@@ -391,22 +411,38 @@ export function validateOfferTransition(input: {
   const actor = input.eligibility.userId.toLowerCase();
   const buyer = input.offer.buyerId.toLowerCase();
   const seller = input.offer.sellerId.toLowerCase();
+  const proposer = getOfferProposerId(input.offer).toLowerCase();
 
-  if (input.action === "cancel" && actor !== buyer) {
-    return { ok: false, error: "Only the buyer can cancel a pending offer." };
+  if (actor !== buyer && actor !== seller) {
+    return { ok: false, error: "Only offer participants can manage this offer." };
   }
 
-  if ((input.action === "accept" || input.action === "decline") && actor !== seller) {
+  if (input.action === "cancel" && actor !== proposer) {
     return {
       ok: false,
-      error: "Only the seller can accept or decline this offer.",
+      error: "Only the member who sent this proposal can cancel it.",
     };
   }
 
-  if (input.action === "accept" && input.isBlocked) {
+  if (
+    (input.action === "accept" ||
+      input.action === "decline" ||
+      input.action === "counter") &&
+    actor === proposer
+  ) {
     return {
       ok: false,
-      error: "Cannot accept an offer from a blocked member.",
+      error: "Only the receiving party can respond to this offer.",
+    };
+  }
+
+  if (
+    (input.action === "accept" || input.action === "counter") &&
+    input.isBlocked
+  ) {
+    return {
+      ok: false,
+      error: "Cannot respond to an offer from a blocked member.",
     };
   }
 
@@ -429,7 +465,7 @@ export function validateOfferTransition(input: {
     };
   }
 
-  if (input.action === "accept") {
+  if (input.action === "accept" || input.action === "counter") {
     if (
       input.listingStatus !== undefined &&
       input.listingStatus !== "published"
@@ -447,7 +483,7 @@ export function validateOfferTransition(input: {
       return {
         ok: false,
         error:
-          "Only Pre-Loved and non-food Student Business listings support offer acceptance.",
+          "Only Pre-Loved and non-food Student Business listings support price negotiation.",
       };
     }
     if (input.allowOffers === false) {
@@ -457,6 +493,28 @@ export function validateOfferTransition(input: {
       return {
         ok: false,
         error: "Not enough available stock to reserve this item.",
+      };
+    }
+  }
+
+  if (input.action === "counter") {
+    if (
+      input.counterPriceSen === null ||
+      input.counterPriceSen === undefined ||
+      !Number.isInteger(input.counterPriceSen) ||
+      input.counterPriceSen < MIN_OFFER_SEN
+    ) {
+      return { ok: false, error: "Minimum counter offer is RM 2.00." };
+    }
+    if (
+      typeof input.listingPriceSen === "number" &&
+      Number.isInteger(input.listingPriceSen) &&
+      input.listingPriceSen >= MIN_OFFER_SEN &&
+      input.counterPriceSen > input.listingPriceSen
+    ) {
+      return {
+        ok: false,
+        error: "Counter offer cannot exceed the listing price.",
       };
     }
   }
@@ -482,18 +540,14 @@ export interface AtomicOfferSimulationState {
  */
 export function simulateAtomicOfferAccept(
   state: AtomicOfferSimulationState,
-  sellerEligibility: MessagingEligibilityResult,
+  receiverEligibility: MessagingEligibilityResult,
   nowMs: number,
   isBlocked = false
 ):
   | { ok: true; nextState: AtomicOfferSimulationState }
   | { ok: false; error: string } {
   const listingSellerId = state.listingSellerId ?? state.offer.sellerId;
-  if (
-    listingSellerId.toLowerCase() !== state.offer.sellerId.toLowerCase() ||
-    (sellerEligibility.userId &&
-      listingSellerId.toLowerCase() !== sellerEligibility.userId.toLowerCase())
-  ) {
+  if (listingSellerId.toLowerCase() !== state.offer.sellerId.toLowerCase()) {
     return { ok: false, error: "Listing owner does not match offer seller." };
   }
 
@@ -528,7 +582,7 @@ export function simulateAtomicOfferAccept(
   );
   const check = validateOfferTransition({
     action: "accept",
-    eligibility: sellerEligibility,
+    eligibility: receiverEligibility,
     offer: state.offer,
     isBlocked,
     listingStatus: "published",
@@ -554,6 +608,86 @@ export function simulateAtomicOfferAccept(
         respondedAt: nowIso,
         reservationExpiresAt: holdUntilIso,
       },
+    },
+  };
+}
+
+/**
+ * Pure reference model of `counter_offer_atomic` for deterministic two-way
+ * negotiation, superseding, variant/image preservation, and authorization tests.
+ */
+export function simulateAtomicCounterOffer(
+  state: AtomicOfferSimulationState,
+  receiverEligibility: MessagingEligibilityResult,
+  counterPriceSen: number | null,
+  nowMs: number,
+  isBlocked = false
+):
+  | {
+      ok: true;
+      supersededOffer: OfferCardItem;
+      counterOffer: OfferCardItem;
+      nextState: AtomicOfferSimulationState;
+    }
+  | { ok: false; error: string } {
+  const listingSellerId = state.listingSellerId ?? state.offer.sellerId;
+  if (listingSellerId.toLowerCase() !== state.offer.sellerId.toLowerCase()) {
+    return { ok: false, error: "Listing owner does not match offer seller." };
+  }
+
+  const available = Math.max(
+    0,
+    state.listingQuantity - Math.max(0, state.listingReservedQuantity)
+  );
+  const check = validateOfferTransition({
+    action: "counter",
+    eligibility: receiverEligibility,
+    offer: state.offer,
+    isBlocked,
+    listingStatus: "published",
+    listingKind: "pre_loved",
+    allowOffers: true,
+    listingPriceSen: state.listingPriceSen,
+    counterPriceSen,
+    availableStock: available,
+    nowMs,
+  });
+  if (!check.ok) return check;
+
+  const nowIso = new Date(nowMs).toISOString();
+  const supersededOffer: OfferCardItem = {
+    ...state.offer,
+    status: "superseded",
+    respondedAt: nowIso,
+  };
+  const counterOffer: OfferCardItem = {
+    id: `${state.offer.id}-counter-${nowMs}`,
+    conversationId: state.offer.conversationId,
+    listingId: state.offer.listingId,
+    variantId: state.offer.variantId ?? null,
+    variantLabel: state.offer.variantLabel ?? null,
+    variantImageUrl: state.offer.variantImageUrl ?? null,
+    buyerId: state.offer.buyerId,
+    sellerId: state.offer.sellerId,
+    proposedBy: receiverEligibility.userId!,
+    parentOfferId: state.offer.id,
+    offerPriceSen: counterPriceSen!,
+    status: "pending",
+    orderId: null,
+    createdAt: nowIso,
+    respondedAt: null,
+    expiresAt: new Date(nowMs + OFFER_PENDING_TTL_MS).toISOString(),
+    reservationExpiresAt: null,
+    reservationReleasedAt: null,
+  };
+
+  return {
+    ok: true,
+    supersededOffer,
+    counterOffer,
+    nextState: {
+      ...state,
+      offer: counterOffer,
     },
   };
 }

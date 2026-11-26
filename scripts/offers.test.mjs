@@ -4,10 +4,12 @@ import {
   computeOfferExpiresAt,
   isOfferHoldPayable,
   mergeChatTimeline,
+  normalizeOfferStatus,
   OFFER_PENDING_TTL_MS,
   OFFER_RESERVATION_TTL_MS,
   parseOfferPriceRmToSen,
   resolveEffectiveOfferStatus,
+  simulateAtomicCounterOffer,
   simulateAtomicOfferAccept,
   simulateOfferInsertGuard,
   simulateReleaseExpiredReservation,
@@ -663,6 +665,124 @@ test("offer INSERT guard blocks forged status/server fields, overrides future ti
       ...base,
       isBlocked: hasBlock(blocksSellerToBuyer, BUYER_ID, SELLER_ID),
     }).ok,
+    false
+  );
+});
+
+test("two-way bargaining: unlimited counter rounds, receiver-only transitions, superseded parent, preserved variation/image, and buyer accept checkout", () => {
+  const buyer = makeEligibility("student", BUYER_ID);
+  const seller = makeEligibility("student", SELLER_ID);
+  const outsider = makeEligibility("student", "aaaaaaaa-1111-4111-8111-111111111111");
+  const t0 = Date.parse("2026-11-26T04:00:00.000Z");
+
+  const initialOffer = makeOffer({
+    id: "offer-round-1",
+    proposedBy: BUYER_ID,
+    parentOfferId: null,
+    variantId: "var-black",
+    variantLabel: "Black",
+    variantImageUrl: "https://example.supabase.co/storage/v1/object/public/listings/black.jpg",
+    offerPriceSen: 1500,
+    createdAt: new Date(t0).toISOString(),
+    expiresAt: new Date(t0 + OFFER_PENDING_TTL_MS).toISOString(),
+  });
+
+  const baseState = {
+    listingQuantity: 2,
+    listingReservedQuantity: 0,
+    listingSellerId: SELLER_ID,
+    listingPriceSen: 3000,
+    conversationMembers: [BUYER_ID, SELLER_ID],
+    offer: initialOffer,
+  };
+
+  // Buyer (proposer) cannot accept, decline, or counter their own proposal; seller cannot cancel it
+  assert.equal(simulateAtomicOfferAccept(baseState, buyer, t0 + 1000).ok, false);
+  assert.equal(simulateAtomicCounterOffer(baseState, buyer, 1700, t0 + 1000).ok, false);
+  assert.equal(
+    validateOfferTransition({ action: "decline", eligibility: buyer, offer: initialOffer, isBlocked: false, nowMs: t0 + 1000 }).ok,
+    false
+  );
+  assert.equal(
+    validateOfferTransition({ action: "cancel", eligibility: seller, offer: initialOffer, isBlocked: false, nowMs: t0 + 1000 }).ok,
+    false
+  );
+  assert.equal(simulateAtomicCounterOffer(baseState, outsider, 1700, t0 + 1000).ok, false);
+
+  // Round 1: Seller counters RM 15 -> RM 22
+  const r1 = simulateAtomicCounterOffer(baseState, seller, 2200, t0 + 10_000);
+  assert.equal(r1.ok, true);
+  assert.equal(r1.supersededOffer.status, "superseded");
+  assert.equal(r1.counterOffer.proposedBy, SELLER_ID);
+  assert.equal(r1.counterOffer.parentOfferId, "offer-round-1");
+  assert.equal(r1.counterOffer.variantId, "var-black");
+  assert.equal(r1.counterOffer.variantLabel, "Black");
+  assert.equal(r1.counterOffer.variantImageUrl, initialOffer.variantImageUrl);
+  assert.equal(normalizeOfferStatus(r1.supersededOffer.status), "superseded");
+
+  // Superseded parent becomes non-actionable
+  assert.equal(
+    validateOfferTransition({
+      action: "accept",
+      eligibility: seller,
+      offer: r1.supersededOffer,
+      isBlocked: false,
+      nowMs: t0 + 11_000,
+    }).ok,
+    false
+  );
+
+  // Seller (proposer of counter) cannot accept or counter their own counter; seller can cancel it
+  assert.equal(simulateAtomicOfferAccept(r1.nextState, seller, t0 + 20_000).ok, false);
+  assert.equal(simulateAtomicCounterOffer(r1.nextState, seller, 2100, t0 + 20_000).ok, false);
+  assert.equal(
+    validateOfferTransition({
+      action: "cancel",
+      eligibility: seller,
+      offer: r1.counterOffer,
+      isBlocked: false,
+      nowMs: t0 + 20_000,
+    }).ok,
+    true
+  );
+
+  // Unlimited counter rounds: Buyer counters RM 18 -> Seller counters RM 19 -> Buyer accepts RM 19
+  const r2 = simulateAtomicCounterOffer(r1.nextState, buyer, 1800, t0 + 30_000);
+  assert.equal(r2.ok, true);
+  assert.equal(r2.counterOffer.proposedBy, BUYER_ID);
+
+  // Out-of-bounds counter rejected (< RM 2.00 or > RM 30.00)
+  assert.equal(simulateAtomicCounterOffer(r2.nextState, seller, 199, t0 + 35_000).ok, false);
+  assert.equal(simulateAtomicCounterOffer(r2.nextState, seller, 3001, t0 + 35_000).ok, false);
+
+  const r3 = simulateAtomicCounterOffer(r2.nextState, seller, 1900, t0 + 40_000);
+  assert.equal(r3.ok, true);
+  assert.equal(r3.counterOffer.proposedBy, SELLER_ID);
+
+  // Expired counter cannot be accepted or countered
+  assert.equal(
+    simulateAtomicOfferAccept(r3.nextState, buyer, t0 + 40_000 + OFFER_PENDING_TTL_MS).ok,
+    false
+  );
+  assert.equal(
+    simulateAtomicCounterOffer(r3.nextState, buyer, 1850, t0 + 40_000 + OFFER_PENDING_TTL_MS).ok,
+    false
+  );
+
+  // Buyer accepts seller's counter-offer -> atomically reserves 1 unit for 30m & allows buyer checkout
+  const acceptedRes = simulateAtomicOfferAccept(r3.nextState, buyer, t0 + 50_000);
+  assert.equal(acceptedRes.ok, true);
+  assert.equal(acceptedRes.nextState.listingReservedQuantity, 1);
+  assert.equal(acceptedRes.nextState.offer.offerPriceSen, 1900);
+  assert.equal(acceptedRes.nextState.offer.variantId, "var-black");
+  assert.equal(
+    isOfferHoldPayable(acceptedRes.nextState.offer, { nowMs: t0 + 60_000 }).payable,
+    true
+  );
+
+  // Duplicate acceptance is prevented
+  assert.equal(
+    simulateAtomicOfferAccept(acceptedRes.nextState, buyer, t0 + 55_000).ok,
     false
   );
 });

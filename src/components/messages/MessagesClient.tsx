@@ -26,6 +26,7 @@ import {
 import {
   acceptOfferAction,
   cancelOfferAction,
+  counterOfferAction,
   createOfferAction,
   declineOfferAction,
 } from "@/app/messages/offer-actions";
@@ -43,9 +44,9 @@ import {
   computeReservationExpiresAt,
   isBargainingEligibleListing,
   mergeChatTimeline,
+  normalizeOfferStatus,
   resolveEffectiveOfferStatus,
   type OfferCardItem,
-  type OfferStatus,
 } from "@/lib/messages/offers";
 import {
   buildChatAttachmentPath,
@@ -534,6 +535,8 @@ export function MessagesClient({
                 listing_id?: string;
                 buyer_id?: string;
                 seller_id?: string;
+                proposed_by?: string | null;
+                parent_offer_id?: string | null;
                 offer_price_sen?: number;
                 status?: string;
                 order_id?: string | null;
@@ -545,17 +548,7 @@ export function MessagesClient({
               };
               if (!raw?.id || !raw.conversation_id || !raw.created_at) return;
 
-              const status = (
-                [
-                  "pending",
-                  "accepted",
-                  "declined",
-                  "cancelled",
-                  "expired",
-                ].includes(raw.status ?? "")
-                  ? raw.status
-                  : "pending"
-              ) as OfferStatus;
+              const status = normalizeOfferStatus(raw.status);
 
               const mapped: OfferCardItem = {
                 id: raw.id,
@@ -580,6 +573,8 @@ export function MessagesClient({
                 })(),
                 buyerId: raw.buyer_id ?? "",
                 sellerId: raw.seller_id ?? "",
+                proposedBy: raw.proposed_by ?? raw.buyer_id ?? "",
+                parentOfferId: raw.parent_offer_id ?? null,
                 offerPriceSen: Number(raw.offer_price_sen ?? 0),
                 status,
                 orderId: raw.order_id ?? null,
@@ -920,6 +915,47 @@ export function MessagesClient({
     }
   }
 
+  async function handleCounterOffer(
+    offerId: string,
+    amountRm: string
+  ): Promise<{ ok: boolean; error?: string }> {
+    if (busyOfferIds[offerId]) {
+      return { ok: false, error: "Counter offer already in progress." };
+    }
+    setBusyOfferIds((prev) => ({ ...prev, [offerId]: true }));
+    setOfferRowErrors((prev) => ({ ...prev, [offerId]: null }));
+
+    try {
+      const res = await counterOfferAction({ offerId, amountRm });
+      if (!res.ok || !res.offer) {
+        const msg = res.error || "Could not send counter offer. Please try again.";
+        setOfferRowErrors((prev) => ({ ...prev, [offerId]: msg }));
+        return { ok: false, error: msg };
+      }
+
+      const nextOffer = res.offer;
+      const supersededId = res.supersededOfferId ?? offerId;
+      setOffers((prev) => {
+        const updated = prev.map((o) =>
+          o.id === supersededId
+            ? { ...o, status: "superseded" as const, respondedAt: nextOffer.createdAt }
+            : o
+        );
+        const exists = updated.some((o) => o.id === nextOffer.id);
+        return exists
+          ? updated.map((o) => (o.id === nextOffer.id ? nextOffer : o))
+          : [...updated, nextOffer];
+      });
+      return { ok: true };
+    } catch {
+      const msg = "Network error while sending counter offer. Please try again.";
+      setOfferRowErrors((prev) => ({ ...prev, [offerId]: msg }));
+      return { ok: false, error: msg };
+    } finally {
+      setBusyOfferIds((prev) => ({ ...prev, [offerId]: false }));
+    }
+  }
+
   const activeOfferVariant =
     activeListing?.hasVariants && activeListing.variants.length > 0
       ? activeListing.variants.find((v) => v.id === selectedOfferVariantId) ??
@@ -1219,6 +1255,7 @@ export function MessagesClient({
                           onCancel={(id) =>
                             void runOfferAction(id, cancelOfferAction)
                           }
+                          onCounter={handleCounterOffer}
                           onPay={async (id) => {
                             setBusyOfferIds((prev) => ({ ...prev, [id]: true }));
                             setOfferRowErrors((prev) => {
@@ -1462,8 +1499,8 @@ export function MessagesClient({
                   >
                     {hasActivePendingOffer ? (
                       <p className="text-xs font-semibold text-[#1D70B8]">
-                        You already have a pending offer on this listing. Cancel
-                        it or wait for a response before sending another.
+                        There is already a pending offer in this chat. Respond
+                        to, cancel, or counter it in the conversation above.
                       </p>
                     ) : (
                       <div className="space-y-2">

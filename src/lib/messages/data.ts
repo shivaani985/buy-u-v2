@@ -8,8 +8,8 @@ import type { AuthSessionSummary } from "@/types/marketplace";
 import {
   computeOfferExpiresAt,
   computeReservationExpiresAt,
+  normalizeOfferStatus,
   type OfferCardItem,
-  type OfferStatus,
 } from "./offers";
 import {
   countUnreadByConversation,
@@ -128,6 +128,8 @@ export interface RawOfferRow {
   variant_image_path?: string | null;
   buyer_id: string;
   seller_id: string;
+  proposed_by?: string | null;
+  parent_offer_id?: string | null;
   offer_price_sen: number;
   status: string;
   order_id: string | null;
@@ -143,13 +145,7 @@ export function mapRawOffer(
   variantLabel?: string | null,
   variantImageUrl?: string | null
 ): OfferCardItem {
-  const status = (
-    ["pending", "accepted", "declined", "cancelled", "expired"].includes(
-      row.status
-    )
-      ? row.status
-      : "pending"
-  ) as OfferStatus;
+  const status = normalizeOfferStatus(row.status);
 
   const fallbackSnapshotLabel =
     !variantLabel &&
@@ -169,6 +165,8 @@ export function mapRawOffer(
     variantImageUrl: variantImageUrl ?? null,
     buyerId: row.buyer_id,
     sellerId: row.seller_id,
+    proposedBy: row.proposed_by ?? row.buyer_id,
+    parentOfferId: row.parent_offer_id ?? null,
     offerPriceSen: Number(row.offer_price_sen ?? 0),
     status,
     orderId: row.order_id ?? null,

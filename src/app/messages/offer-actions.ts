@@ -2,6 +2,7 @@
 
 import { mapRawOffer, type RawOfferRow } from "@/lib/messages/data";
 import {
+  getOfferProposerId,
   parseOfferPriceRmToSen,
   resolveEffectiveOfferStatus,
   validateCreateOffer,
@@ -22,6 +23,7 @@ import { createRecipientMessageNotification } from "@/lib/supabase/service";
 export interface OfferActionResult {
   ok: boolean;
   offer?: OfferCardItem;
+  supersededOfferId?: string;
   error?: string;
   migrationRequired?: boolean;
 }
@@ -327,7 +329,7 @@ export async function cancelOfferAction(
       responded_at: new Date().toISOString(),
     })
     .eq("id", offer.id)
-    .eq("buyer_id", eligibility.userId)
+    .or(`buyer_id.eq.${eligibility.userId},seller_id.eq.${eligibility.userId}`)
     .eq("status", "pending")
     .select(OFFER_SELECT_COLUMNS)
     .maybeSingle();
@@ -343,7 +345,7 @@ export async function cancelOfferAction(
 }
 
 /**
- * Seller declines an unexpired pending offer.
+ * Receiving party declines an unexpired pending offer or counter offer.
  */
 export async function declineOfferAction(
   offerId: string
@@ -390,7 +392,7 @@ export async function declineOfferAction(
       responded_at: new Date().toISOString(),
     })
     .eq("id", offer.id)
-    .eq("seller_id", eligibility.userId)
+    .or(`buyer_id.eq.${eligibility.userId},seller_id.eq.${eligibility.userId}`)
     .eq("status", "pending")
     .select(OFFER_SELECT_COLUMNS)
     .maybeSingle();
@@ -403,25 +405,114 @@ export async function declineOfferAction(
   }
 
   const mapped = mapRawOffer(updated as RawOfferRow);
-  const sellerDisplayName =
-    session.profile?.display_name?.trim() || "UMS Seller";
+  const recipientUserId = getOfferProposerId(mapped);
+  const actorDisplayName =
+    session.profile?.display_name?.trim() ||
+    session.profile?.full_name?.trim() ||
+    "UMS Member";
 
   await Promise.allSettled([
     createRecipientMessageNotification({
-      recipientUserId: mapped.buyerId,
+      recipientUserId,
       conversationId: mapped.conversationId,
-      senderDisplayName: sellerDisplayName,
-      previewText: `Declined your ${formatSenToRm(mapped.offerPriceSen)} offer`,
+      senderDisplayName: actorDisplayName,
+      previewText: `Declined your ${formatSenToRm(mapped.offerPriceSen)} ${mapped.parentOfferId ? "counter offer" : "offer"}`,
     }),
   ]);
 
   return { ok: true, offer: mapped };
 }
 
+interface OfferListingContext {
+  isBlocked: boolean;
+  listingStatus: string;
+  listingKind: string;
+  listingIsFood: boolean;
+  listingAvailabilityMode: string | null;
+  allowOffers: boolean;
+  effectivePriceSen: number;
+  availableStock: number;
+  listingTitle: string;
+}
+
+async function loadOfferListingContext(
+  supabase: NonNullable<Awaited<ReturnType<typeof createSupabaseServerClient>>>,
+  offer: OfferCardItem
+): Promise<OfferListingContext> {
+  const [isBlocked, listingRes] = await Promise.all([
+    checkMemberBlocked(supabase, offer.buyerId, offer.sellerId),
+    supabase
+      .from("listings")
+      .select(
+        "title,status,kind,is_food,availability_mode,has_variants,allow_offers,price_sen,quantity,reserved_quantity"
+      )
+      .eq("id", offer.listingId)
+      .maybeSingle(),
+  ]);
+
+  const listing = listingRes.data as {
+    title?: string | null;
+    status: string;
+    kind: string;
+    is_food: boolean | null;
+    availability_mode: string | null;
+    has_variants: boolean | null;
+    allow_offers: boolean | null;
+    price_sen: number | null;
+    quantity: number | null;
+    reserved_quantity: number | null;
+  } | null;
+
+  let effectivePriceSen = Number(listing?.price_sen ?? 0);
+  let availableStock = listing
+    ? Math.max(
+        0,
+        Number(listing.quantity ?? 0) -
+          Math.max(0, Number(listing.reserved_quantity ?? 0))
+      )
+    : 0;
+
+  if (listing?.has_variants && offer.variantId && isValidUuid(offer.variantId)) {
+    const { data: vRow } = await supabase
+      .from("listing_variants")
+      .select("price_sen,quantity,reserved_quantity,active")
+      .eq("id", offer.variantId)
+      .eq("listing_id", offer.listingId)
+      .maybeSingle();
+    const v = vRow as {
+      price_sen: number;
+      quantity: number;
+      reserved_quantity: number;
+      active: boolean | null;
+    } | null;
+    if (v) {
+      effectivePriceSen = Number(v.price_sen ?? effectivePriceSen);
+    }
+    availableStock =
+      v && v.active !== false
+        ? Math.max(
+            0,
+            Number(v.quantity ?? 0) - Math.max(0, Number(v.reserved_quantity ?? 0))
+          )
+        : 0;
+  }
+
+  return {
+    isBlocked,
+    listingStatus: listing?.status ?? "unavailable",
+    listingKind: listing?.kind ?? "unknown",
+    listingIsFood: Boolean(listing?.is_food),
+    listingAvailabilityMode: listing?.availability_mode ?? null,
+    allowOffers: Boolean(listing?.allow_offers),
+    effectivePriceSen,
+    availableStock,
+    listingTitle: listing?.title?.trim() || "listing",
+  };
+}
+
 /**
- * Seller accepts a pending offer via the atomic database RPC `accept_offer_atomic`
- * (reserves exactly 1 unit for 30 minutes). NEVER fakes atomic reservation with
- * separate client/server updates when the RPC has not yet been applied.
+ * Receiving party accepts a pending offer via `accept_offer_atomic`
+ * (reserves exactly 1 unit for 30 minutes).
  */
 export async function acceptOfferAction(
   offerId: string
@@ -449,68 +540,19 @@ export async function acceptOfferAction(
   }
 
   const offer = mapRawOffer(rawOffer as RawOfferRow);
-  const isBlocked = await checkMemberBlocked(
-    supabase,
-    offer.buyerId,
-    offer.sellerId
-  );
-
-  const { data: listingRow } = await supabase
-    .from("listings")
-    .select(
-      "status,kind,is_food,availability_mode,has_variants,allow_offers,quantity,reserved_quantity"
-    )
-    .eq("id", offer.listingId)
-    .maybeSingle();
-
-  const listing = listingRow as {
-    status: string;
-    kind: string;
-    is_food: boolean | null;
-    availability_mode: string | null;
-    has_variants: boolean | null;
-    allow_offers: boolean | null;
-    quantity: number | null;
-    reserved_quantity: number | null;
-  } | null;
-
-  let availableStock = listing
-    ? Math.max(
-        0,
-        Number(listing.quantity ?? 0) -
-          Math.max(0, Number(listing.reserved_quantity ?? 0))
-      )
-    : 0;
-
-  if (listing?.has_variants && offer.variantId && isValidUuid(offer.variantId)) {
-    const { data: vRow } = await supabase
-      .from("listing_variants")
-      .select("quantity,reserved_quantity,active")
-      .eq("id", offer.variantId)
-      .eq("listing_id", offer.listingId)
-      .maybeSingle();
-    const v = vRow as {
-      quantity: number;
-      reserved_quantity: number;
-      active: boolean | null;
-    } | null;
-    availableStock =
-      v && v.active !== false
-        ? Math.max(0, Number(v.quantity ?? 0) - Math.max(0, Number(v.reserved_quantity ?? 0)))
-        : 0;
-  }
+  const ctx = await loadOfferListingContext(supabase, offer);
 
   const check = validateOfferTransition({
     action: "accept",
     eligibility,
     offer,
-    isBlocked,
-    listingStatus: listing?.status ?? "unavailable",
-    listingKind: listing?.kind ?? "unknown",
-    listingIsFood: Boolean(listing?.is_food),
-    listingAvailabilityMode: listing?.availability_mode ?? null,
-    allowOffers: Boolean(listing?.allow_offers),
-    availableStock,
+    isBlocked: ctx.isBlocked,
+    listingStatus: ctx.listingStatus,
+    listingKind: ctx.listingKind,
+    listingIsFood: ctx.listingIsFood,
+    listingAvailabilityMode: ctx.listingAvailabilityMode,
+    allowOffers: ctx.allowOffers,
+    availableStock: ctx.availableStock,
     nowMs: Date.now(),
   });
 
@@ -537,7 +579,21 @@ export async function acceptOfferAction(
         ok: false,
         migrationRequired: true,
         error:
-          "Atomic 30-minute offer reservation requires the Phase 5B SQL migration (accept_offer_atomic) to be approved and applied first.",
+          "Two-way atomic offer acceptance requires the Phase 10 bargaining SQL migration to be approved and applied first.",
+      };
+    }
+    if (msg.includes("FORBIDDEN_SELLER_ONLY")) {
+      return {
+        ok: false,
+        migrationRequired: true,
+        error:
+          "Accepting seller counter-offers requires applying docs/sql/phase-10-two-way-bargaining.sql first.",
+      };
+    }
+    if (msg.includes("FORBIDDEN_RECEIVER_ONLY")) {
+      return {
+        ok: false,
+        error: "Only the receiving party can accept this proposal.",
       };
     }
     if (msg.includes("OFFER_EXPIRED")) {
@@ -555,7 +611,7 @@ export async function acceptOfferAction(
     if (msg.includes("OFFER_NOT_PENDING")) {
       return {
         ok: false,
-        error: "This offer was already accepted, declined, or cancelled.",
+        error: "This offer was already accepted, countered, declined, or cancelled.",
       };
     }
     if (msg.includes("MEMBER_BLOCKED")) {
@@ -572,17 +628,179 @@ export async function acceptOfferAction(
   }
 
   const mapped = mapRawOffer(rpcRow as RawOfferRow);
-  const sellerDisplayName =
-    session.profile?.display_name?.trim() || "UMS Seller";
+  const recipientUserId = getOfferProposerId(mapped);
+  const actorDisplayName =
+    session.profile?.display_name?.trim() ||
+    session.profile?.full_name?.trim() ||
+    "UMS Member";
+  const isCounter = Boolean(mapped.parentOfferId);
 
   await Promise.allSettled([
     createRecipientMessageNotification({
-      recipientUserId: mapped.buyerId,
+      recipientUserId,
       conversationId: mapped.conversationId,
-      senderDisplayName: sellerDisplayName,
-      previewText: `Accepted your ${formatSenToRm(mapped.offerPriceSen)} offer (reserved for 30 min)`,
+      senderDisplayName: actorDisplayName,
+      previewText: isCounter
+        ? `Accepted your ${formatSenToRm(mapped.offerPriceSen)} counter offer (30 min hold)`
+        : `Accepted your ${formatSenToRm(mapped.offerPriceSen)} offer (reserved for 30 min)`,
     }),
   ]);
 
   return { ok: true, offer: mapped };
+}
+
+/**
+ * Receiving party counters a pending offer or counter offer atomically via
+ * `counter_offer_atomic`, superseding the prior proposal and preserving
+ * listing, variation, snapshot, and image.
+ */
+export async function counterOfferAction(input: {
+  offerId: string;
+  amountRm: string;
+}): Promise<OfferActionResult> {
+  const session = await getSessionSummary();
+  const eligibility = evaluateMessagingEligibility(session);
+  const offerId = (input.offerId ?? "").trim();
+
+  if (!eligibility.eligible || !eligibility.userId || !isValidUuid(offerId)) {
+    return { ok: false, error: "Unable to send counter offer." };
+  }
+
+  const counterPriceSen = parseOfferPriceRmToSen(input.amountRm ?? "");
+  if (counterPriceSen === null) {
+    return {
+      ok: false,
+      error: "Enter a valid counter price (e.g. 18 or 18.50).",
+    };
+  }
+
+  const supabase = await createSupabaseServerClient();
+  if (!supabase) {
+    return { ok: false, error: "Bargaining service unavailable." };
+  }
+
+  const { data: rawOffer, error: fetchErr } = await supabase
+    .from("offers")
+    .select(OFFER_SELECT_COLUMNS)
+    .eq("id", offerId)
+    .maybeSingle();
+
+  if (fetchErr || !rawOffer) {
+    return { ok: false, error: "Offer not found." };
+  }
+
+  const offer = mapRawOffer(rawOffer as RawOfferRow);
+  const ctx = await loadOfferListingContext(supabase, offer);
+
+  const check = validateOfferTransition({
+    action: "counter",
+    eligibility,
+    offer,
+    isBlocked: ctx.isBlocked,
+    listingStatus: ctx.listingStatus,
+    listingKind: ctx.listingKind,
+    listingIsFood: ctx.listingIsFood,
+    listingAvailabilityMode: ctx.listingAvailabilityMode,
+    allowOffers: ctx.allowOffers,
+    listingPriceSen: ctx.effectivePriceSen,
+    counterPriceSen,
+    availableStock: ctx.availableStock,
+    nowMs: Date.now(),
+  });
+
+  if (!check.ok) {
+    return { ok: false, error: check.error };
+  }
+
+  const { data: rpcRow, error: rpcErr } = await supabase.rpc(
+    "counter_offer_atomic",
+    {
+      p_offer_id: offer.id,
+      p_counter_price_sen: counterPriceSen,
+    }
+  );
+
+  if (rpcErr || !rpcRow) {
+    const code = rpcErr?.code ?? "";
+    const msg = rpcErr?.message ?? "";
+
+    if (
+      code === "PGRST202" ||
+      code === "42883" ||
+      /counter_offer_atomic/i.test(msg)
+    ) {
+      return {
+        ok: false,
+        migrationRequired: true,
+        error:
+          "Two-way counter offers require applying docs/sql/phase-10-two-way-bargaining.sql on Supabase first.",
+      };
+    }
+    if (msg.includes("FORBIDDEN_RECEIVER_ONLY")) {
+      return {
+        ok: false,
+        error: "Wait for the other party to respond before countering again.",
+      };
+    }
+    if (msg.includes("OFFER_EXPIRED")) {
+      return {
+        ok: false,
+        error: "This offer expired after 24 hours and can no longer be countered.",
+      };
+    }
+    if (msg.includes("OFFER_NOT_PENDING")) {
+      return {
+        ok: false,
+        error: "This offer is no longer pending.",
+      };
+    }
+    if (msg.includes("OUT_OF_STOCK") || msg.includes("VARIANT_UNAVAILABLE")) {
+      return {
+        ok: false,
+        error: "This item or variation is no longer in stock.",
+      };
+    }
+    if (msg.includes("INVALID_OFFER_PRICE")) {
+      return {
+        ok: false,
+        error: "Counter price must be between RM 2.00 and the listing price.",
+      };
+    }
+    if (msg.includes("MEMBER_BLOCKED")) {
+      return {
+        ok: false,
+        error: "Cannot counter an offer from a blocked member.",
+      };
+    }
+
+    return {
+      ok: false,
+      error: "Could not send counter offer right now. Please retry.",
+    };
+  }
+
+  const mapped = mapRawOffer(rpcRow as RawOfferRow, offer.variantLabel, offer.variantImageUrl);
+  const recipientUserId =
+    getOfferProposerId(mapped).toLowerCase() === mapped.buyerId.toLowerCase()
+      ? mapped.sellerId
+      : mapped.buyerId;
+  const actorDisplayName =
+    session.profile?.display_name?.trim() ||
+    session.profile?.full_name?.trim() ||
+    "UMS Member";
+
+  await Promise.allSettled([
+    createRecipientMessageNotification({
+      recipientUserId,
+      conversationId: mapped.conversationId,
+      senderDisplayName: actorDisplayName,
+      previewText: `Counter-offered ${formatSenToRm(mapped.offerPriceSen)} for ${ctx.listingTitle}`,
+    }),
+  ]);
+
+  return {
+    ok: true,
+    offer: mapped,
+    supersededOfferId: offer.id,
+  };
 }
