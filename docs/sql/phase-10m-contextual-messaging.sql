@@ -2,6 +2,29 @@ BEGIN;
 
 ALTER TABLE public.messages ADD COLUMN IF NOT EXISTS context_ref jsonb;
 
+-- Keep private snapshots out of WAL events, independent of subscriber grants.
+DO $message_publication$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_publication_rel r
+    JOIN pg_catalog.pg_publication p ON p.oid = r.prpubid
+    WHERE p.pubname = 'supabase_realtime' AND r.prrelid = 'public.messages'::regclass
+      AND r.prqual IS NULL
+  ) OR EXISTS (
+    SELECT 1 FROM pg_catalog.pg_publication_tables
+    WHERE schemaname = 'public' AND tablename = 'messages' AND pubname <> 'supabase_realtime'
+  ) THEN
+    RAISE EXCEPTION 'UNEXPECTED_CHAT_PUBLICATION';
+  END IF;
+END;
+$message_publication$;
+
+ALTER PUBLICATION supabase_realtime DROP TABLE public.messages;
+ALTER PUBLICATION supabase_realtime ADD TABLE public.messages (
+  id, conversation_id, sender_id, body, image_paths, listing_id, order_id,
+  free_notice_id, service_request_id, edited_at, created_at
+);
+
 -- Historical private snapshots are available only through the participant projection.
 REVOKE SELECT, INSERT ON public.messages FROM PUBLIC, anon, authenticated;
 REVOKE SELECT (context_ref) ON public.messages FROM PUBLIC, anon, authenticated;

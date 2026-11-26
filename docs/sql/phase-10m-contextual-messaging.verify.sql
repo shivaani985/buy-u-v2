@@ -76,6 +76,29 @@ $fixtures$;
 
 ALTER TABLE public.messages ADD COLUMN IF NOT EXISTS context_ref jsonb;
 
+-- Keep private snapshots out of WAL events, independent of subscriber grants.
+DO $message_publication$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_publication_rel r
+    JOIN pg_catalog.pg_publication p ON p.oid = r.prpubid
+    WHERE p.pubname = 'supabase_realtime' AND r.prrelid = 'public.messages'::regclass
+      AND r.prqual IS NULL
+  ) OR EXISTS (
+    SELECT 1 FROM pg_catalog.pg_publication_tables
+    WHERE schemaname = 'public' AND tablename = 'messages' AND pubname <> 'supabase_realtime'
+  ) THEN
+    RAISE EXCEPTION 'UNEXPECTED_CHAT_PUBLICATION';
+  END IF;
+END;
+$message_publication$;
+
+ALTER PUBLICATION supabase_realtime DROP TABLE public.messages;
+ALTER PUBLICATION supabase_realtime ADD TABLE public.messages (
+  id, conversation_id, sender_id, body, image_paths, listing_id, order_id,
+  free_notice_id, service_request_id, edited_at, created_at
+);
+
 -- Historical private snapshots are available only through the participant projection.
 REVOKE SELECT, INSERT ON public.messages FROM PUBLIC, anon, authenticated;
 REVOKE SELECT (context_ref) ON public.messages FROM PUBLIC, anon, authenticated;
@@ -442,9 +465,22 @@ DECLARE
   service_msg uuid := gen_random_uuid();
   plain_msg uuid := gen_random_uuid();
   file_msg uuid := gen_random_uuid();
+  report_id uuid;
   buyer_file text := buyer::text || '/' || conv::text || '/fixture.pdf';
   j jsonb;
 BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_publication_rel r
+    JOIN pg_catalog.pg_publication p ON p.oid = r.prpubid
+    JOIN pg_catalog.pg_publication_tables t ON t.pubname = p.pubname
+    WHERE p.pubname = 'supabase_realtime' AND r.prrelid = 'public.messages'::regclass
+      AND r.prattrs IS NOT NULL AND t.schemaname = 'public' AND t.tablename = 'messages'
+      AND t.attnames = ARRAY['id','conversation_id','sender_id','body','image_paths','listing_id','order_id',
+        'free_notice_id','service_request_id','edited_at','created_at']::name[]
+  ) OR (SELECT count(*) FROM pg_catalog.pg_publication_tables WHERE pubname = 'supabase_realtime'
+      AND schemaname = 'public' AND tablename IN ('conversations','offers','notifications')) <> 3 THEN
+    RAISE EXCEPTION 'Realtime message allowlist or existing publication membership changed';
+  END IF;
   INSERT INTO storage.objects (bucket_id,name,owner,owner_id,metadata) VALUES
     ('chat-attachments',buyer_file,buyer,buyer::text,'{"mimetype":"application/pdf","size":80}');
   PERFORM set_config('request.jwt.claims',json_build_object('sub',buyer,'role','authenticated')::text,true);
@@ -521,12 +557,25 @@ BEGIN
     RAISE EXCEPTION 'Direct context insert bypassed RPC';
   EXCEPTION WHEN insufficient_privilege THEN NULL; END;
   BEGIN
-    UPDATE public.messages SET context_ref = NULL WHERE id = product_msg;
-    RAISE EXCEPTION 'Context was mutable';
+    UPDATE public.messages SET body = 'Unauthorized edit', edited_at = clock_timestamp() WHERE id=product_msg;
+    IF FOUND THEN RAISE EXCEPTION 'Authenticated sender bypassed hosted UPDATE policy'; END IF;
   EXCEPTION WHEN insufficient_privilege THEN NULL; END;
-  UPDATE public.messages SET body = 'Edited body', edited_at = clock_timestamp() WHERE id=product_msg;
-  IF NOT FOUND OR NOT EXISTS (SELECT 1 FROM public.read_chat_contexts(ARRAY[product_msg]) WHERE reference->>'imagePath' = 'variant.jpg')
-  THEN RAISE EXCEPTION 'Text edit did not preserve its snapshot'; END IF;
+  IF NOT EXISTS (SELECT 1 FROM public.messages WHERE id=product_msg AND body='' AND edited_at IS NULL)
+     OR NOT EXISTS (SELECT 1 FROM public.read_chat_contexts(ARRAY[product_msg]) WHERE reference->>'imagePath' = 'variant.jpg')
+  THEN RAISE EXCEPTION 'Rejected edit changed message or snapshot'; END IF;
+  RESET ROLE;
+  BEGIN
+    UPDATE public.messages SET context_ref = NULL WHERE id=product_msg;
+    RAISE EXCEPTION 'Privileged writer bypassed snapshot immutability';
+  EXCEPTION WHEN insufficient_privilege THEN
+    IF SQLERRM <> 'IMMUTABLE_CHAT_CONTEXT' THEN RAISE; END IF;
+  END;
+  SET LOCAL ROLE authenticated;
+  INSERT INTO public.offers (conversation_id,listing_id,buyer_id,seller_id,offer_price_sen,variant_id)
+  VALUES (conv,listing,buyer,seller,1200,variant);
+  SELECT out_id INTO STRICT report_id FROM public.submit_report_atomic(
+    'message',product_msg,'Spam','Synthetic participant report.'
+  );
 
   SELECT reference INTO STRICT j FROM public.read_chat_contexts(ARRAY[free_msg]);
   IF j->>'pickup' IS DISTINCT FROM 'Block Alpha, level 2' OR j ? 'imagePath'
@@ -546,7 +595,19 @@ BEGIN
     PERFORM public.send_contextual_message(product_msg,conv,'spoof retry','{}');
     RAISE EXCEPTION 'Outsider could reuse submission ID';
   EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+  BEGIN
+    PERFORM public.submit_report_atomic('message',product_msg,'Spam','Synthetic nonparticipant report.');
+    RAISE EXCEPTION 'Outsider could report private message';
+  EXCEPTION WHEN raise_exception THEN IF SQLERRM <> 'REPORT_TARGET_NOT_FOUND' THEN RAISE; END IF; END;
 
+  RESET ROLE;
+  INSERT INTO public.admin_users (user_id,active) VALUES (outsider,true);
+  SET LOCAL ROLE authenticated;
+  IF NOT EXISTS (SELECT id FROM public.messages WHERE id = product_msg)
+     OR EXISTS (SELECT 1 FROM public.read_chat_contexts(ARRAY[product_msg]))
+     OR public.admin_moderate_report_atomic(report_id,'under_review',NULL,'Synthetic admin check') IS DISTINCT FROM true THEN
+    RAISE EXCEPTION 'Existing moderation access or participant-only snapshot projection changed';
+  END IF;
   RESET ROLE;
   IF (SELECT count(*) FROM public.notifications WHERE user_id=seller AND dedupe_key='chat-msg-' || product_msg) <> 1
      OR NOT EXISTS (SELECT 1 FROM public.notifications WHERE user_id=seller AND dedupe_key='chat-msg-' || free_msg
@@ -588,10 +649,24 @@ BEGIN
     RAISE EXCEPTION 'Existing block guard did not block plain chat';
   EXCEPTION WHEN insufficient_privilege THEN NULL; END;
   RESET ROLE;
-  DELETE FROM public.member_blocks WHERE blocker_id=seller AND blocked_id=buyer;
+  UPDATE public.orders SET status='paid', completed_at=NULL WHERE id=purchase;
+  SET LOCAL ROLE authenticated;
+  BEGIN
+    PERFORM public.send_contextual_message(gen_random_uuid(),conv,'Unverified active order','{}','order',purchase);
+    RAISE EXCEPTION 'Unverified active order bypassed blocking';
+  EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+  RESET ROLE;
+  INSERT INTO public.payments (order_id,amount_sen,bill_code,status,verified_at)
+  VALUES (purchase,4600,'BILL-M-' || purchase,'paid',now());
+  SET LOCAL ROLE authenticated;
+  PERFORM public.send_contextual_message(gen_random_uuid(),conv,'Verified active order','{}','order',purchase);
+  RESET ROLE;
+  -- The trusted system insert still passes through the same verified-order guard.
+  SET LOCAL ROLE service_role;
   INSERT INTO public.messages (conversation_id,sender_id,body,order_id)
   VALUES (conv,buyer,'An established system message after migration',purchase)
   RETURNING id INTO plain_msg;
+  RESET ROLE;
   IF NOT EXISTS (SELECT 1 FROM public.messages WHERE id=plain_msg AND context_ref IS NULL)
   THEN RAISE EXCEPTION 'Legacy system-initiated insert path changed'; END IF;
   RAISE NOTICE 'PHASE_10M_VERIFY_PASSED';

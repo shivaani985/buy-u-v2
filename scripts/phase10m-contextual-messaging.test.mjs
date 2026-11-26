@@ -70,6 +70,15 @@ test("rollback embeds the exact migration with participant, privacy, retry and h
   assert.equal(verify.match(/^BEGIN;$/gm)?.length, 1);
   assert.match(verify, /ROLLBACK;\s*$/);
   assert.match(sql, /REVOKE SELECT \(context_ref\)/);
+  const published = sql.match(/ALTER PUBLICATION supabase_realtime ADD TABLE public\.messages \(([^)]+)\)/)?.[1];
+  assert.deepEqual(published?.split(",").map((column) => column.trim()), [
+    "id", "conversation_id", "sender_id", "body", "image_paths", "listing_id", "order_id",
+    "free_notice_id", "service_request_id", "edited_at", "created_at",
+  ]);
+  assert.doesNotMatch(sql, /CREATE POLICY[\s\S]*?FOR UPDATE/i);
+  assert.match(verify, /Authenticated sender bypassed hosted UPDATE policy/);
+  assert.match(verify, /Privileged writer bypassed snapshot immutability/);
+  assert.match(read("src/components/messages/MessagesClient.tsx"), /loadChatReferences\(supabase, \[raw.id\]\)/);
   assert.match(sql, /pg_advisory_xact_lock/);
   assert.match(verify, /PHASE_10M_VERIFY_PASSED/);
 });

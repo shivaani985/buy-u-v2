@@ -88,4 +88,4 @@ See [Phase 10R acceptance](PHASE-10R-ACCEPTANCE.md) for SQL rollout, verificatio
 
 Chat uses one continuous conversation per member pair. Product, service, order, and Free Item references start as unsent composer drafts and stay with the specific messages they are sent on. The desktop layout uses an inbox and conversation pane. The mobile conversation keeps its composer within the visible viewport.
 
-The migration adds one private JSONB column to existing messages. Run the rollback verifier and manual checks listed in [Phase 10M acceptance](PHASE-10M-ACCEPTANCE.md) before marking owner acceptance complete.
+The migration adds one private JSONB column to existing messages and excludes it from Realtime publication. Bargaining retains unlimited proposals, 24-hour offer expiry, a 30-minute accepted reservation, and negotiation history. Run the rollback verifier and manual checks listed in [Phase 10M acceptance](PHASE-10M-ACCEPTANCE.md) before marking owner acceptance complete.
