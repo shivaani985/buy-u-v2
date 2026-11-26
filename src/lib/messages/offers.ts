@@ -33,6 +33,7 @@ export interface OfferCardItem {
   id: string;
   conversationId: string;
   listingId: string;
+  listingTitle?: string | null;
   variantId?: string | null;
   variantLabel?: string | null;
   variantImageUrl?: string | null;
@@ -54,6 +55,75 @@ export function getOfferProposerId(
   offer: Pick<OfferCardItem, "buyerId" | "proposedBy">
 ): string {
   return offer.proposedBy?.trim() || offer.buyerId;
+}
+
+/**
+ * Upserts a newly created, updated, or Realtime-delivered offer into timeline state
+ * while preserving listing metadata and immediately marking any superseded parent
+ * proposal non-actionable (`superseded`) without waiting for a separate UPDATE event.
+ */
+export function applyOfferUpsert(
+  offers: OfferCardItem[],
+  nextOffer: OfferCardItem,
+  options: {
+    supersededOfferId?: string | null;
+    activeListingTitle?: string | null;
+    activeListingImageUrl?: string | null;
+  } = {}
+): OfferCardItem[] {
+  const existing = offers.find((o) => o.id === nextOffer.id);
+  const supersededId =
+    options.supersededOfferId ?? nextOffer.parentOfferId ?? null;
+  const parentOffer = supersededId
+    ? offers.find((o) => o.id === supersededId)
+    : undefined;
+  const sameListingOffer = offers.find(
+    (o) =>
+      o.listingId === nextOffer.listingId &&
+      Boolean(o.listingTitle || o.variantImageUrl)
+  );
+
+  const enrichedNext: OfferCardItem = {
+    ...nextOffer,
+    proposedBy: getOfferProposerId(nextOffer),
+    listingTitle:
+      nextOffer.listingTitle ??
+      existing?.listingTitle ??
+      parentOffer?.listingTitle ??
+      sameListingOffer?.listingTitle ??
+      options.activeListingTitle ??
+      null,
+    variantLabel:
+      nextOffer.variantLabel ??
+      existing?.variantLabel ??
+      parentOffer?.variantLabel ??
+      null,
+    variantImageUrl:
+      nextOffer.variantImageUrl ??
+      existing?.variantImageUrl ??
+      parentOffer?.variantImageUrl ??
+      sameListingOffer?.variantImageUrl ??
+      options.activeListingImageUrl ??
+      null,
+  };
+
+  let replaced = false;
+  const nextList = offers.map((o) => {
+    if (o.id === enrichedNext.id) {
+      replaced = true;
+      return enrichedNext;
+    }
+    if (supersededId && o.id === supersededId && o.status === "pending") {
+      return {
+        ...o,
+        status: "superseded" as const,
+        respondedAt: o.respondedAt ?? enrichedNext.createdAt,
+      };
+    }
+    return o;
+  });
+
+  return replaced ? nextList : [...nextList, enrichedNext];
 }
 
 /**

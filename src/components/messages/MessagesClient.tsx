@@ -40,6 +40,7 @@ import type {
   LinkedListingContext,
 } from "@/lib/messages/data";
 import {
+  applyOfferUpsert,
   computeOfferExpiresAt,
   computeReservationExpiresAt,
   isBargainingEligibleListing,
@@ -163,7 +164,12 @@ export function MessagesClient({
   }
   const knownConversationIds = useRef(new Set(initialConversations.map((conversation) => conversation.id)));
   const [messages, setMessages] = useState<ChatMessageItem[]>(initialMessages);
+  const [offersSeed, setOffersSeed] = useState(initialOffers);
   const [offers, setOffers] = useState<OfferCardItem[]>(initialOffers);
+  if (offersSeed !== initialOffers) {
+    setOffersSeed(initialOffers);
+    setOffers(initialOffers);
+  }
   const [nowMs, setNowMs] = useState<number>(renderedAt);
   const [offerPanelOpen, setOfferPanelOpen] = useState(
     Boolean(initialOpenOffer)
@@ -594,13 +600,18 @@ export function MessagesClient({
                 reservationReleasedAt: raw.reservation_released_at ?? null,
               };
 
-              setOffers((prev) => {
-                const exists = prev.some((o) => o.id === mapped.id);
-                if (exists) {
-                  return prev.map((o) => (o.id === mapped.id ? mapped : o));
-                }
-                return [...prev, mapped];
-              });
+              setOffers((prev) =>
+                applyOfferUpsert(prev, mapped, {
+                  activeListingTitle:
+                    activeListing && activeListing.id === mapped.listingId
+                      ? activeListing.title
+                      : null,
+                  activeListingImageUrl:
+                    activeListing && activeListing.id === mapped.listingId
+                      ? activeListing.imageUrl
+                      : null,
+                })
+              );
             }
           )
           .subscribe();
@@ -845,13 +856,20 @@ export function MessagesClient({
     );
   }
 
-  function upsertOffer(nextOffer: OfferCardItem) {
-    setOffers((prev) => {
-      const exists = prev.some((o) => o.id === nextOffer.id);
-      return exists
-        ? prev.map((o) => (o.id === nextOffer.id ? nextOffer : o))
-        : [...prev, nextOffer];
-    });
+  function upsertOffer(nextOffer: OfferCardItem, supersededOfferId?: string) {
+    setOffers((prev) =>
+      applyOfferUpsert(prev, nextOffer, {
+        supersededOfferId,
+        activeListingTitle:
+          activeListing && activeListing.id === nextOffer.listingId
+            ? activeListing.title
+            : null,
+        activeListingImageUrl:
+          activeListing && activeListing.id === nextOffer.listingId
+            ? activeListing.imageUrl
+            : null,
+      })
+    );
   }
 
   async function handleCreateOffer(e: React.FormEvent<HTMLFormElement>) {
@@ -933,19 +951,7 @@ export function MessagesClient({
         return { ok: false, error: msg };
       }
 
-      const nextOffer = res.offer;
-      const supersededId = res.supersededOfferId ?? offerId;
-      setOffers((prev) => {
-        const updated = prev.map((o) =>
-          o.id === supersededId
-            ? { ...o, status: "superseded" as const, respondedAt: nextOffer.createdAt }
-            : o
-        );
-        const exists = updated.some((o) => o.id === nextOffer.id);
-        return exists
-          ? updated.map((o) => (o.id === nextOffer.id ? nextOffer : o))
-          : [...updated, nextOffer];
-      });
+      upsertOffer(res.offer, res.supersededOfferId ?? offerId);
       return { ok: true };
     } catch {
       const msg = "Network error while sending counter offer. Please try again.";
@@ -1239,9 +1245,12 @@ export function MessagesClient({
                             activeConversation.peer.displayName
                           }
                           listingTitle={
-                            activeListing && activeListing.id === offer.listingId
+                            offer.listingTitle ??
+                            (activeListing && activeListing.id === offer.listingId
                               ? activeListing.title
-                              : null
+                              : activeConversation.linkedListingId === offer.listingId
+                                ? activeConversation.linkedListingTitle
+                                : null)
                           }
                           nowMs={nowMs}
                           isBusy={Boolean(busyOfferIds[offer.id])}

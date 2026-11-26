@@ -143,7 +143,8 @@ export interface RawOfferRow {
 export function mapRawOffer(
   row: RawOfferRow,
   variantLabel?: string | null,
-  variantImageUrl?: string | null
+  variantImageUrl?: string | null,
+  listingTitle?: string | null
 ): OfferCardItem {
   const status = normalizeOfferStatus(row.status);
 
@@ -160,6 +161,7 @@ export function mapRawOffer(
     id: row.id,
     conversationId: row.conversation_id,
     listingId: row.listing_id,
+    listingTitle: listingTitle ?? null,
     variantId: row.variant_id ?? null,
     variantLabel: variantLabel ?? fallbackSnapshotLabel,
     variantImageUrl: variantImageUrl ?? null,
@@ -439,6 +441,9 @@ export async function getMessagesPageData(
 
   // Collect listing IDs to resolve titles + active listing right-pane details
   const listingIdsToFetch = new Set<string>(latestListingByConv.values());
+  for (const o of activeOffers) {
+    if (o.listingId) listingIdsToFetch.add(o.listingId);
+  }
   if (
     options.requestedListingId &&
     isValidUuid(options.requestedListingId)
@@ -640,17 +645,21 @@ export async function getMessagesPageData(
     : null;
 
   const enrichedOffers = activeOffers.map((offer) => {
+    const offerListing = listingsMap.get(offer.listingId);
     const nextLabel = offer.variantLabel ??
       (offer.variantId ? variantLabelMap.get(offer.variantId) ?? null : null);
     const nextImageUrl =
       offer.variantImageUrl ??
       (offer.variantId && variantImageMap.has(offer.variantId)
         ? variantImageMap.get(offer.variantId) ?? null
-        : activeListing && activeListing.id === offer.listingId
-          ? activeListing.imageUrl
-          : null);
+        : offerListing?.image_paths?.[0]
+          ? resolvePublicStorageUrl("listings", offerListing.image_paths[0], env.url)
+          : activeListing && activeListing.id === offer.listingId
+            ? activeListing.imageUrl
+            : null);
     return {
       ...offer,
+      listingTitle: offer.listingTitle ?? offerListing?.title ?? null,
       variantLabel: nextLabel,
       variantImageUrl: nextImageUrl,
     };

@@ -259,7 +259,7 @@ export async function createOfferAction(input: {
     };
   }
 
-  const mapped = mapRawOffer(inserted as RawOfferRow, variantLabel);
+  const mapped = mapRawOffer(inserted as RawOfferRow, variantLabel, undefined, listing.title);
   const senderDisplayName =
     session.profile?.display_name?.trim() ||
     session.profile?.full_name?.trim() ||
@@ -779,7 +779,12 @@ export async function counterOfferAction(input: {
     };
   }
 
-  const mapped = mapRawOffer(rpcRow as RawOfferRow, offer.variantLabel, offer.variantImageUrl);
+  const mapped = mapRawOffer(
+    rpcRow as RawOfferRow,
+    offer.variantLabel,
+    offer.variantImageUrl,
+    ctx.listingTitle
+  );
   const recipientUserId =
     getOfferProposerId(mapped).toLowerCase() === mapped.buyerId.toLowerCase()
       ? mapped.sellerId

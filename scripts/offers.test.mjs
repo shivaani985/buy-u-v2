@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  applyOfferUpsert,
   computeOfferExpiresAt,
+  getOfferProposerId,
   isOfferHoldPayable,
   mergeChatTimeline,
   normalizeOfferStatus,
@@ -841,5 +843,70 @@ test("two-way bargaining: >5 proposals chain, receiver-only decline/cancel, and 
   assert.equal(
     resolveEffectiveOfferStatus(state.offer, t0 + 6000 + OFFER_PENDING_TTL_MS),
     "expired"
+  );
+});
+
+test("Realtime counter upsert marks parent superseded and preserves proposer, title, and image", () => {
+  const buyer = makeEligibility("student", BUYER_ID);
+  const seller = makeEligibility("student", SELLER_ID);
+  const t0 = Date.parse("2026-11-26T05:18:06.000Z");
+
+  const rm15 = makeOffer({
+    id: "rm15-offer",
+    listingTitle: "Hirono",
+    variantImageUrl: "https://example.supabase.co/storage/v1/object/public/listings/hirono.jpg",
+    proposedBy: BUYER_ID,
+    parentOfferId: null,
+    offerPriceSen: 1500,
+    status: "pending",
+    createdAt: "2026-11-26T04:37:28.000Z",
+  });
+
+  // Seller sends RM16 counter -> Realtime INSERT arrives (before parent UPDATE) without listingTitle/image
+  const rm16Realtime = makeOffer({
+    id: "rm16-counter",
+    listingTitle: null,
+    variantImageUrl: null,
+    proposedBy: SELLER_ID,
+    parentOfferId: "rm15-offer",
+    offerPriceSen: 1600,
+    status: normalizeOfferStatus("pending"),
+    createdAt: new Date(t0).toISOString(),
+    expiresAt: computeOfferExpiresAt(new Date(t0).toISOString()),
+  });
+
+  const next = applyOfferUpsert([rm15], rm16Realtime);
+  assert.equal(next.length, 2);
+  assert.equal(next[0].status, "superseded");
+  assert.equal(next[0].respondedAt, rm16Realtime.createdAt);
+  assert.equal(next[1].id, "rm16-counter");
+  assert.equal(getOfferProposerId(next[1]), SELLER_ID);
+  assert.equal(next[1].listingTitle, "Hirono");
+  assert.equal(next[1].variantImageUrl, rm15.variantImageUrl);
+
+  // Buyer is receiver on RM16 (can accept/decline/counter, cannot cancel); seller is proposer
+  assert.equal(
+    validateOfferTransition({ action: "accept", eligibility: buyer, offer: next[1], isBlocked: false, nowMs: t0 + 1000 }).ok,
+    true
+  );
+  assert.equal(
+    validateOfferTransition({ action: "counter", eligibility: buyer, offer: next[1], isBlocked: false, listingPriceSen: 2000, counterPriceSen: 1700, nowMs: t0 + 1000 }).ok,
+    true
+  );
+  assert.equal(
+    validateOfferTransition({ action: "decline", eligibility: buyer, offer: next[1], isBlocked: false, nowMs: t0 + 1000 }).ok,
+    true
+  );
+  assert.equal(
+    validateOfferTransition({ action: "cancel", eligibility: buyer, offer: next[1], isBlocked: false, nowMs: t0 + 1000 }).ok,
+    false
+  );
+  assert.equal(
+    validateOfferTransition({ action: "accept", eligibility: seller, offer: next[1], isBlocked: false, nowMs: t0 + 1000 }).ok,
+    false
+  );
+  assert.equal(
+    validateOfferTransition({ action: "cancel", eligibility: seller, offer: next[1], isBlocked: false, nowMs: t0 + 1000 }).ok,
+    true
   );
 });
