@@ -104,12 +104,12 @@ BEGIN
 END;
 $$;
 
--- 3. Sweep already-expired pending rows via existing expiry mechanism before enforcing unique pending slot
-DO $$
-BEGIN
-  PERFORM public.release_expired_offer_reservations();
-END;
-$$;
+-- 3. Sweep already-expired pending rows before enforcing unique active pending slot
+UPDATE public.offers
+SET status = 'expired',
+    responded_at = COALESCE(responded_at, clock_timestamp())
+WHERE status = 'pending'
+  AND COALESCE(expires_at, created_at + interval '24 hours') <= clock_timestamp();
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_offers_one_pending_per_context
   ON public.offers (
@@ -119,8 +119,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_offers_one_pending_per_context
   )
   WHERE status = 'pending';
 
--- Ensure expired pending rows never block a fresh negotiation INSERT before cron runs
--- by reusing existing `public.release_expired_offer_reservations()`.
+-- Ensure expired pending offers never block a fresh negotiation INSERT before the worker runs,
+-- strictly authorized by JWT role/uid and scoped to expired pending offers in the same context.
 -- Named `trg_a_*` so PostgreSQL invokes it alphabetically before `trg_guard_offer_inserts`.
 CREATE OR REPLACE FUNCTION public.release_expired_offers_before_insert()
 RETURNS trigger
@@ -128,20 +128,42 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = public, pg_temp
 AS $$
+DECLARE
+  v_uid uuid := auth.uid();
+  v_role text := NULLIF(auth.role(), '');
+  v_now timestamptz := clock_timestamp();
 BEGIN
-  IF current_user NOT IN ('postgres', 'service_role')
-     AND EXISTS (
-       SELECT 1
-       FROM public.offers o
-       WHERE o.conversation_id = NEW.conversation_id
-         AND o.listing_id = NEW.listing_id
-         AND COALESCE(o.variant_id, '00000000-0000-0000-0000-000000000000'::uuid)
-             = COALESCE(NEW.variant_id, '00000000-0000-0000-0000-000000000000'::uuid)
-         AND o.status = 'pending'
-         AND COALESCE(o.expires_at, o.created_at + interval '24 hours') <= clock_timestamp()
-     ) THEN
-    PERFORM public.release_expired_offer_reservations();
+  IF v_uid IS NULL
+     OR (v_role IS NOT NULL AND v_role <> 'authenticated')
+     OR NEW.parent_offer_id IS NOT NULL
+     OR NEW.buyer_id IS DISTINCT FROM v_uid
+     OR NEW.seller_id IS NULL
+     OR NEW.seller_id = v_uid
+     OR NOT public.is_active_member() THEN
+    RETURN NEW;
   END IF;
+
+  IF NOT EXISTS (
+    SELECT 1
+    FROM public.conversations c
+    WHERE c.id = NEW.conversation_id
+      AND (
+        (c.member_a = NEW.buyer_id AND c.member_b = NEW.seller_id)
+        OR (c.member_a = NEW.seller_id AND c.member_b = NEW.buyer_id)
+      )
+  ) THEN
+    RETURN NEW;
+  END IF;
+
+  UPDATE public.offers o
+  SET status = 'expired',
+      responded_at = COALESCE(o.responded_at, v_now)
+  WHERE o.conversation_id = NEW.conversation_id
+    AND o.listing_id = NEW.listing_id
+    AND COALESCE(o.variant_id, '00000000-0000-0000-0000-000000000000'::uuid)
+        = COALESCE(NEW.variant_id, '00000000-0000-0000-0000-000000000000'::uuid)
+    AND o.status = 'pending'
+    AND COALESCE(o.expires_at, o.created_at + interval '24 hours') <= v_now;
 
   RETURN NEW;
 END;
@@ -427,8 +449,6 @@ BEGIN
     RAISE EXCEPTION 'INVALID_OFFER_PRICE';
   END IF;
 
-  PERFORM public.release_expired_offer_reservations();
-
   -- Lock order: offers -> listings -> listing_variants
   SELECT * INTO v_parent
   FROM public.offers
@@ -575,12 +595,23 @@ BEGIN
     RAISE EXCEPTION 'OUT_OF_STOCK';
   END IF;
 
-  -- Mark previous pending proposal superseded FIRST so partial unique index stays clean
+  -- Mark previous pending proposal superseded FIRST and sweep only expired pending
+  -- rows in this exact negotiation context so partial unique index stays clean.
   UPDATE public.offers
   SET status = 'superseded',
       responded_at = v_now
   WHERE id = v_parent.id
     AND status = 'pending';
+
+  UPDATE public.offers
+  SET status = 'expired',
+      responded_at = COALESCE(responded_at, v_now)
+  WHERE conversation_id = v_parent.conversation_id
+    AND listing_id = v_parent.listing_id
+    AND COALESCE(variant_id, '00000000-0000-0000-0000-000000000000'::uuid)
+        = COALESCE(v_parent.variant_id, '00000000-0000-0000-0000-000000000000'::uuid)
+    AND status = 'pending'
+    AND COALESCE(expires_at, created_at + interval '24 hours') <= v_now;
 
   INSERT INTO public.offers (
     conversation_id,
@@ -651,8 +682,6 @@ BEGIN
   IF v_uid IS NULL OR NOT public.is_active_member() THEN
     RAISE EXCEPTION 'UNAUTHORIZED';
   END IF;
-
-  PERFORM public.release_expired_offer_reservations();
 
   -- Lock order: offers -> listings -> listing_variants
   SELECT * INTO v_offer
