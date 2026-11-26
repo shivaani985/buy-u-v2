@@ -1,5 +1,6 @@
 "use client";
 
+import { formatFoodDate } from "@/lib/food";
 import { useCallback, useRef, useState, useTransition } from "react";
 import Link from "next/link";
 import {
@@ -674,6 +675,7 @@ export function CheckoutClient({
                             {item.isFood &&
                             (pickupStart || item.pickupNote || item.foodNotes) ? (
                               <div className="mt-2.5 space-y-1 border-t border-[#F1EFF6] pt-2 text-xs text-[#4A4656]">
+                                {item.preorderCloseAt && <p>Order by {formatFoodDate(item.preorderCloseAt)}</p>}
                                 {pickupStart ? (
                                   <p className="flex items-center gap-1.5">
                                     <Clock

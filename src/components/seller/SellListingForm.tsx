@@ -1,5 +1,7 @@
 "use client";
 
+import { FoodAvailabilityFields } from "./FoodAvailabilityFields";
+
 import { startTransition, useActionState, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import {
@@ -928,6 +930,8 @@ export function SellListingForm({
                 )}
               </>
             )}
+
+            {isFood && <FoodAvailabilityFields />}
 
             {/* Description */}
             <div className="lg:col-span-2">

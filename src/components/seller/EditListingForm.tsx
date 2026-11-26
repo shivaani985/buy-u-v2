@@ -1,5 +1,7 @@
 "use client";
 
+import { FoodAvailabilityFields } from "./FoodAvailabilityFields";
+
 import { useActionState, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
@@ -755,9 +757,13 @@ export function EditListingForm({
                 <label htmlFor="collectionAreaId" className="block text-sm font-bold text-[#14121A]">
                   Campus Collection Area {!isService ? <span className="text-[#B42318]">*</span> : "(optional)"}
                 </label>
+                {isFood && listing.foodScheduleLocked && (
+                  <input type="hidden" name="collectionAreaId" value={collectionAreaId} />
+                )}
                 <select
                   id="collectionAreaId"
                   name="collectionAreaId"
+                  disabled={isFood && listing.foodScheduleLocked}
                   required={!isService}
                   value={collectionAreaId}
                   onChange={(e) => setCollectionAreaId(e.target.value)}
@@ -798,6 +804,8 @@ export function EditListingForm({
             </>
           )}
 
+          {isFood && <FoodAvailabilityFields initial={listing.food} locked={listing.foodScheduleLocked}
+            typeLocked={Boolean(listing.publishedAt && listing.food?.availabilityMode === "pre_order")} />}
           <div className="lg:col-span-2">
             <label htmlFor="description" className="block text-sm font-bold text-[#14121A]">
               Description <span className="text-[#B42318]">*</span>

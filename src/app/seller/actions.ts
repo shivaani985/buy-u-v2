@@ -1,5 +1,7 @@
 "use server";
 
+import { readFoodForm } from "@/lib/food";
+
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { createSupabaseServerClient, getSessionSummary } from "@/lib/supabase/server";
@@ -343,6 +345,9 @@ export async function createListingAction(
     return { status: "error", message: validated.error };
   }
 
+  const foodForm = readFoodForm(formData, validated.data.isFood, validated.data.status === "published");
+  if (foodForm.error) return { status: "error", message: foodForm.error };
+
   const rawVariationPhotoGroup = String(
     formData.get("variationPhotoGroup") ?? ""
   ).trim();
@@ -479,16 +484,6 @@ export async function createListingAction(
     validated.data.dbKind === "service"
       ? rawServiceMode || "in_person"
       : null;
-  const rawAvailabilityMode = String(
-    formData.get("availabilityMode") ?? ""
-  ).trim();
-  const availabilityMode = rawAvailabilityMode || "ready";
-  const preorderCloseAt =
-    String(formData.get("preorderCloseAt") ?? "").trim() || null;
-  const pickupWindowStart =
-    String(formData.get("pickupWindowStart") ?? "").trim() || null;
-  const pickupWindowEnd =
-    String(formData.get("pickupWindowEnd") ?? "").trim() || null;
   const pickupNote = String(formData.get("pickupNote") ?? "").trim();
   const foodNotes = String(formData.get("foodNotes") ?? "").trim();
   const rawServiceDetails = formData.get("serviceDetails");
@@ -518,10 +513,7 @@ export async function createListingAction(
     has_variants: variantsCheck.hasVariants,
     option_groups: variantsCheck.optionGroups,
     variation_photo_group: variationPhotoGroup,
-    availability_mode: availabilityMode,
-    preorder_close_at: preorderCloseAt,
-    pickup_window_start: pickupWindowStart,
-    pickup_window_end: pickupWindowEnd,
+    ...foodForm.payload,
     pickup_note: pickupNote,
     food_notes: foodNotes,
     service_mode: serviceMode,
@@ -586,10 +578,7 @@ export async function createListingAction(
       allow_offers: validated.data.allowOffers,
       has_variants: variantsCheck.hasVariants,
       option_groups: variantsCheck.optionGroups,
-      availability_mode: availabilityMode,
-      preorder_close_at: preorderCloseAt,
-      pickup_window_start: pickupWindowStart,
-      pickup_window_end: pickupWindowEnd,
+      ...foodForm.payload,
       pickup_note: pickupNote,
       food_notes: foodNotes,
       service_mode: serviceMode,
@@ -889,6 +878,10 @@ export async function updateListingAction(
     return { status: "error", message: validated.error };
   }
 
+  const foodForm = readFoodForm(formData, validated.data.isFood,
+    validated.data.status === "published", Date.now(), Boolean(existing.published_at));
+  if (foodForm.error) return { status: "error", message: foodForm.error };
+
   const newPhotoKeys = safeParseJson<string[]>(
     formData.get("newPhotoKeysJson"),
     []
@@ -1032,6 +1025,7 @@ export async function updateListingAction(
     has_variants: validated.data.hasVariants,
     option_groups: validated.data.optionGroups,
     image_paths: finalPhotoPaths,
+    ...(validated.data.isFood ? foodForm.payload : {}),
     rules_acknowledged: validated.data.rulesAcknowledged,
     status: validated.data.status,
     published_at:
@@ -1128,4 +1122,16 @@ export async function updateListingAction(
     createdId: listingId,
     message: successLabel,
   };
+}
+
+export async function closeFoodPreorderAction(form: FormData): Promise<void> {
+  const auth = await requireEligibleStudent();
+  if (!auth.ok) return;
+  const listingId = String(form.get("listingId") ?? "");
+  if (!isValidUuid(listingId)) return;
+  const { error } = await auth.supabase.rpc("close_food_preorder", { p_listing_id: listingId });
+  if (error) throw new Error("Could not close this pre-order.");
+  revalidatePath("/seller");
+  revalidatePath("/marketplace");
+  revalidatePath(`/listings/${listingId}`);
 }

@@ -1,3 +1,4 @@
+import { formatFoodDate } from "@/lib/food";
 import Link from "next/link";
 import { ArrowUpRight, Package, X } from "lucide-react";
 import { formatSenToRm, resolvePublicStorageUrl } from "@/lib/format";
@@ -51,6 +52,10 @@ export function ChatReferenceCard({ reference, conversationId, onRemove, now, di
               {[reference.itemId && reference.code, variation, quantity, price].filter(Boolean).join(" · ")}
             </p>
             {reference.pickup && <p className="break-words text-xs text-[#6B6779]">{reference.pickup}</p>}
+            {reference.foodCutoff && <p className="text-xs text-ink-secondary">Order by {formatFoodDate(reference.foodCutoff)}</p>}
+            {reference.foodPickupStart && reference.foodPickupEnd && <p className="text-xs text-ink-secondary">
+              Collect {formatFoodDate(reference.foodPickupStart)} – {formatFoodDate(reference.foodPickupEnd)}
+            </p>}
             {status && <p className="text-xs capitalize text-[#6B6779]">{status}</p>}
             {(viewHref || offerHref) && <div className="mt-1 flex flex-wrap items-center gap-x-3">
               {viewHref && <Link href={viewHref} className="inline-flex min-h-8 items-center gap-1 text-xs font-bold text-[#4E2A84] hover:underline">

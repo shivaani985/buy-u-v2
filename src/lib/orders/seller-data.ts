@@ -32,6 +32,8 @@ export interface SellerOrderItemView {
   serviceMode: string | null;
   pickupNote: string | null;
   pickupWindowStart: string | null;
+  pickupWindowEnd?: string | null;
+  preorderCloseAt?: string | null;
   serviceRequirements: string | null;
   serviceAttachmentPaths: string[];
 }
@@ -164,7 +166,7 @@ export async function getSellerOrdersData(
   const [itemsRes, buyersRes, disputesRes, refundsRes, disputeDetails, reviewsRes, checkoutsRes, paymentsRes, adjustmentsRes, allocationsRes] = await Promise.all([
     readOrderRelations(orderIds, async (batch, start, end) => {
       const res = await supabase.from("order_items")
-        .select("id,order_id,listing_id,variant_id,title_snapshot,variant_snapshot,unit_sen,quantity,image_path,is_service,service_mode,service_requirements,service_attachment_paths,pickup_note,pickup_window_start")
+        .select("id,order_id,listing_id,variant_id,title_snapshot,variant_snapshot,unit_sen,quantity,image_path,is_service,service_mode,service_requirements,service_attachment_paths,pickup_note,pickup_window_start,pickup_window_end,preorder_close_at")
         .in("order_id", batch).order("id").range(start, end);
       if (!res.error) return res;
       return supabase.from("order_items")
@@ -216,6 +218,8 @@ export async function getSellerOrdersData(
     service_mode?: string | null;
     pickup_note?: string | null;
     pickup_window_start?: string | null;
+    pickup_window_end?: string | null;
+    preorder_close_at?: string | null;
     service_requirements?: string | null;
     service_attachment_paths?: string[] | null;
   }>;
@@ -243,6 +247,8 @@ export async function getSellerOrdersData(
       serviceMode: row.service_mode ?? null,
       pickupNote: row.pickup_note ?? null,
       pickupWindowStart: row.pickup_window_start ?? null,
+      pickupWindowEnd: row.pickup_window_end ?? null,
+      preorderCloseAt: row.preorder_close_at ?? null,
       serviceRequirements: row.service_requirements ?? null,
       serviceAttachmentPaths: Array.isArray(row.service_attachment_paths)
         ? row.service_attachment_paths

@@ -1,3 +1,4 @@
+import { parseToyyibPayPaidAt } from "./toyyibpay";
 import { headers } from "next/headers";
 import {
   buildToyyibPayCreateBillPayload,
@@ -155,6 +156,7 @@ export async function fetchToyyibPayBillTransactions(
       billpaymentStatus: String(row.billpaymentStatus ?? "").trim(),
       billpaymentAmount: String(row.billpaymentAmount ?? "").trim(),
       billpaymentInvoiceNo: String(row.billpaymentInvoiceNo ?? "").trim(),
+      paidAt: parseToyyibPayPaidAt(row.billPaymentDate),
     }));
 }
 

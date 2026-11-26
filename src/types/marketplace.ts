@@ -24,6 +24,12 @@ export interface Category {
 }
 
 export interface Listing {
+  foodSchedule?: {
+    mode: "ready" | "pre_order";
+    cutoff: string | null;
+    start: string | null;
+    end: string | null;
+  };
   id: string;
   slug: string;
   title: string;

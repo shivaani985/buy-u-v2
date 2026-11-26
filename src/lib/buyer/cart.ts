@@ -14,7 +14,8 @@ export type CartIssueCode =
   | "service_paused"
   | "variant_unavailable"
   | "out_of_stock"
-  | "exceeds_stock";
+  | "exceeds_stock"
+  | "food_schedule_changed";
 
 export interface CartItemView {
   id: string;
@@ -45,6 +46,8 @@ export interface CartItemView {
   isService?: boolean;
   serviceMode?: string | null;
   availabilityMode?: string | null;
+  preorderCloseAt?: string | null;
+  foodScheduleToConfirm?: [string | null, number, number, number];
   pickupWindowStart?: string | null;
   pickupWindowEnd?: string | null;
   pickupNote?: string | null;

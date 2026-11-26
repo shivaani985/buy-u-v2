@@ -108,13 +108,13 @@ test("buildCheckoutPreparation detects price changes against snapshots and block
   assert.equal(prepAck.canProceedToPayment, true);
 });
 
-test("buildCheckoutPreparation blocks unavailable stock, self-purchase, empty cart, and untested food pre-orders", () => {
+test("buildCheckoutPreparation blocks unavailable stock, self-purchase, and empty carts while accepting valid food pre-orders", () => {
   // Empty cart
   const emptyPrep = buildCheckoutPreparation(buildCartSummary([]));
   assert.equal(emptyPrep.canProceedToPayment, false);
   assert.equal(emptyPrep.totalRowCount, 0);
 
-  // Food pre-order blocked
+  // A validated food pre-order participates in unified checkout
   const preorderCart = buildCartSummary([
     makeCartItem({
       id: "r-food",
@@ -126,9 +126,9 @@ test("buildCheckoutPreparation blocks unavailable stock, self-purchase, empty ca
     }),
   ]);
   const preorderPrep = buildCheckoutPreparation(preorderCart);
-  assert.equal(preorderPrep.canProceedToPayment, false);
-  assert.equal(preorderPrep.invalidRowCount, 1);
-  assert.equal(preorderPrep.itemsSubtotalSen, 0);
+  assert.equal(preorderPrep.canProceedToPayment, true);
+  assert.equal(preorderPrep.invalidRowCount, 0);
+  assert.equal(preorderPrep.itemsSubtotalSen, 1200);
   assert.equal(preorderPrep.sellerOrders[0]?.hasPreorderItems, true);
 
   // Unavailable / self-purchase cart item blocked and excluded from subtotal

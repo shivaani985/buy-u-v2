@@ -494,6 +494,15 @@ export function validateListingEditInput(input: ListingEditValidationInput) {
  */
 export function mapAtomicUpdateError(rawMessage: string): string {
   const lower = rawMessage.toLowerCase();
+  if (lower.includes("food_event_schedule_locked")) {
+    return "The cutoff, pickup area and pickup window are locked while there is an active reservation or paid order.";
+  }
+  if (lower.includes("food_event_permanently_closed")) {
+    return "This pre-order event is permanently closed. Its schedule and capacity cannot be changed.";
+  }
+  if (lower.includes("food_committed_variant")) {
+    return "This variation is tied to a pre-order event and cannot be moved or deleted once purchased.";
+  }
   if (
     lower.includes("conflict") ||
     lower.includes("stale") ||

@@ -174,6 +174,18 @@ export interface ToyyibPayTransactionRecord {
   /** Decimal MYR string from ToyyibPay, e.g. "16.00". */
   billpaymentAmount: string;
   billpaymentInvoiceNo: string;
+  paidAt?: string | null;
+}
+
+export function parseToyyibPayPaidAt(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const match = /^(\d{2})-(\d{2})-(\d{4}) (\d{2}:\d{2}:\d{2})$/.exec(value.trim());
+  if (!match) return null;
+  const local = `${match[3]}-${match[2]}-${match[1]}T${match[4]}`;
+  const parsed = new Date(local + "+08:00");
+  if (!Number.isFinite(parsed.getTime()) ||
+      new Date(parsed.getTime() + 8 * 3600000).toISOString().slice(0, 19) !== local) return null;
+  return parsed.toISOString();
 }
 
 export function parseToyyibPayAmountToSen(rawAmount: string): number | null {

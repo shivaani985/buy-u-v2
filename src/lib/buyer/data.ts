@@ -40,6 +40,9 @@ export interface ProductStorefrontInfo {
 }
 
 export interface ProductFoodInfo {
+  packagedAcknowledged?: boolean;
+  closedAt?: string | null;
+  viewedAt?: number;
   availabilityMode: string | null;
   preorderCloseAt: string | null;
   pickupWindowStart: string | null;
@@ -115,6 +118,8 @@ interface RawListingRow {
   variation_photo_group?: string | null;
   availability_mode: string | null;
   preorder_close_at: string | null;
+  food_event_closed_at?: string | null;
+  packaged_food_acknowledged?: boolean;
   pickup_window_start: string | null;
   pickup_window_end: string | null;
   pickup_note: string | null;
@@ -281,7 +286,7 @@ export async function getProductDetailData(
   let { data: rawListing, error: listingErr } = await supabase
     .from("listings")
     .select(
-      "id,seller_id,kind,is_food,title,description,category_id,condition,limitations,price_sen,quantity,reserved_quantity,collection_area_id,allow_offers,has_variants,option_groups,variation_photo_group,availability_mode,preorder_close_at,pickup_window_start,pickup_window_end,pickup_note,food_notes,service_mode,accepting_requests,image_paths,status,published_at,created_at"
+      "id,seller_id,kind,is_food,title,description,category_id,condition,limitations,price_sen,quantity,reserved_quantity,collection_area_id,allow_offers,has_variants,option_groups,variation_photo_group,availability_mode,food_event_closed_at,packaged_food_acknowledged,preorder_close_at,pickup_window_start,pickup_window_end,pickup_note,food_notes,service_mode,accepting_requests,image_paths,status,published_at,created_at"
     )
     .eq("id", idOrSlug)
     .maybeSingle();
@@ -294,7 +299,7 @@ export async function getProductDetailData(
     const fallbackListingRes = await supabase
       .from("listings")
       .select(
-        "id,seller_id,kind,is_food,title,description,category_id,condition,limitations,price_sen,quantity,reserved_quantity,collection_area_id,allow_offers,has_variants,availability_mode,preorder_close_at,pickup_window_start,pickup_window_end,pickup_note,food_notes,service_mode,accepting_requests,image_paths,status,published_at,created_at"
+        "id,seller_id,kind,is_food,title,description,category_id,condition,limitations,price_sen,quantity,reserved_quantity,collection_area_id,allow_offers,has_variants,availability_mode,food_event_closed_at,packaged_food_acknowledged,preorder_close_at,pickup_window_start,pickup_window_end,pickup_note,food_notes,service_mode,accepting_requests,image_paths,status,published_at,created_at"
       )
       .eq("id", idOrSlug)
       .maybeSingle();
@@ -539,6 +544,9 @@ export async function getProductDetailData(
   const food: ProductFoodInfo | null = isFood
     ? {
         availabilityMode: row.availability_mode,
+        packagedAcknowledged: row.packaged_food_acknowledged,
+        closedAt: row.food_event_closed_at,
+        viewedAt: Date.now(),
         preorderCloseAt: row.preorder_close_at,
         pickupWindowStart: row.pickup_window_start,
         pickupWindowEnd: row.pickup_window_end,

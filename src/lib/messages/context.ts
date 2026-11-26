@@ -33,6 +33,9 @@ export interface ChatReference extends ChatTarget {
   expiresAt?: string;
   href?: string;
   canBargain?: boolean;
+  foodCutoff?: string;
+  foodPickupStart?: string;
+  foodPickupEnd?: string;
 }
 
 export function parseChatTarget(input: {

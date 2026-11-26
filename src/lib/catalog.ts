@@ -42,6 +42,10 @@ interface RawListingRow {
   reserved_quantity: number | null;
   collection_area_id: string | null;
   is_food: boolean | null;
+  availability_mode: "ready" | "pre_order";
+  preorder_close_at: string | null;
+  pickup_window_start: string | null;
+  pickup_window_end: string | null;
   image_paths: string[] | null;
   status: string;
   published_at: string | null;
@@ -322,9 +326,10 @@ export async function getListings(
         supabase
           .from("listings")
           .select(
-            "id, seller_id, kind, title, description, category_id, condition, price_sen, quantity, reserved_quantity, collection_area_id, is_food, image_paths, status, published_at, created_at"
+            "id, seller_id, kind, title, description, category_id, condition, price_sen, quantity, reserved_quantity, collection_area_id, is_food, availability_mode, preorder_close_at, pickup_window_start, pickup_window_end, image_paths, status, published_at, created_at"
           )
           .eq("status", "published")
+          .or(`is_food.eq.false,and(is_food.eq.true,availability_mode.eq.ready,packaged_food_acknowledged.eq.true),and(is_food.eq.true,availability_mode.eq.pre_order,food_event_closed_at.is.null,preorder_close_at.gt.${new Date().toISOString()},pickup_window_start.not.is.null,pickup_window_end.not.is.null)`)
           .order("published_at", { ascending: false, nullsFirst: false })
           .limit(50),
         supabase.from("categories").select("id, name").eq("active", true),
@@ -416,6 +421,8 @@ export async function getListings(
         description: row.description ?? "",
         priceSen: typeof row.price_sen === "number" ? row.price_sen : 0,
         listingType,
+        ...(row.is_food ? { foodSchedule: { mode: row.availability_mode, cutoff: row.preorder_close_at,
+          start: row.pickup_window_start, end: row.pickup_window_end } } : {}),
         categoryId: row.category_id ?? "other-goods",
         categoryName:
           (row.category_id && categoryMap.get(row.category_id)) ||

@@ -1,3 +1,4 @@
+import { foodAvailability, type FoodTerms } from "@/lib/food";
 import { resolvePublicStorageUrl } from "@/lib/format";
 import { getPublicSupabaseEnv } from "@/lib/supabase/env";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
@@ -41,6 +42,9 @@ export interface SellerStorefront {
 }
 
 export interface SellerListingSummary {
+  foodStatus?: string;
+  foodCutoff?: string | null;
+  canCloseFood?: boolean;
   id: string;
   title: string;
   kind: string;
@@ -153,7 +157,7 @@ export async function getSellerHubData(
     supabase
       .from("listings")
       .select(
-        "id, title, kind, is_food, category_id, collection_area_id, price_sen, quantity, reserved_quantity, status, condition, image_paths, published_at, updated_at"
+        "id, title, kind, is_food, availability_mode, packaged_food_acknowledged, food_event_closed_at, preorder_close_at, pickup_window_start, pickup_window_end, category_id, collection_area_id, price_sen, quantity, reserved_quantity, status, condition, image_paths, published_at, updated_at"
       )
       .eq("seller_id", userId)
       .order("updated_at", { ascending: false })
@@ -229,6 +233,12 @@ export async function getSellerHubData(
     title: string;
     kind: string;
     is_food: boolean;
+    availability_mode: string;
+    packaged_food_acknowledged: boolean;
+    food_event_closed_at: string | null;
+    preorder_close_at: string | null;
+    pickup_window_start: string | null;
+    pickup_window_end: string | null;
     category_id: string;
     collection_area_id: string | null;
     price_sen: number;
@@ -246,6 +256,14 @@ export async function getSellerHubData(
     const reserved =
       typeof row.reserved_quantity === "number" ? row.reserved_quantity : 0;
     const availableStock = Math.max(0, qty - reserved);
+    const foodStatus = row.is_food ? foodAvailability({
+      availabilityMode: row.availability_mode,
+      packagedAcknowledged: row.packaged_food_acknowledged,
+      closedAt: row.food_event_closed_at,
+      preorderCloseAt: row.preorder_close_at,
+      pickupWindowStart: row.pickup_window_start,
+      pickupWindowEnd: row.pickup_window_end,
+    }, qty, reserved, Date.now()) : undefined;
     const firstPath = row.image_paths?.[0] ?? null;
     return {
       id: row.id,
@@ -260,6 +278,10 @@ export async function getSellerHubData(
       priceSen: row.price_sen ?? 0,
       quantity: qty,
       reservedQuantity: reserved,
+      foodStatus,
+      foodCutoff: row.preorder_close_at,
+      canCloseFood: row.is_food && row.availability_mode === "pre_order" && row.status === "published"
+        && (foodStatus === "Pre-order Open" || foodStatus === "Temporarily Unavailable"),
       availableStock,
       status: row.status,
       condition: row.condition,
@@ -502,6 +524,8 @@ export interface EditablePhotoItem {
 }
 
 export interface SellerListingDetail {
+  food?: FoodTerms;
+  foodScheduleLocked?: boolean;
   id: string;
   sellerId: string;
   title: string;
@@ -563,7 +587,7 @@ export async function getSellerListingForEdit(
     supabase
       .from("listings")
       .select(
-        "id, seller_id, kind, is_food, title, description, category_id, condition, price_sen, quantity, reserved_quantity, collection_area_id, allow_offers, has_variants, option_groups, variation_photo_group, image_paths, rules_acknowledged, status, published_at, updated_at"
+        "id, seller_id, kind, is_food, availability_mode, packaged_food_acknowledged, food_event_closed_at, preorder_close_at, pickup_window_start, pickup_window_end, title, description, category_id, condition, price_sen, quantity, reserved_quantity, collection_area_id, allow_offers, has_variants, option_groups, variation_photo_group, image_paths, rules_acknowledged, status, published_at, updated_at"
       )
       .eq("id", listingId)
       .maybeSingle()
@@ -572,7 +596,7 @@ export async function getSellerListingForEdit(
         return supabase
           .from("listings")
           .select(
-            "id, seller_id, kind, is_food, title, description, category_id, condition, price_sen, quantity, reserved_quantity, collection_area_id, allow_offers, has_variants, option_groups, image_paths, rules_acknowledged, status, published_at, updated_at"
+            "id, seller_id, kind, is_food, availability_mode, packaged_food_acknowledged, food_event_closed_at, preorder_close_at, pickup_window_start, pickup_window_end, title, description, category_id, condition, price_sen, quantity, reserved_quantity, collection_area_id, allow_offers, has_variants, option_groups, image_paths, rules_acknowledged, status, published_at, updated_at"
           )
           .eq("id", listingId)
           .maybeSingle();
@@ -610,6 +634,12 @@ export async function getSellerListingForEdit(
     seller_id: string;
     kind: string;
     is_food: boolean;
+    availability_mode: string | null;
+    packaged_food_acknowledged: boolean;
+    food_event_closed_at: string | null;
+    preorder_close_at: string | null;
+    pickup_window_start: string | null;
+    pickup_window_end: string | null;
     title: string;
     description: string;
     category_id: string;
@@ -667,6 +697,17 @@ export async function getSellerListingForEdit(
     }
   }
 
+  let foodScheduleLocked = false;
+  if (row.is_food && row.availability_mode === "pre_order") {
+    foodScheduleLocked = Boolean(row.food_event_closed_at || (row.preorder_close_at &&
+      Date.parse(row.preorder_close_at) <= Date.now()) || row.reserved_quantity > 0);
+    if (!foodScheduleLocked) {
+      const committed = await supabase.from("order_items").select("id,orders!inner(paid_at)")
+        .eq("listing_id", row.id).not("orders.paid_at", "is", null).limit(1);
+      foodScheduleLocked = Boolean(committed.data?.length);
+    }
+  }
+
   const listingType: SellListingKind = row.is_food
     ? "food"
     : row.kind === "service"
@@ -718,6 +759,15 @@ export async function getSellerListingForEdit(
       reservedQuantity: row.reserved_quantity ?? 0,
       availableStock: Math.max(0, (row.quantity ?? 0) - (row.reserved_quantity ?? 0)),
       collectionAreaId: row.collection_area_id ?? "",
+      foodScheduleLocked,
+      food: row.is_food ? {
+        availabilityMode: row.availability_mode,
+        packagedAcknowledged: row.packaged_food_acknowledged,
+        closedAt: row.food_event_closed_at,
+        preorderCloseAt: row.preorder_close_at,
+        pickupWindowStart: row.pickup_window_start,
+        pickupWindowEnd: row.pickup_window_end,
+      } : undefined,
       condition: row.condition ?? "",
       status: row.status,
       allowOffers: Boolean(row.allow_offers),

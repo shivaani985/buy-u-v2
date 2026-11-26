@@ -1,3 +1,5 @@
+import { closeFoodPreorderAction } from "@/app/seller/actions";
+import { formatFoodDate } from "@/lib/food";
 import type { Metadata } from "next";
 import Image from "next/image";
 import Link from "next/link";
@@ -493,7 +495,12 @@ export default async function SellerHubPage({
                               <td
                                 className={`px-3 py-3 text-xs font-bold ${st.colorClass}`}
                               >
-                                {st.label}
+                                {item.foodStatus ?? st.label}
+                                {item.foodCutoff && <p className="font-normal">{formatFoodDate(item.foodCutoff)}</p>}
+                                {item.canCloseFood && <form action={closeFoodPreorderAction}>
+                                  <input type="hidden" name="listingId" value={item.id} />
+                                  <button className="mt-1 text-[#4E2A84] underline">Close pre-order</button>
+                                </form>}
                               </td>
                               <td className="px-3 py-3 text-xs text-[#6E6A7C]">
                                 {formatRelativeTime(item.updatedAt)}
@@ -567,6 +574,14 @@ export default async function SellerHubPage({
                             <p className="mt-0.5 text-xs text-[#6E6A7C]">
                               {item.categoryName}
                             </p>
+                            {item.foodStatus && <p className="text-xs font-semibold">{item.foodStatus}
+                              {item.foodCutoff ? ` · ${formatFoodDate(item.foodCutoff)}` : ""}
+                            </p>}
+                            {item.canCloseFood && <form action={closeFoodPreorderAction}>
+                              <input type="hidden" name="listingId" value={item.id} />
+                              <button className="text-xs font-bold text-[#4E2A84] underline">Close pre-order</button>
+                            </form>}
+
                             <div className="mt-1.5 flex items-center justify-between text-xs">
                               <span className="tabular-price font-bold text-[#14121A]">
                                 {formatRm(item.priceSen)} ·{" "}

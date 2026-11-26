@@ -253,3 +253,13 @@ export async function removeCartItemAction(
     message: "Item removed from your cart.",
   };
 }
+
+export async function reconfirmFoodScheduleAction(cartItemId: string, schedule: unknown) {
+  if (!isValidUuid(cartItemId)) return { ok: false };
+  const supabase = await createSupabaseServerClient();
+  if (!supabase) return { ok: false };
+  const { data, error } = await supabase.rpc("reconfirm_food_cart_schedule", { p_cart_item_id: cartItemId, p_expected_schedule: schedule });
+  if (error || data !== true) return { ok: false };
+  revalidatePath("/cart");
+  return { ok: true };
+}

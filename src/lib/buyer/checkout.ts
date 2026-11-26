@@ -108,7 +108,6 @@ export function buildCheckoutPreparation(
   let invalidRowCount = 0;
   let priceChangedCount = 0;
   let itemsSubtotalSen = 0;
-  let hasPreorderBlock = false;
   let hasCartIssue = false;
 
   cartSummary.groups.forEach((group, idx) => {
@@ -150,10 +149,6 @@ export function buildCheckoutPreparation(
         checkoutBlockedReason =
           item.issueMessage || "This item cannot proceed to checkout.";
         hasCartIssue = true;
-      } else if (isPreorder) {
-        checkoutBlockedReason =
-          "Food pre-orders are not yet open for checkout. Remove this item from your cart to continue.";
-        hasPreorderBlock = true;
       }
 
       const isCheckoutEligible = checkoutBlockedReason === null;
@@ -208,11 +203,6 @@ export function buildCheckoutPreparation(
   if (hasCartIssue) {
     blockingReasons.push(
       "One or more items are unavailable or exceed remaining stock. Return to your cart to adjust or remove them."
-    );
-  }
-  if (hasPreorderBlock) {
-    blockingReasons.push(
-      "Food pre-orders are not yet enabled for checkout. Remove pre-order items in your cart to continue."
     );
   }
   if (priceChangedCount > 0) {

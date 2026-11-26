@@ -32,6 +32,7 @@ import {
   toggleFavouriteAction,
   type AddToCartActionState,
 } from "@/app/listings/actions";
+import { foodAvailability, formatFoodDate } from "@/lib/food";
 import { startConversationAction } from "@/app/messages/actions";
 import {
   editVerifiedReviewAction,
@@ -102,7 +103,7 @@ function formatDateTime(iso: string | null): string | null {
 
 function formatAvailabilityMode(mode: string | null): string | null {
   if (!mode) return null;
-  if (mode === "ready_now") return "Ready Now";
+  if (mode === "ready" || mode === "ready_now") return "Packaged Food";
   if (mode === "pre_order") return "Pre-Order";
   return mode.replace(/_/g, " ");
 }
@@ -265,10 +266,27 @@ export function ProductDetailClient({
     buyerEligibility.eligible &&
     (isPublished || isFavourited);
 
+  const [foodClock, setFoodClock] = useState(product.food?.viewedAt ?? 0);
+  const foodCutoff = product.food?.preorderCloseAt;
+  useEffect(() => {
+    if (!foodCutoff) return;
+    const cutoff = Date.parse(foodCutoff);
+    if (!Number.isFinite(cutoff) || foodClock >= cutoff) return;
+    const delay = Math.max(0, Math.min(cutoff - Date.now(), 2147483647));
+    const timer = window.setTimeout(() => setFoodClock(Date.now()), delay);
+    return () => window.clearTimeout(timer);
+  }, [foodCutoff, foodClock]);
+  const foodState = product.food
+    ? foodAvailability(product.food, product.quantity ?? 0, product.reservedQuantity,
+        Math.max(product.food.viewedAt ?? 0, foodClock))
+    : null;
+  const foodUnavailable = foodState !== null && foodState !== "Packaged Food" && foodState !== "Pre-order Open";
+
   const canAddToCart =
     !product.isDemo &&
     !product.isFreeNotice &&
     isPurchasable &&
+    !foodUnavailable &&
     !isServicePaused &&
     isPublished &&
     !product.isOwner &&
@@ -946,6 +964,8 @@ export function ProductDetailClient({
                   <div className="rounded-2xl border border-[#E6E3EE] bg-white p-4 text-xs sm:text-sm text-[#4A4656]">
                     Free campus items can be collected directly on a first-come, first-served basis.
                   </div>
+                ) : foodUnavailable ? (
+                  <p role="status" className="rounded-xl border border-border-crisp bg-paper p-3 text-sm font-semibold">{foodState}</p>
                 ) : isServicePaused ? (
                   <div className="flex items-start gap-2.5 rounded-2xl border border-[#F5C2C0] bg-[#FEF2F2] p-4 text-xs sm:text-sm text-[#991B1B]">
                     <AlertCircle
@@ -958,6 +978,14 @@ export function ProductDetailClient({
                   </div>
                 ) : (
                   <form action={cartFormAction} className="space-y-2.5">
+                    {product.food?.availabilityMode === "pre_order" && product.food.preorderCloseAt &&
+                      product.food.pickupWindowStart && product.food.pickupWindowEnd && (
+                      <div className="rounded-xl border border-border-crisp bg-paper p-3 text-xs">
+                        <p className="font-bold text-[#4E2A84]">Pre-order</p>
+                        <p>Order by {formatFoodDate(product.food.preorderCloseAt)}</p>
+                        <p>Collect {formatFoodDate(product.food.pickupWindowStart)} – {formatFoodDate(product.food.pickupWindowEnd)}</p>
+                      </div>
+                    )}
                     <input type="hidden" name="listingId" value={product.id} />
                     <input
                       type="hidden"

@@ -79,8 +79,11 @@ function mapCheckoutRpcError(rawMessage: string): string {
   ) {
     return "This offer's 30-minute reservation hold has expired or is already closed.";
   }
-  if (rawMessage.includes("FOOD_PREORDER_NOT_ENABLED")) {
-    return "Food pre-orders are not enabled for online checkout yet.";
+  if (rawMessage.includes("FOOD_SCHEDULE_RECONFIRM")) {
+    return "A pre-order schedule changed. Confirm it in your cart.";
+  }
+  if (/FOOD_UNAVAILABLE|FOOD_CLASSIFICATION_REQUIRED/.test(rawMessage)) {
+    return "A food listing is no longer available. Review the selected items in your cart.";
   }
   if (
     rawMessage.includes("INVALID_CART_SELECTION") ||

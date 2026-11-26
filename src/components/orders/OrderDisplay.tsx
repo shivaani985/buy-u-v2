@@ -1,3 +1,4 @@
+import { formatFoodDate } from "@/lib/food";
 import Link from "next/link";
 import { ArrowLeft, Package, RotateCcw } from "lucide-react";
 import type { ReactNode } from "react";
@@ -21,6 +22,9 @@ export interface OrderDisplayItem {
   quantity: number;
   unitSen: number;
   imageUrl: string | null;
+  pickupWindowStart?: string | null;
+  pickupWindowEnd?: string | null;
+  preorderCloseAt?: string | null;
   isService: boolean;
   repurchase?: ItemRepurchaseState;
 }
@@ -102,6 +106,12 @@ export function OrderItems({ items, compact = false, itemAction }: {
                 ) : null}
               </div>
             ) : null}
+            {item.preorderCloseAt && item.pickupWindowStart && item.pickupWindowEnd && (
+              <div className="mt-1 text-xs text-ink-secondary">
+                <p>Pre-order cutoff {formatFoodDate(item.preorderCloseAt)}</p>
+                <p>Collect {formatFoodDate(item.pickupWindowStart)} – {formatFoodDate(item.pickupWindowEnd)}</p>
+              </div>
+            )}
             {itemAction && <div className="mt-1">{itemAction(item)}</div>}
           </div>
           <span

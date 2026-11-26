@@ -279,7 +279,10 @@ export async function addToCartAction(
     if (updateErr) {
       return {
         status: "error",
-        message: "Could not update cart quantity. Please try again.",
+        message: updateErr.message.includes("FOOD_SCHEDULE_RECONFIRM")
+          ? "The collection schedule changed. Review it in your cart."
+          : updateErr.message.includes("FOOD_UNAVAILABLE") ? "This food listing is no longer available."
+          : "Could not update cart quantity. Please try again.",
       };
     }
   } else {
@@ -293,7 +296,8 @@ export async function addToCartAction(
     if (insertErr) {
       return {
         status: "error",
-        message: "Could not add item to cart. Please try again.",
+        message: insertErr.message.includes("FOOD_UNAVAILABLE")
+          ? "This food listing is no longer available." : "Could not add item to cart. Please try again.",
       };
     }
   }

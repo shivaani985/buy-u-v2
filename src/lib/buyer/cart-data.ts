@@ -1,3 +1,4 @@
+import { foodAvailability } from "@/lib/food";
 import { resolvePublicStorageUrl } from "@/lib/format";
 import { formatVariationOptionLabel } from "@/lib/seller/variations";
 import { getPublicSupabaseEnv } from "@/lib/supabase/env";
@@ -30,6 +31,7 @@ interface RawCartRow {
   quantity: number;
   created_at: string;
   updated_at: string;
+  food_schedule: unknown;
 }
 
 interface RawListingRow {
@@ -45,6 +47,9 @@ interface RawListingRow {
   collection_area_id: string | null;
   has_variants: boolean | null;
   availability_mode: string | null;
+  preorder_close_at: string | null;
+  food_event_closed_at: string | null;
+  packaged_food_acknowledged: boolean;
   pickup_window_start: string | null;
   pickup_window_end: string | null;
   pickup_note: string | null;
@@ -114,7 +119,7 @@ export async function getCartPageData(
 
   const { data: rawCartRows, error: cartErr } = await supabase
     .from("cart_items")
-    .select("id,user_id,listing_id,variant_id,quantity,created_at,updated_at")
+    .select("id,user_id,listing_id,variant_id,quantity,created_at,updated_at,food_schedule")
     .eq("user_id", userId)
     .order("created_at", { ascending: false });
 
@@ -147,7 +152,7 @@ export async function getCartPageData(
     supabase
       .from("listings")
       .select(
-        "id,seller_id,kind,is_food,title,condition,price_sen,quantity,reserved_quantity,collection_area_id,has_variants,availability_mode,pickup_window_start,pickup_window_end,pickup_note,food_notes,service_mode,accepting_requests,image_paths,status"
+        "id,seller_id,kind,is_food,title,condition,price_sen,quantity,reserved_quantity,collection_area_id,has_variants,availability_mode,preorder_close_at,food_event_closed_at,packaged_food_acknowledged,pickup_window_start,pickup_window_end,pickup_note,food_notes,service_mode,accepting_requests,image_paths,status"
       )
       .in("id", listingIds),
     variantIds.length > 0
@@ -290,6 +295,33 @@ export async function getCartPageData(
       variant: variantSnapshot,
     });
 
+    let foodIssue = false;
+    let foodScheduleToConfirm: CartItemView["foodScheduleToConfirm"];
+    if (rawListing?.is_food) {
+      const foodState = foodAvailability({
+        availabilityMode: rawListing.availability_mode,
+        packagedAcknowledged: rawListing.packaged_food_acknowledged,
+        closedAt: rawListing.food_event_closed_at,
+        preorderCloseAt: rawListing.preorder_close_at,
+        pickupWindowStart: rawListing.pickup_window_start,
+        pickupWindowEnd: rawListing.pickup_window_end,
+      }, Number(rawListing.quantity ?? 0), Number(rawListing.reserved_quantity ?? 0), Date.now());
+      if (foodState !== "Packaged Food" && foodState !== "Pre-order Open") {
+        Object.assign(state, { isValid: false, issueCode: "unavailable", issueMessage: foodState, lineSubtotalSen: 0, canAdjustToMax: false });
+      } else if (rawListing.availability_mode === "pre_order") {
+        const schedule: NonNullable<CartItemView["foodScheduleToConfirm"]> = [
+          rawListing.collection_area_id, Date.parse(rawListing.preorder_close_at ?? "") / 1000,
+          Date.parse(rawListing.pickup_window_start ?? "") / 1000, Date.parse(rawListing.pickup_window_end ?? "") / 1000,
+        ];
+        foodIssue = JSON.stringify(row.food_schedule) !== JSON.stringify(schedule);
+        if (foodIssue) foodScheduleToConfirm = schedule;
+        if (foodIssue) Object.assign(state, {
+          isValid: false, issueCode: "food_schedule_changed", issueMessage: "Collection schedule changed. Confirm the new schedule.",
+          lineSubtotalSen: 0, canAdjustToMax: false,
+        });
+      }
+    }
+
     const sellerId = rawListing?.seller_id ?? "unavailable-seller";
     const profile = rawListing ? profilesMap.get(rawListing.seller_id) : null;
     const storefront = rawListing
@@ -338,13 +370,15 @@ export async function getCartPageData(
       reservedQuantity: state.reservedQuantity,
       lineSubtotalSen: state.lineSubtotalSen,
       isValid: state.isValid,
-      issueCode: state.issueCode,
+      issueCode: foodIssue ? "food_schedule_changed" : state.issueCode,
+      foodScheduleToConfirm,
       issueMessage: state.issueMessage,
       canAdjustToMax: state.canAdjustToMax,
       isFood: Boolean(rawListing?.is_food),
       isService: rawListing?.kind === "service",
       serviceMode: rawListing?.service_mode ?? null,
       availabilityMode: rawListing?.availability_mode ?? null,
+      preorderCloseAt: rawListing?.preorder_close_at ?? null,
       pickupWindowStart: rawListing?.pickup_window_start ?? null,
       pickupWindowEnd: rawListing?.pickup_window_end ?? null,
       pickupNote: rawListing?.pickup_note ?? null,

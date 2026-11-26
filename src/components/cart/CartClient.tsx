@@ -20,9 +20,11 @@ import {
 } from "lucide-react";
 import {
   removeCartItemAction,
+  reconfirmFoodScheduleAction,
   updateCartItemQuantityAction,
 } from "@/app/cart/actions";
 import type { CartItemView, CartSummary } from "@/lib/buyer/cart";
+import { formatFoodDate } from "@/lib/food";
 import { formatSenToRm } from "@/lib/format";
 import { formatServiceModeLabel } from "@/lib/orders/service-attachments";
 
@@ -514,6 +516,20 @@ export function CartClient({ summary }: CartClientProps) {
                               </span>
                             )}
                           </div>
+                            {item.availabilityMode === "pre_order" && item.pickupWindowStart && item.pickupWindowEnd && (
+                              <p className="mb-2 text-xs text-ink-secondary">
+                                Collect {formatFoodDate(item.pickupWindowStart)} – {formatFoodDate(item.pickupWindowEnd)}
+                                {item.preorderCloseAt ? ` · Order by ${formatFoodDate(item.preorderCloseAt)}` : ""}
+                              </p>
+                            )}
+                            {item.issueCode === "food_schedule_changed" && (
+                              <button type="button" disabled={isNavigating} className="mb-2 text-xs font-bold text-brand-purple underline"
+                                onClick={() => startNavTransition(async () => {
+                                  await reconfirmFoodScheduleAction(item.id, item.foodScheduleToConfirm);
+                                  router.refresh();
+                                })}>Confirm new collection schedule</button>
+                            )}
+
 
                           {item.canAdjustToMax && item.availableStock > 0 ? (
                             <div className="mt-2">

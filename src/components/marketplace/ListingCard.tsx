@@ -1,3 +1,4 @@
+import { formatFoodDate } from "@/lib/food";
 import { FreeNoticeVisibility } from "@/components/free-items/FreeNoticeVisibility";
 import Link from "next/link";
 import { MapPin, Star } from "lucide-react";
@@ -127,6 +128,14 @@ export function ListingCard({
             >
               {listing.categoryName}
             </span>
+            {listing.foodSchedule && <p className="mt-1 text-xs font-semibold text-[#346A72]">
+              {listing.foodSchedule.mode === "ready" ? "Packaged Food" : "Pre-order"}
+              {listing.foodSchedule.cutoff && <> · Order by {formatFoodDate(listing.foodSchedule.cutoff)}</>}
+              {listing.foodSchedule.start && listing.foodSchedule.end && <>
+                <br />Collect {formatFoodDate(listing.foodSchedule.start)} – {formatFoodDate(listing.foodSchedule.end)}
+              </>}
+            </p>}
+
             <span className="inline-block rounded-md bg-[#F4F3F7] px-2 py-0.5 text-[10.5px] font-semibold text-[#5B5668]">
               {formatListingType(listing.listingType)}
             </span>

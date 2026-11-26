@@ -1,3 +1,4 @@
+import { formatFoodDate } from "@/lib/food";
 import Link from "next/link";
 import {
   ArrowRight,
@@ -136,6 +137,14 @@ function HomeListingCard({
               >
                 {listing.categoryName}
               </span>
+            {listing.foodSchedule && <p className="mt-1 text-xs font-semibold text-[#346A72]">
+              {listing.foodSchedule.mode === "ready" ? "Packaged Food" : "Pre-order"}
+              {listing.foodSchedule.cutoff && <> · Order by {formatFoodDate(listing.foodSchedule.cutoff)}</>}
+              {listing.foodSchedule.start && listing.foodSchedule.end && <>
+                <br />Collect {formatFoodDate(listing.foodSchedule.start)} – {formatFoodDate(listing.foodSchedule.end)}
+              </>}
+            </p>}
+
             </div>
 
             {listing.listingType !== "free" ? (
