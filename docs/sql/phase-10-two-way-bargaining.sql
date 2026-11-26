@@ -104,12 +104,12 @@ BEGIN
 END;
 $$;
 
--- 3. Sweep already-expired pending rows before enforcing single active pending slot
-UPDATE public.offers
-SET status = 'expired',
-    responded_at = COALESCE(responded_at, clock_timestamp())
-WHERE status = 'pending'
-  AND COALESCE(expires_at, created_at + interval '24 hours') <= clock_timestamp();
+-- 3. Sweep already-expired pending rows via existing expiry mechanism before enforcing unique pending slot
+DO $$
+BEGIN
+  PERFORM public.release_expired_offer_reservations();
+END;
+$$;
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_offers_one_pending_per_context
   ON public.offers (
@@ -118,6 +118,40 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_offers_one_pending_per_context
     COALESCE(variant_id, '00000000-0000-0000-0000-000000000000'::uuid)
   )
   WHERE status = 'pending';
+
+-- Ensure expired pending rows never block a fresh negotiation INSERT before cron runs
+-- by reusing existing `public.release_expired_offer_reservations()`.
+-- Named `trg_a_*` so PostgreSQL invokes it alphabetically before `trg_guard_offer_inserts`.
+CREATE OR REPLACE FUNCTION public.release_expired_offers_before_insert()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+  IF current_user NOT IN ('postgres', 'service_role')
+     AND EXISTS (
+       SELECT 1
+       FROM public.offers o
+       WHERE o.conversation_id = NEW.conversation_id
+         AND o.listing_id = NEW.listing_id
+         AND COALESCE(o.variant_id, '00000000-0000-0000-0000-000000000000'::uuid)
+             = COALESCE(NEW.variant_id, '00000000-0000-0000-0000-000000000000'::uuid)
+         AND o.status = 'pending'
+         AND COALESCE(o.expires_at, o.created_at + interval '24 hours') <= clock_timestamp()
+     ) THEN
+    PERFORM public.release_expired_offer_reservations();
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_a_release_expired_offers_before_insert ON public.offers;
+CREATE TRIGGER trg_a_release_expired_offers_before_insert
+  BEFORE INSERT ON public.offers
+  FOR EACH ROW
+  EXECUTE FUNCTION public.release_expired_offers_before_insert();
 
 -- 4. Guard direct INSERT on `public.offers`
 --    Preserves buyer-initiated offers, Phase 10 bargaining eligibility, and
@@ -393,6 +427,8 @@ BEGIN
     RAISE EXCEPTION 'INVALID_OFFER_PRICE';
   END IF;
 
+  PERFORM public.release_expired_offer_reservations();
+
   -- Lock order: offers -> listings -> listing_variants
   SELECT * INTO v_parent
   FROM public.offers
@@ -411,6 +447,10 @@ BEGIN
 
   IF v_uid = v_proposer THEN
     RAISE EXCEPTION 'FORBIDDEN_RECEIVER_ONLY';
+  END IF;
+
+  IF v_parent.status = 'expired' THEN
+    RAISE EXCEPTION 'OFFER_EXPIRED';
   END IF;
 
   IF v_parent.status <> 'pending' THEN
@@ -542,17 +582,6 @@ BEGIN
   WHERE id = v_parent.id
     AND status = 'pending';
 
-  -- Clean up any unswept expired pending proposals in the same negotiation context
-  UPDATE public.offers
-  SET status = 'expired',
-      responded_at = COALESCE(responded_at, v_now)
-  WHERE conversation_id = v_parent.conversation_id
-    AND listing_id = v_parent.listing_id
-    AND COALESCE(variant_id, '00000000-0000-0000-0000-000000000000'::uuid)
-        = COALESCE(v_parent.variant_id, '00000000-0000-0000-0000-000000000000'::uuid)
-    AND status = 'pending'
-    AND COALESCE(expires_at, created_at + interval '24 hours') <= v_now;
-
   INSERT INTO public.offers (
     conversation_id,
     listing_id,
@@ -623,6 +652,8 @@ BEGIN
     RAISE EXCEPTION 'UNAUTHORIZED';
   END IF;
 
+  PERFORM public.release_expired_offer_reservations();
+
   -- Lock order: offers -> listings -> listing_variants
   SELECT * INTO v_offer
   FROM public.offers
@@ -645,6 +676,10 @@ BEGIN
 
   IF v_offer.buyer_id = v_offer.seller_id THEN
     RAISE EXCEPTION 'SELF_OFFER_FORBIDDEN';
+  END IF;
+
+  IF v_offer.status = 'expired' THEN
+    RAISE EXCEPTION 'OFFER_EXPIRED';
   END IF;
 
   IF v_offer.status <> 'pending' THEN

@@ -4,8 +4,8 @@
 -- Strictly wrapped in BEGIN ... ROLLBACK. Zero persistent mutations.
 -- Preserves all existing user data.
 -- Embedded Migration File: docs/sql/phase-10-two-way-bargaining.sql
--- Embedded Migration File SHA-256: A4DAB3754D13FB747652D6E29CD3ACE6C8A47382C61BD1F8A530D6AEE0996A29
--- Embedded Migration Body SHA-256: E3D6A6DF5CF277088EE00665A277758A02D690E8AF4EE162D36661BC0A09899F
+-- Embedded Migration File SHA-256: FFEBCD52AF68652C2C52023C90B3FEB7394058805A7E12847A8308506AEEDA52
+-- Embedded Migration Body SHA-256: 1618D82225F1994677058BDE51C80BBE9DFB1448B3AC3C024A4178A9D08AF351
 -- =============================================================================
 
 BEGIN;
@@ -96,12 +96,12 @@ BEGIN
 END;
 $$;
 
--- 3. Sweep already-expired pending rows before enforcing single active pending slot
-UPDATE public.offers
-SET status = 'expired',
-    responded_at = COALESCE(responded_at, clock_timestamp())
-WHERE status = 'pending'
-  AND COALESCE(expires_at, created_at + interval '24 hours') <= clock_timestamp();
+-- 3. Sweep already-expired pending rows via existing expiry mechanism before enforcing unique pending slot
+DO $$
+BEGIN
+  PERFORM public.release_expired_offer_reservations();
+END;
+$$;
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_offers_one_pending_per_context
   ON public.offers (
@@ -110,6 +110,40 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_offers_one_pending_per_context
     COALESCE(variant_id, '00000000-0000-0000-0000-000000000000'::uuid)
   )
   WHERE status = 'pending';
+
+-- Ensure expired pending rows never block a fresh negotiation INSERT before cron runs
+-- by reusing existing `public.release_expired_offer_reservations()`.
+-- Named `trg_a_*` so PostgreSQL invokes it alphabetically before `trg_guard_offer_inserts`.
+CREATE OR REPLACE FUNCTION public.release_expired_offers_before_insert()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+  IF current_user NOT IN ('postgres', 'service_role')
+     AND EXISTS (
+       SELECT 1
+       FROM public.offers o
+       WHERE o.conversation_id = NEW.conversation_id
+         AND o.listing_id = NEW.listing_id
+         AND COALESCE(o.variant_id, '00000000-0000-0000-0000-000000000000'::uuid)
+             = COALESCE(NEW.variant_id, '00000000-0000-0000-0000-000000000000'::uuid)
+         AND o.status = 'pending'
+         AND COALESCE(o.expires_at, o.created_at + interval '24 hours') <= clock_timestamp()
+     ) THEN
+    PERFORM public.release_expired_offer_reservations();
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_a_release_expired_offers_before_insert ON public.offers;
+CREATE TRIGGER trg_a_release_expired_offers_before_insert
+  BEFORE INSERT ON public.offers
+  FOR EACH ROW
+  EXECUTE FUNCTION public.release_expired_offers_before_insert();
 
 -- 4. Guard direct INSERT on `public.offers`
 --    Preserves buyer-initiated offers, Phase 10 bargaining eligibility, and
@@ -385,6 +419,8 @@ BEGIN
     RAISE EXCEPTION 'INVALID_OFFER_PRICE';
   END IF;
 
+  PERFORM public.release_expired_offer_reservations();
+
   -- Lock order: offers -> listings -> listing_variants
   SELECT * INTO v_parent
   FROM public.offers
@@ -403,6 +439,10 @@ BEGIN
 
   IF v_uid = v_proposer THEN
     RAISE EXCEPTION 'FORBIDDEN_RECEIVER_ONLY';
+  END IF;
+
+  IF v_parent.status = 'expired' THEN
+    RAISE EXCEPTION 'OFFER_EXPIRED';
   END IF;
 
   IF v_parent.status <> 'pending' THEN
@@ -534,17 +574,6 @@ BEGIN
   WHERE id = v_parent.id
     AND status = 'pending';
 
-  -- Clean up any unswept expired pending proposals in the same negotiation context
-  UPDATE public.offers
-  SET status = 'expired',
-      responded_at = COALESCE(responded_at, v_now)
-  WHERE conversation_id = v_parent.conversation_id
-    AND listing_id = v_parent.listing_id
-    AND COALESCE(variant_id, '00000000-0000-0000-0000-000000000000'::uuid)
-        = COALESCE(v_parent.variant_id, '00000000-0000-0000-0000-000000000000'::uuid)
-    AND status = 'pending'
-    AND COALESCE(expires_at, created_at + interval '24 hours') <= v_now;
-
   INSERT INTO public.offers (
     conversation_id,
     listing_id,
@@ -615,6 +644,8 @@ BEGIN
     RAISE EXCEPTION 'UNAUTHORIZED';
   END IF;
 
+  PERFORM public.release_expired_offer_reservations();
+
   -- Lock order: offers -> listings -> listing_variants
   SELECT * INTO v_offer
   FROM public.offers
@@ -637,6 +668,10 @@ BEGIN
 
   IF v_offer.buyer_id = v_offer.seller_id THEN
     RAISE EXCEPTION 'SELF_OFFER_FORBIDDEN';
+  END IF;
+
+  IF v_offer.status = 'expired' THEN
+    RAISE EXCEPTION 'OFFER_EXPIRED';
   END IF;
 
   IF v_offer.status <> 'pending' THEN
@@ -789,26 +824,30 @@ GRANT EXECUTE ON FUNCTION public.accept_offer_atomic(uuid) TO authenticated;
 -- =============================================================================
 DO $verify$
 DECLARE
-  v_key text := 'p10_two_way_' || substr(replace(gen_random_uuid()::text, '-', ''), 1, 8);
+  v_key text := substr(replace(gen_random_uuid()::text, '-', ''), 1, 12);
   v_buyer uuid := gen_random_uuid();
   v_seller uuid := gen_random_uuid();
   v_other uuid := gen_random_uuid();
   v_category text;
   v_area text;
-  v_listing uuid;
+  v_business_listing uuid;
+  v_preloved_listing uuid;
   v_food_listing uuid;
   v_variant uuid;
   v_conv uuid;
   v_cover text := v_seller::text || '/' || v_key || '/cover.jpg';
   v_variant_img text := v_seller::text || '/' || v_key || '/variant.jpg';
-  v_offer_1 public.offers;
-  v_offer_2 public.offers;
-  v_offer_3 public.offers;
-  v_offer_4 public.offers;
-  v_offer_exp public.offers;
+  v_preloved_cover text := v_seller::text || '/' || v_key || '/preloved.jpg';
+  v_food_cover text := v_seller::text || '/' || v_key || '/food.jpg';
+  v_offer public.offers;
+  v_prev_offer public.offers;
   v_accepted public.offers;
   v_checkout record;
   v_rejected boolean;
+  v_round integer;
+  v_actor uuid;
+  v_price integer;
+  v_released integer;
   v_listing_row public.listings;
   v_variant_row public.listing_variants;
   v_item public.order_items;
@@ -818,108 +857,139 @@ BEGIN
     RAISE EXCEPTION 'Unexpected counter_offer_atomic execute privileges';
   END IF;
 
-  INSERT INTO auth.users (id, email, email_confirmed_at, raw_user_meta_data, raw_app_meta_data)
-  VALUES
-    (v_buyer, v_key || '_buyer@iluv.ums.edu.my', now(), '{"full_name":"Synthetic Buyer"}', '{}'),
-    (v_seller, v_key || '_seller@iluv.ums.edu.my', now(), '{"full_name":"Synthetic Seller"}', '{}'),
-    (v_other, v_key || '_other@iluv.ums.edu.my', now(), '{"full_name":"Synthetic Outsider"}', '{}');
+  INSERT INTO auth.users (id, email, encrypted_password, email_confirmed_at, raw_app_meta_data, raw_user_meta_data, aud, role, created_at, updated_at)
+  SELECT uid, n || v_key || '@iluv.ums.edu.my', 'x', now(), '{}', '{}', 'authenticated', 'authenticated', now(), now()
+  FROM (VALUES (v_buyer, 'bargain_b_'), (v_seller, 'bargain_s_'), (v_other, 'bargain_o_')) AS u(uid, n);
 
-  UPDATE public.profiles SET status = 'active' WHERE id IN (v_buyer, v_seller, v_other);
+  INSERT INTO public.profiles (id, email, full_name, display_name, university_role, status)
+  SELECT uid, n || v_key || '@iluv.ums.edu.my', n, n, 'student', 'active'
+  FROM (VALUES (v_buyer, 'bargain_b_'), (v_seller, 'bargain_s_'), (v_other, 'bargain_o_')) AS u(uid, n)
+  ON CONFLICT (id) DO UPDATE SET status = 'active', university_role = 'student';
 
   SELECT id INTO STRICT v_category FROM public.categories WHERE active AND kind = 'product' ORDER BY id LIMIT 1;
   SELECT id INTO STRICT v_area FROM public.collection_areas WHERE active ORDER BY id LIMIT 1;
 
+  -- Eligible non-food Student Business listing WITH variations
   INSERT INTO public.listings (
     seller_id, kind, title, description, category_id, condition, price_sen, quantity,
     reserved_quantity, collection_area_id, has_variants, option_groups, variation_photo_group,
     allow_offers, availability_mode, is_food, image_paths, rules_acknowledged, status, published_at
   ) VALUES (
-    v_seller, 'pre_loved', 'Synthetic Perfume', 'Two-way bargaining verification fixture.',
-    v_category, 'Like New', 3000, 3, 0, v_area, true, ARRAY['Scent'], 'Scent',
+    v_seller, 'business', 'Synthetic Attar Set', 'Non-food student business variation fixture.',
+    v_category, 'New/Unused', 3000, 4, 0, v_area, true, ARRAY['Scent'], 'Scent',
     true, 'ready', false, ARRAY[v_cover, v_variant_img], true, 'published', now()
-  ) RETURNING id INTO v_listing;
+  ) RETURNING id INTO v_business_listing;
 
   INSERT INTO public.listing_variants (listing_id, option_values, price_sen, quantity, reserved_quantity, active, image_path)
-  VALUES (v_listing, '{"Scent":"Black"}', 3000, 3, 0, true, v_variant_img)
+  VALUES (v_business_listing, '{"Scent":"Black"}', 3000, 4, 0, true, v_variant_img)
   RETURNING id INTO v_variant;
 
-  -- Campus food remains excluded from bargaining
+  -- Eligible non-variant Pre-Loved listing
   INSERT INTO public.listings (
     seller_id, kind, title, description, category_id, condition, price_sen, quantity,
     reserved_quantity, collection_area_id, has_variants, allow_offers, availability_mode,
     is_food, image_paths, rules_acknowledged, status, published_at
   ) VALUES (
-    v_seller, 'business', 'Synthetic Nasi Lemak', 'Excluded campus food fixture.',
-    v_category, 'New/Unused', 1200, 5, 0, v_area, false, false, 'ready',
-    true, ARRAY[v_cover], true, 'published', now()
+    v_seller, 'pre_loved', 'Synthetic Backpack', 'Non-variant pre-loved fixture.',
+    v_category, 'Like New', 2500, 2, 0, v_area, false, true, 'ready',
+    false, ARRAY[v_preloved_cover], true, 'published', now()
+  ) RETURNING id INTO v_preloved_listing;
+
+  -- Phase 10F compliant Packaged Food listing (acknowledged, allow_offers = false)
+  INSERT INTO public.listings (
+    seller_id, kind, is_food, title, description, category_id, collection_area_id,
+    price_sen, quantity, availability_mode, preorder_close_at, pickup_window_start,
+    pickup_window_end, packaged_food_acknowledged, allow_offers, image_paths,
+    rules_acknowledged, status, published_at
+  ) VALUES (
+    v_seller, 'business', true, 'Fixture packaged crackers', 'Phase 10F packaged food fixture.',
+    v_category, v_area, 500, 5, 'ready', NULL, NULL, NULL, true, false,
+    ARRAY[v_food_cover], true, 'published', now()
   ) RETURNING id INTO v_food_listing;
 
-  INSERT INTO public.conversations (member_a, member_b, listing_id)
-  VALUES (LEAST(v_buyer, v_seller), GREATEST(v_buyer, v_seller), v_listing)
+  INSERT INTO public.conversations (member_a, member_b)
+  VALUES (LEAST(v_buyer, v_seller), GREATEST(v_buyer, v_seller))
   RETURNING id INTO v_conv;
 
-  -- Buyer inserts initial offer RM 15.00
+  -- -------------------------------------------------------------------------
+  -- A. Receiver-only cancel/decline guards & initial insert enforcement
+  -- -------------------------------------------------------------------------
   PERFORM set_config('request.jwt.claim.sub', v_buyer::text, true);
   PERFORM set_config('request.jwt.claim.role', 'authenticated', true);
   PERFORM set_config('request.jwt.claims', json_build_object('sub', v_buyer, 'role', 'authenticated')::text, true);
   SET LOCAL ROLE authenticated;
 
   INSERT INTO public.offers (conversation_id, listing_id, variant_id, buyer_id, seller_id, offer_price_sen)
-  VALUES (v_conv, v_listing, v_variant, v_buyer, v_seller, 1500)
-  RETURNING * INTO v_offer_1;
+  VALUES (v_conv, v_business_listing, v_variant, v_buyer, v_seller, 1500)
+  RETURNING * INTO v_offer;
 
-  IF v_offer_1.proposed_by <> v_buyer OR v_offer_1.parent_offer_id IS NOT NULL
-     OR v_offer_1.variant_image_path IS DISTINCT FROM v_variant_img THEN
-    RAISE EXCEPTION 'Initial buyer offer did not capture proposed_by or variant_image_path';
+  IF v_offer.proposed_by <> v_buyer OR v_offer.parent_offer_id IS NOT NULL
+     OR v_offer.variant_image_path IS DISTINCT FROM v_variant_img THEN
+    RAISE EXCEPTION 'Initial buyer offer did not record proposed_by or variant_image_path';
   END IF;
 
-  -- Duplicate simultaneous pending offer blocked
+  -- Duplicate active pending offer blocked
   v_rejected := false;
   BEGIN
     INSERT INTO public.offers (conversation_id, listing_id, variant_id, buyer_id, seller_id, offer_price_sen)
-    VALUES (v_conv, v_listing, v_variant, v_buyer, v_seller, 1600);
-  EXCEPTION WHEN unique_violation THEN
-    v_rejected := true;
+    VALUES (v_conv, v_business_listing, v_variant, v_buyer, v_seller, 1600);
+  EXCEPTION WHEN unique_violation THEN v_rejected := true;
   END;
   IF NOT v_rejected THEN RAISE EXCEPTION 'Duplicate pending offer allowed'; END IF;
 
-  -- Proposer (buyer) cannot accept or counter their own pending proposal
-  v_rejected := false;
-  BEGIN
-    PERFORM public.accept_offer_atomic(v_offer_1.id);
-  EXCEPTION WHEN raise_exception THEN
-    IF SQLERRM <> 'FORBIDDEN_RECEIVER_ONLY' THEN RAISE; END IF;
-    v_rejected := true;
-  END;
-  IF NOT v_rejected THEN RAISE EXCEPTION 'Buyer accepted own offer'; END IF;
-
-  v_rejected := false;
-  BEGIN
-    PERFORM public.counter_offer_atomic(v_offer_1.id, 1700);
-  EXCEPTION WHEN raise_exception THEN
-    IF SQLERRM <> 'FORBIDDEN_RECEIVER_ONLY' THEN RAISE; END IF;
-    v_rejected := true;
-  END;
-  IF NOT v_rejected THEN RAISE EXCEPTION 'Buyer countered own offer'; END IF;
-
-  -- Campus food offer remains rejected
+  -- Packaged food excluded from offers
   v_rejected := false;
   BEGIN
     INSERT INTO public.offers (conversation_id, listing_id, buyer_id, seller_id, offer_price_sen)
-    VALUES (v_conv, v_food_listing, v_buyer, v_seller, 800);
-  EXCEPTION WHEN insufficient_privilege OR raise_exception THEN
+    VALUES (v_conv, v_food_listing, v_buyer, v_seller, 400);
+  EXCEPTION WHEN insufficient_privilege OR raise_exception THEN v_rejected := true;
+  END;
+  IF NOT v_rejected THEN RAISE EXCEPTION 'Packaged food listing allowed offer'; END IF;
+
+  -- Proposer (buyer) cannot decline, accept, or counter own pending offer; can cancel own offer
+  v_rejected := false;
+  BEGIN
+    UPDATE public.offers SET status = 'declined' WHERE id = v_offer.id;
+  EXCEPTION WHEN insufficient_privilege OR raise_exception THEN v_rejected := true;
+  END;
+  IF NOT v_rejected THEN RAISE EXCEPTION 'Proposer declined own offer'; END IF;
+
+  v_rejected := false;
+  BEGIN
+    PERFORM public.accept_offer_atomic(v_offer.id);
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'FORBIDDEN_RECEIVER_ONLY' THEN RAISE; END IF;
     v_rejected := true;
   END;
-  IF NOT v_rejected THEN RAISE EXCEPTION 'Campus food listing allowed offer'; END IF;
+  IF NOT v_rejected THEN RAISE EXCEPTION 'Proposer accepted own offer'; END IF;
+
+  v_rejected := false;
+  BEGIN
+    PERFORM public.counter_offer_atomic(v_offer.id, 1700);
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'FORBIDDEN_RECEIVER_ONLY' THEN RAISE; END IF;
+    v_rejected := true;
+  END;
+  IF NOT v_rejected THEN RAISE EXCEPTION 'Proposer countered own offer'; END IF;
+
+  UPDATE public.offers SET status = 'cancelled', responded_at = clock_timestamp() WHERE id = v_offer.id;
+  IF (SELECT status FROM public.offers WHERE id = v_offer.id) <> 'cancelled' THEN
+    RAISE EXCEPTION 'Buyer cancel failed';
+  END IF;
+
+  -- New buyer offer -> seller decline & direct bypass checks
+  INSERT INTO public.offers (conversation_id, listing_id, variant_id, buyer_id, seller_id, offer_price_sen)
+  VALUES (v_conv, v_business_listing, v_variant, v_buyer, v_seller, 1500)
+  RETURNING * INTO v_offer;
   RESET ROLE;
 
-  -- Outsider cannot counter or accept
+  -- Outsider cannot counter
   PERFORM set_config('request.jwt.claim.sub', v_other::text, true);
   PERFORM set_config('request.jwt.claims', json_build_object('sub', v_other, 'role', 'authenticated')::text, true);
   SET LOCAL ROLE authenticated;
   v_rejected := false;
   BEGIN
-    PERFORM public.counter_offer_atomic(v_offer_1.id, 2000);
+    PERFORM public.counter_offer_atomic(v_offer.id, 2000);
   EXCEPTION WHEN raise_exception THEN
     IF SQLERRM <> 'FORBIDDEN_PARTICIPANT_ONLY' THEN RAISE; END IF;
     v_rejected := true;
@@ -927,88 +997,142 @@ BEGIN
   IF NOT v_rejected THEN RAISE EXCEPTION 'Outsider countered offer'; END IF;
   RESET ROLE;
 
-  -- Seller counters RM 15 -> RM 22
   PERFORM set_config('request.jwt.claim.sub', v_seller::text, true);
   PERFORM set_config('request.jwt.claims', json_build_object('sub', v_seller, 'role', 'authenticated')::text, true);
   SET LOCAL ROLE authenticated;
 
-  -- Direct insert/update bypasses must fail
+  -- Receiver (seller) cannot cancel buyer's offer or directly set accepted/superseded
   v_rejected := false;
   BEGIN
-    INSERT INTO public.offers (conversation_id, listing_id, variant_id, buyer_id, seller_id, offer_price_sen)
-    VALUES (v_conv, v_listing, v_variant, v_buyer, v_seller, 2200);
-  EXCEPTION WHEN insufficient_privilege OR raise_exception THEN
-    v_rejected := true;
+    UPDATE public.offers SET status = 'cancelled' WHERE id = v_offer.id;
+  EXCEPTION WHEN insufficient_privilege OR raise_exception THEN v_rejected := true;
   END;
-  IF NOT v_rejected THEN RAISE EXCEPTION 'Direct counter insert bypassed RPC'; END IF;
+  IF NOT v_rejected THEN RAISE EXCEPTION 'Receiver cancelled counterparty offer'; END IF;
 
-  SELECT * INTO STRICT v_offer_2 FROM public.counter_offer_atomic(v_offer_1.id, 2200);
-  IF v_offer_2.proposed_by <> v_seller
-     OR v_offer_2.parent_offer_id <> v_offer_1.id
-     OR v_offer_2.offer_price_sen <> 2200
-     OR v_offer_2.variant_id <> v_variant
-     OR v_offer_2.variant_image_path IS DISTINCT FROM v_variant_img THEN
-    RAISE EXCEPTION 'Seller counter did not preserve parent, proposer, variation, or image';
+  v_rejected := false;
+  BEGIN
+    UPDATE public.offers SET status = 'superseded' WHERE id = v_offer.id;
+  EXCEPTION WHEN insufficient_privilege OR raise_exception THEN v_rejected := true;
+  END;
+  IF NOT v_rejected THEN RAISE EXCEPTION 'Direct superseded transition bypassed RPC'; END IF;
+
+  -- Seller declines buyer offer -> succeeds; then fresh chain tests seller counter + buyer decline
+  UPDATE public.offers SET status = 'declined', responded_at = clock_timestamp() WHERE id = v_offer.id;
+  IF (SELECT status FROM public.offers WHERE id = v_offer.id) <> 'declined' THEN
+    RAISE EXCEPTION 'Seller decline failed';
   END IF;
-
-  -- Seller cannot accept or counter their own counter-offer
-  v_rejected := false;
-  BEGIN
-    PERFORM public.accept_offer_atomic(v_offer_2.id);
-  EXCEPTION WHEN raise_exception THEN
-    IF SQLERRM <> 'FORBIDDEN_RECEIVER_ONLY' THEN RAISE; END IF;
-    v_rejected := true;
-  END;
-  IF NOT v_rejected THEN RAISE EXCEPTION 'Seller accepted own counter-offer'; END IF;
-
-  -- Superseded parent cannot be re-countered or accepted
-  v_rejected := false;
-  BEGIN
-    PERFORM public.counter_offer_atomic(v_offer_1.id, 2100);
-  EXCEPTION WHEN raise_exception THEN
-    IF SQLERRM <> 'OFFER_NOT_PENDING' THEN RAISE; END IF;
-    v_rejected := true;
-  END;
-  IF NOT v_rejected THEN RAISE EXCEPTION 'Superseded offer was re-countered'; END IF;
   RESET ROLE;
 
-  IF (SELECT status FROM public.offers WHERE id = v_offer_1.id) IS DISTINCT FROM 'superseded' THEN
-    RAISE EXCEPTION 'Parent offer was not marked superseded';
-  END IF;
-
-  -- Unlimited counter rounds: Buyer counters RM 18 -> Seller counters RM 19 -> Buyer accepts RM 19
+  -- Seller counter -> Buyer declines -> Seller counter -> Seller cancels own counter
   PERFORM set_config('request.jwt.claim.sub', v_buyer::text, true);
   PERFORM set_config('request.jwt.claims', json_build_object('sub', v_buyer, 'role', 'authenticated')::text, true);
   SET LOCAL ROLE authenticated;
-  SELECT * INTO STRICT v_offer_3 FROM public.counter_offer_atomic(v_offer_2.id, 1800);
+  INSERT INTO public.offers (conversation_id, listing_id, variant_id, buyer_id, seller_id, offer_price_sen)
+  VALUES (v_conv, v_business_listing, v_variant, v_buyer, v_seller, 1500)
+  RETURNING * INTO v_offer;
   RESET ROLE;
 
   PERFORM set_config('request.jwt.claim.sub', v_seller::text, true);
   PERFORM set_config('request.jwt.claims', json_build_object('sub', v_seller, 'role', 'authenticated')::text, true);
   SET LOCAL ROLE authenticated;
-  SELECT * INTO STRICT v_offer_4 FROM public.counter_offer_atomic(v_offer_3.id, 1900);
+  SELECT * INTO STRICT v_offer FROM public.counter_offer_atomic(v_offer.id, 2200);
   RESET ROLE;
 
   PERFORM set_config('request.jwt.claim.sub', v_buyer::text, true);
   PERFORM set_config('request.jwt.claims', json_build_object('sub', v_buyer, 'role', 'authenticated')::text, true);
   SET LOCAL ROLE authenticated;
-  SELECT * INTO STRICT v_accepted FROM public.accept_offer_atomic(v_offer_4.id);
+  UPDATE public.offers SET status = 'declined', responded_at = clock_timestamp() WHERE id = v_offer.id;
+  IF (SELECT status FROM public.offers WHERE id = v_offer.id) <> 'declined' THEN
+    RAISE EXCEPTION 'Buyer decline on seller counter failed';
+  END IF;
+
+  INSERT INTO public.offers (conversation_id, listing_id, variant_id, buyer_id, seller_id, offer_price_sen)
+  VALUES (v_conv, v_business_listing, v_variant, v_buyer, v_seller, 1500)
+  RETURNING * INTO v_offer;
+  RESET ROLE;
+
+  PERFORM set_config('request.jwt.claim.sub', v_seller::text, true);
+  PERFORM set_config('request.jwt.claims', json_build_object('sub', v_seller, 'role', 'authenticated')::text, true);
+  SET LOCAL ROLE authenticated;
+  SELECT * INTO STRICT v_offer FROM public.counter_offer_atomic(v_offer.id, 2300);
+  -- Seller cancels own pending counter; buyer direct-cancel must still fail before that
+  RESET ROLE;
+
+  PERFORM set_config('request.jwt.claim.sub', v_buyer::text, true);
+  PERFORM set_config('request.jwt.claims', json_build_object('sub', v_buyer, 'role', 'authenticated')::text, true);
+  SET LOCAL ROLE authenticated;
+  v_rejected := false;
+  BEGIN
+    UPDATE public.offers SET status = 'cancelled' WHERE id = v_offer.id;
+  EXCEPTION WHEN insufficient_privilege OR raise_exception THEN v_rejected := true;
+  END;
+  IF NOT v_rejected THEN RAISE EXCEPTION 'Buyer cancelled seller counter offer'; END IF;
+  RESET ROLE;
+
+  PERFORM set_config('request.jwt.claim.sub', v_seller::text, true);
+  PERFORM set_config('request.jwt.claims', json_build_object('sub', v_seller, 'role', 'authenticated')::text, true);
+  SET LOCAL ROLE authenticated;
+  UPDATE public.offers SET status = 'cancelled', responded_at = clock_timestamp() WHERE id = v_offer.id;
+  IF (SELECT status FROM public.offers WHERE id = v_offer.id) <> 'cancelled' THEN
+    RAISE EXCEPTION 'Seller cancel own counter failed';
+  END IF;
+  RESET ROLE;
+
+  -- -------------------------------------------------------------------------
+  -- B. >5 proposal chain (7 rounds) + Student Business variation checkout
+  -- -------------------------------------------------------------------------
+  PERFORM set_config('request.jwt.claim.sub', v_buyer::text, true);
+  PERFORM set_config('request.jwt.claims', json_build_object('sub', v_buyer, 'role', 'authenticated')::text, true);
+  SET LOCAL ROLE authenticated;
+  INSERT INTO public.offers (conversation_id, listing_id, variant_id, buyer_id, seller_id, offer_price_sen)
+  VALUES (v_conv, v_business_listing, v_variant, v_buyer, v_seller, 1400)
+  RETURNING * INTO v_offer;
+  RESET ROLE;
+
+  FOR v_round IN 1..6 LOOP
+    v_prev_offer := v_offer;
+    v_actor := CASE WHEN (v_round % 2) = 1 THEN v_seller ELSE v_buyer END;
+    v_price := 1400 + (v_round * 100);
+
+    PERFORM set_config('request.jwt.claim.sub', v_actor::text, true);
+    PERFORM set_config('request.jwt.claims', json_build_object('sub', v_actor, 'role', 'authenticated')::text, true);
+    SET LOCAL ROLE authenticated;
+    SELECT * INTO STRICT v_offer FROM public.counter_offer_atomic(v_prev_offer.id, v_price);
+    RESET ROLE;
+
+    IF (SELECT status FROM public.offers WHERE id = v_prev_offer.id) <> 'superseded'
+       OR v_offer.parent_offer_id <> v_prev_offer.id
+       OR v_offer.proposed_by <> v_actor
+       OR v_offer.variant_id <> v_variant
+       OR v_offer.variant_image_path IS DISTINCT FROM v_variant_img THEN
+      RAISE EXCEPTION 'Counter round % broke chain/superseded/variant/image invariants', v_round;
+    END IF;
+  END LOOP;
+  -- Round 6 was proposed by v_buyer at 2000 sen -> only v_seller can accept
+  PERFORM set_config('request.jwt.claim.sub', v_seller::text, true);
+  PERFORM set_config('request.jwt.claims', json_build_object('sub', v_seller, 'role', 'authenticated')::text, true);
+  SET LOCAL ROLE authenticated;
+  SELECT * INTO STRICT v_accepted FROM public.accept_offer_atomic(v_offer.id);
 
   -- Concurrent duplicate accept must fail
   v_rejected := false;
   BEGIN
-    PERFORM public.accept_offer_atomic(v_offer_4.id);
+    PERFORM public.accept_offer_atomic(v_offer.id);
   EXCEPTION WHEN raise_exception THEN
     IF SQLERRM <> 'OFFER_NOT_PENDING' THEN RAISE; END IF;
     v_rejected := true;
   END;
   IF NOT v_rejected THEN RAISE EXCEPTION 'Duplicate acceptance allowed'; END IF;
-
-  -- Buyer checks out accepted counter offer atomically
-  SELECT * INTO STRICT v_checkout FROM public.create_offer_checkout_atomic(v_accepted.id, v_key || '_chk');
   RESET ROLE;
 
-  SELECT * INTO STRICT v_listing_row FROM public.listings WHERE id = v_listing;
+  -- Buyer checks out accepted round-7 offer (RM 20.00)
+  PERFORM set_config('request.jwt.claim.sub', v_buyer::text, true);
+  PERFORM set_config('request.jwt.claims', json_build_object('sub', v_buyer, 'role', 'authenticated')::text, true);
+  SET LOCAL ROLE authenticated;
+  SELECT * INTO STRICT v_checkout FROM public.create_offer_checkout_atomic(v_accepted.id, v_key || '_biz');
+  RESET ROLE;
+
+  SELECT * INTO STRICT v_listing_row FROM public.listings WHERE id = v_business_listing;
   SELECT * INTO STRICT v_variant_row FROM public.listing_variants WHERE id = v_variant;
   SELECT oi.* INTO STRICT v_item
   FROM public.order_items oi
@@ -1016,26 +1140,83 @@ BEGIN
   WHERE o.checkout_session_id = v_checkout.id;
 
   IF v_listing_row.reserved_quantity <> 1 OR v_variant_row.reserved_quantity <> 1
-     OR v_item.unit_price_sen <> 1900 OR v_item.variant_id <> v_variant
+     OR v_item.unit_sen <> 2000 OR v_item.variant_id <> v_variant
      OR v_item.image_path IS DISTINCT FROM v_variant_img THEN
-    RAISE EXCEPTION 'Accepted counter-offer checkout did not preserve reservation, price, variation, or image';
+    RAISE EXCEPTION 'Student Business variation checkout mismatch (unit_sen=%, variant=%, img=%)',
+      v_item.unit_sen, v_item.variant_id, v_item.image_path;
   END IF;
 
-  -- Expired offer cannot be countered or accepted
-  INSERT INTO public.offers (
-    conversation_id, listing_id, variant_id, variant_snapshot, variant_image_path,
-    buyer_id, seller_id, proposed_by, offer_price_sen, status, created_at, expires_at
-  ) VALUES (
-    v_conv, v_listing, v_variant, '{"Scent":"Black"}', v_variant_img,
-    v_buyer, v_seller, v_buyer, 1400, 'pending', now() - interval '25 hours', now() - interval '1 hour'
-  ) RETURNING id INTO v_offer_exp;
+  -- -------------------------------------------------------------------------
+  -- C. Accepted reservation release (30m hold expiry) on Student Business variant
+  -- -------------------------------------------------------------------------
+  PERFORM set_config('request.jwt.claim.sub', v_buyer::text, true);
+  PERFORM set_config('request.jwt.claims', json_build_object('sub', v_buyer, 'role', 'authenticated')::text, true);
+  SET LOCAL ROLE authenticated;
+  INSERT INTO public.offers (conversation_id, listing_id, variant_id, buyer_id, seller_id, offer_price_sen)
+  VALUES (v_conv, v_business_listing, v_variant, v_buyer, v_seller, 1800)
+  RETURNING * INTO v_offer;
+  RESET ROLE;
 
+  PERFORM set_config('request.jwt.claim.sub', v_seller::text, true);
+  PERFORM set_config('request.jwt.claims', json_build_object('sub', v_seller, 'role', 'authenticated')::text, true);
+  SET LOCAL ROLE authenticated;
+  SELECT * INTO STRICT v_offer FROM public.counter_offer_atomic(v_offer.id, 2100);
+  RESET ROLE;
+
+  PERFORM set_config('request.jwt.claim.sub', v_buyer::text, true);
+  PERFORM set_config('request.jwt.claims', json_build_object('sub', v_buyer, 'role', 'authenticated')::text, true);
+  SET LOCAL ROLE authenticated;
+  SELECT * INTO STRICT v_accepted FROM public.accept_offer_atomic(v_offer.id);
+  RESET ROLE;
+
+  -- Now reserved_quantity = 2 (1 checked-out unpaid + 1 newly accepted hold)
+  IF (SELECT reserved_quantity FROM public.listing_variants WHERE id = v_variant) <> 2 THEN
+    RAISE EXCEPTION 'Accepted counter reservation did not reserve second unit';
+  END IF;
+
+  UPDATE public.offers
+  SET reservation_expires_at = clock_timestamp() - interval '1 minute'
+  WHERE id = v_accepted.id;
+
+  v_released := public.release_expired_offer_reservations();
+  IF v_released < 1
+     OR (SELECT status FROM public.offers WHERE id = v_accepted.id) <> 'expired'
+     OR (SELECT reservation_released_at FROM public.offers WHERE id = v_accepted.id) IS NULL
+     OR (SELECT reserved_quantity FROM public.listing_variants WHERE id = v_variant) <> 1
+     OR (SELECT reserved_quantity FROM public.listings WHERE id = v_business_listing) <> 1 THEN
+    RAISE EXCEPTION 'Accepted counter reservation was not cleanly released by release_expired_offer_reservations()';
+  END IF;
+
+  -- Repeat release must not double-release
+  PERFORM public.release_expired_offer_reservations();
+  IF (SELECT reserved_quantity FROM public.listing_variants WHERE id = v_variant) <> 1 THEN
+    RAISE EXCEPTION 'Repeat release double-released variant stock';
+  END IF;
+
+  -- -------------------------------------------------------------------------
+  -- D. Expired pending offer cannot block fresh negotiation + Pre-Loved test
+  -- -------------------------------------------------------------------------
+  PERFORM set_config('request.jwt.claim.sub', v_buyer::text, true);
+  PERFORM set_config('request.jwt.claims', json_build_object('sub', v_buyer, 'role', 'authenticated')::text, true);
+  SET LOCAL ROLE authenticated;
+  INSERT INTO public.offers (conversation_id, listing_id, buyer_id, seller_id, offer_price_sen)
+  VALUES (v_conv, v_preloved_listing, v_buyer, v_seller, 1600)
+  RETURNING * INTO v_offer;
+  RESET ROLE;
+
+  -- Force 24h expiry while DB status is still 'pending'
+  UPDATE public.offers
+  SET created_at = clock_timestamp() - interval '25 hours',
+      expires_at = clock_timestamp() - interval '1 hour'
+  WHERE id = v_offer.id;
+
+  -- Countering expired offer must fail with OFFER_EXPIRED
   PERFORM set_config('request.jwt.claim.sub', v_seller::text, true);
   PERFORM set_config('request.jwt.claims', json_build_object('sub', v_seller, 'role', 'authenticated')::text, true);
   SET LOCAL ROLE authenticated;
   v_rejected := false;
   BEGIN
-    PERFORM public.counter_offer_atomic(v_offer_exp.id, 2000);
+    PERFORM public.counter_offer_atomic(v_offer.id, 1800);
   EXCEPTION WHEN raise_exception THEN
     IF SQLERRM <> 'OFFER_EXPIRED' THEN RAISE; END IF;
     v_rejected := true;
@@ -1043,8 +1224,53 @@ BEGIN
   IF NOT v_rejected THEN RAISE EXCEPTION 'Expired offer was countered'; END IF;
   RESET ROLE;
 
+  -- Fresh negotiation INSERT must still succeed if a new expired pending row exists before cron sweeps
+  UPDATE public.offers
+  SET status = 'pending',
+      expires_at = clock_timestamp() - interval '30 minutes'
+  WHERE id = v_offer.id;
+
+  PERFORM set_config('request.jwt.claim.sub', v_buyer::text, true);
+  PERFORM set_config('request.jwt.claims', json_build_object('sub', v_buyer, 'role', 'authenticated')::text, true);
+  SET LOCAL ROLE authenticated;
+  INSERT INTO public.offers (conversation_id, listing_id, buyer_id, seller_id, offer_price_sen)
+  VALUES (v_conv, v_preloved_listing, v_buyer, v_seller, 1700)
+  RETURNING * INTO v_prev_offer;
+  RESET ROLE;
+
+  IF (SELECT status FROM public.offers WHERE id = v_offer.id) <> 'expired'
+     OR v_prev_offer.status <> 'pending' THEN
+    RAISE EXCEPTION 'Expired pending offer blocked fresh negotiation or was not swept via existing expiry mechanism';
+  END IF;
+
+  -- Pre-loved counter -> buyer accept -> buyer checkout (non-variant)
+  PERFORM set_config('request.jwt.claim.sub', v_seller::text, true);
+  PERFORM set_config('request.jwt.claims', json_build_object('sub', v_seller, 'role', 'authenticated')::text, true);
+  SET LOCAL ROLE authenticated;
+  SELECT * INTO STRICT v_offer FROM public.counter_offer_atomic(v_prev_offer.id, 1900);
+  RESET ROLE;
+
+  PERFORM set_config('request.jwt.claim.sub', v_buyer::text, true);
+  PERFORM set_config('request.jwt.claims', json_build_object('sub', v_buyer, 'role', 'authenticated')::text, true);
+  SET LOCAL ROLE authenticated;
+  SELECT * INTO STRICT v_accepted FROM public.accept_offer_atomic(v_offer.id);
+  SELECT * INTO STRICT v_checkout FROM public.create_offer_checkout_atomic(v_accepted.id, v_key || '_pre');
+  RESET ROLE;
+
+  SELECT oi.* INTO STRICT v_item
+  FROM public.order_items oi
+  JOIN public.orders o ON o.id = oi.order_id
+  WHERE o.checkout_session_id = v_checkout.id;
+
+  IF v_item.unit_sen <> 1900 OR v_item.variant_id IS NOT NULL
+     OR v_item.image_path IS DISTINCT FROM v_preloved_cover THEN
+    RAISE EXCEPTION 'Pre-loved non-variant checkout mismatch (unit_sen=%, variant=%, img=%)',
+      v_item.unit_sen, v_item.variant_id, v_item.image_path;
+  END IF;
+
   RAISE NOTICE 'Phase 10 Two-Way Bargaining verification passed cleanly. Rolling back.';
 END;
 $verify$;
 
+SET CONSTRAINTS ALL IMMEDIATE;
 ROLLBACK;

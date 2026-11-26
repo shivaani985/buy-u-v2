@@ -785,4 +785,61 @@ test("two-way bargaining: unlimited counter rounds, receiver-only transitions, s
     simulateAtomicOfferAccept(acceptedRes.nextState, buyer, t0 + 55_000).ok,
     false
   );
+
+  // Accepted counter-offer reservation releases cleanly at 30 minutes
+  const relRes = simulateReleaseExpiredReservation(
+    acceptedRes.nextState,
+    t0 + 50_000 + OFFER_RESERVATION_TTL_MS
+  );
+  assert.equal(relRes.released, true);
+  assert.equal(relRes.nextState.listingReservedQuantity, 0);
+  assert.equal(relRes.nextState.offer.status, "expired");
+});
+
+test("two-way bargaining: >5 proposals chain, receiver-only decline/cancel, and expired pending reset", () => {
+  const buyer = makeEligibility("student", BUYER_ID);
+  const seller = makeEligibility("student", SELLER_ID);
+  const t0 = Date.parse("2026-11-26T05:00:00.000Z");
+
+  let state = {
+    listingQuantity: 3,
+    listingReservedQuantity: 0,
+    listingSellerId: SELLER_ID,
+    listingPriceSen: 4000,
+    conversationMembers: [BUYER_ID, SELLER_ID],
+    offer: makeOffer({
+      id: "chain-0",
+      proposedBy: BUYER_ID,
+      offerPriceSen: 1500,
+      createdAt: new Date(t0).toISOString(),
+      expiresAt: new Date(t0 + OFFER_PENDING_TTL_MS).toISOString(),
+    }),
+  };
+
+  // Run 6 counter rounds (7 proposals total > 5)
+  for (let round = 1; round <= 6; round++) {
+    const actor = round % 2 === 1 ? seller : buyer;
+    const price = 1500 + round * 150;
+    const step = simulateAtomicCounterOffer(state, actor, price, t0 + round * 1000);
+    assert.equal(step.ok, true);
+    assert.equal(step.supersededOffer.status, "superseded");
+    state = step.nextState;
+  }
+  assert.equal(state.offer.proposedBy, BUYER_ID);
+
+  // Receiver (seller) declines buyer's counter; proposer (buyer) cannot decline own proposal
+  assert.equal(
+    validateOfferTransition({ action: "decline", eligibility: buyer, offer: state.offer, isBlocked: false, nowMs: t0 + 7000 }).ok,
+    false
+  );
+  assert.equal(
+    validateOfferTransition({ action: "decline", eligibility: seller, offer: state.offer, isBlocked: false, nowMs: t0 + 7000 }).ok,
+    true
+  );
+
+  // Expired pending offer resolves as expired so fresh negotiation is unblocked
+  assert.equal(
+    resolveEffectiveOfferStatus(state.offer, t0 + 6000 + OFFER_PENDING_TTL_MS),
+    "expired"
+  );
 });
