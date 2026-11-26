@@ -115,15 +115,15 @@ export function SellerWithdrawalsClient({
     {
       label: "Available for Withdrawal",
       value: formatCurrencySen(availSen),
-      sub: `Passed ${BUYER_PROTECTION_HOURS}h buyer protection`,
+      sub: "Cleared buyer protection window",
       accent: "border-l-[#008285]",
     },
     {
-      label: "Buyer Protection Reserve (72h)",
+      label: "Buyer Protection Reserve",
       value: formatCurrencySen(financials.protectionReserveSen),
       sub: financials.nextProtectionReleaseAt
         ? `Next release: ${formatMytDateTime(financials.nextProtectionReleaseAt)}`
-        : "No orders in 72h reserve",
+        : "No orders in protection reserve",
       accent: "border-l-[#4E2A84]",
     },
     {
@@ -204,8 +204,8 @@ export function SellerWithdrawalsClient({
             <p className="mt-2 inline-flex items-center gap-1 text-[11px] text-[#4E2A84]">
               <Clock className="h-3.5 w-3.5" />
               <span>
-                Completed orders release automatically after 72 hours unless
-                disputed.
+                Completed orders release after their buyer protection window
+                ({BUYER_PROTECTION_HOURS}h on new orders) unless disputed.
               </span>
             </p>
           </div>
@@ -279,8 +279,9 @@ export function SellerWithdrawalsClient({
         </div>
         {withdrawals.length === 0 ? (
           <p className="px-5 py-8 text-center text-xs text-[#6B6779]">
-            No withdrawals yet. Once completed orders pass the 72-hour
-            protection window, you can withdraw automatically.
+            No withdrawals yet. Once completed orders clear their buyer
+            protection window ({BUYER_PROTECTION_HOURS}h on new orders), you can
+            withdraw automatically.
           </p>
         ) : (
           <div className="overflow-x-auto">

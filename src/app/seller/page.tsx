@@ -157,7 +157,7 @@ export default async function SellerHubPage({
       hint: fin.available
         ? [
             fin.protectionReserveSen > 0
-              ? `72h Reserve: ${formatRm(fin.protectionReserveSen)}`
+              ? `Protection Reserve: ${formatRm(fin.protectionReserveSen)}`
               : null,
             fin.frozenDisputeSen > 0
               ? `Frozen (Disputes): ${formatRm(fin.frozenDisputeSen)}`

@@ -174,7 +174,7 @@ export async function getSellerHubData(
     supabase
       .from("orders")
       .select(
-        "id, order_code, buyer_id, checkout_session_id, subtotal_sen, commission_sen, seller_net_sen, total_paid_sen, status, paid_at, completed_at, created_at"
+        "id, order_code, buyer_id, checkout_session_id, subtotal_sen, commission_sen, seller_net_sen, total_paid_sen, status, paid_at, completed_at, protection_expires_at, created_at"
       )
       .eq("seller_id", userId)
       .order("created_at", { ascending: false })

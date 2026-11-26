@@ -834,3 +834,119 @@ test("P0.10: full multi-order fixture verifies all financial equations, blocking
   assert.match(csv, /\*{4}5678/);
   assert.ok(!csv.includes("114012345678"));
 });
+
+test("F06/H04: mixed 72h/168h protection_expires_at, exact release boundary, fallback, and MYT midnight chart buckets", () => {
+  const mixedOrders = [
+    {
+      // Historical 168h deadline (even past 72h, must stay protected until 168h)
+      id: "hist-168",
+      order_code: "BU-2611-HIST",
+      subtotal_sen: 1500,
+      commission_sen: 30,
+      seller_net_sen: 1470,
+      total_paid_sen: 1600,
+      status: "completed",
+      paid_at: "2026-11-22T18:00:00Z",
+      completed_at: "2026-11-22T19:41:31.104Z",
+      protection_expires_at: "2026-11-29T19:41:31.104Z",
+      created_at: "2026-11-22T17:50:00Z",
+    },
+    {
+      // New 72h deadline (00:30 MYT on 27 Nov = 16:30Z on 26 Nov)
+      id: "new-72",
+      order_code: "BU-2611-NEW72",
+      subtotal_sen: 1500,
+      commission_sen: 30,
+      seller_net_sen: 1470,
+      total_paid_sen: 1600,
+      status: "completed",
+      paid_at: "2026-11-26T16:30:00Z",
+      completed_at: "2026-11-25T08:05:54.641Z",
+      protection_expires_at: "2026-11-28T08:05:54.641Z",
+      created_at: "2026-11-25T08:00:00Z",
+    },
+    {
+      // Legacy row missing explicit protection_expires_at -> falls back to completed_at + 72h
+      id: "fallback-72",
+      order_code: "BU-2611-FALL",
+      subtotal_sen: 1500,
+      commission_sen: 30,
+      seller_net_sen: 1470,
+      total_paid_sen: 1600,
+      status: "completed",
+      paid_at: "2026-11-25T10:00:00Z",
+      completed_at: "2026-11-25T10:00:00Z",
+      protection_expires_at: null,
+      created_at: "2026-11-25T09:55:00Z",
+    },
+  ];
+  const payments = mixedOrders.map((o) => ({
+    order_id: o.id,
+    status: "paid",
+    verified_at: o.paid_at,
+  }));
+
+  // 1) Before any deadline (2026-11-26 20:00 MYT = 12:00Z? Use 2026-11-27T01:00 MYT = 2026-11-26T17:00Z):
+  //    All 3 orders protected; earliest release = 2026-11-28T08:05:54.641Z (new-72 < fallback-72 < hist-168)
+  const beforeFin = computeSellerFinancials({
+    orders: mixedOrders,
+    orderItems: [],
+    payments,
+    payoutRequests: [],
+    disputes: [],
+    range: "7d",
+    now: new Date("2026-11-26T17:00:00Z"), // 27 Nov 01:00 MYT (Fri)
+  });
+  assert.equal(beforeFin.availableForPayoutSen, 0);
+  assert.equal(beforeFin.protectionReserveSen, 4410);
+  assert.equal(beforeFin.nextProtectionReleaseAt, "2026-11-28T08:05:54.641Z");
+
+  // MYT midnight chart bucket: paid_at 2026-11-26T16:30:00Z (27 Nov 00:30 MYT) MUST sit in 2026-11-27 (Fri)
+  const friBucket = beforeFin.chartPoints.find((p) => p.isoDate === "2026-11-27");
+  assert.ok(friBucket);
+  assert.equal(friBucket.label, "Fri");
+  assert.equal(friBucket.amountSen, 1500);
+
+  // 2) Exact release boundary on new-72 (2026-11-28T08:05:54.641Z):
+  //    new-72 releases -> RM14.70 available, fallback-72 + hist-168 remain protected
+  const at72Fin = computeSellerFinancials({
+    orders: mixedOrders,
+    orderItems: [],
+    payments,
+    payoutRequests: [],
+    disputes: [],
+    range: "7d",
+    now: new Date("2026-11-28T08:05:54.641Z"),
+  });
+  assert.equal(at72Fin.availableForPayoutSen, 1470);
+  assert.equal(at72Fin.protectionReserveSen, 2940);
+  assert.equal(at72Fin.nextProtectionReleaseAt, "2026-11-28T10:00:00.000Z");
+
+  // 3) After fallback-72, before hist-168: hist-168 stays protected until 29 Nov 19:41Z
+  const midFin = computeSellerFinancials({
+    orders: mixedOrders,
+    orderItems: [],
+    payments,
+    payoutRequests: [],
+    disputes: [],
+    range: "7d",
+    now: new Date("2026-11-29T19:41:31.103Z"),
+  });
+  assert.equal(midFin.availableForPayoutSen, 2940);
+  assert.equal(midFin.protectionReserveSen, 1470);
+  assert.equal(midFin.nextProtectionReleaseAt, "2026-11-29T19:41:31.104Z");
+
+  // 4) Exact 168h boundary: all released
+  const after168Fin = computeSellerFinancials({
+    orders: mixedOrders,
+    orderItems: [],
+    payments,
+    payoutRequests: [],
+    disputes: [],
+    range: "7d",
+    now: new Date("2026-11-29T19:41:31.104Z"),
+  });
+  assert.equal(after168Fin.availableForPayoutSen, 4410);
+  assert.equal(after168Fin.protectionReserveSen, 0);
+  assert.equal(after168Fin.nextProtectionReleaseAt, null);
+});

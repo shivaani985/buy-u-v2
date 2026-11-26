@@ -173,10 +173,17 @@ function mapTransactionStatus(
   return { label: orderStatus, tone: "muted" };
 }
 
+const MYT_OFFSET_MS = 8 * 60 * 60 * 1000;
+
+function toMytShiftedDate(date: Date): Date {
+  return new Date(date.getTime() + MYT_OFFSET_MS);
+}
+
 function toDayKey(date: Date): string {
-  const y = date.getUTCFullYear();
-  const m = String(date.getUTCMonth() + 1).padStart(2, "0");
-  const d = String(date.getUTCDate()).padStart(2, "0");
+  const myt = toMytShiftedDate(date);
+  const y = myt.getUTCFullYear();
+  const m = String(myt.getUTCMonth() + 1).padStart(2, "0");
+  const d = String(myt.getUTCDate()).padStart(2, "0");
   return `${y}-${m}-${d}`;
 }
 
@@ -286,15 +293,16 @@ export function computeSellerFinancials(input: {
   let maturedCompletedNetSen = 0;
   let verifiedOrderCount = 0;
 
-  // Prepare 7-day buckets ending at `now` (used for Weekly Sales chart)
+  // Prepare 7-day buckets ending at `now` in Asia/Kuala_Lumpur (UTC+8)
   const dayBuckets = new Map<string, SalesChartPoint>();
   const chartDays = 7;
   for (let offset = chartDays - 1; offset >= 0; offset--) {
     const d = new Date(nowMs - offset * 24 * 60 * 60 * 1000);
     const key = toDayKey(d);
+    const myt = toMytShiftedDate(d);
     dayBuckets.set(key, {
       isoDate: key,
-      label: WEEKDAY_LABELS[d.getUTCDay()] ?? key.slice(5),
+      label: WEEKDAY_LABELS[myt.getUTCDay()] ?? key.slice(5),
       amountSen: 0,
     });
   }
