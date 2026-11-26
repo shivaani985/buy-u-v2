@@ -70,8 +70,8 @@ export function PaymentControls({ checkoutId, orderId, deadline, now, underRevie
   );
 }
 
-export function OrderContact({ orderId, code, recipientId, listingId, seller }: {
-  orderId: string; code: string; recipientId: string; listingId?: string | null; seller?: boolean;
+export function OrderContact({ orderId, orderItemId, recipientId, seller }: {
+  orderId: string; orderItemId?: string; recipientId: string; seller?: boolean;
 }) {
   const router = useRouter();
   const [busy, setBusy] = useState(false);
@@ -81,8 +81,7 @@ export function OrderContact({ orderId, code, recipientId, listingId, seller }: 
     setError("");
     try {
       const result = await startConversationAction({
-        sellerId: recipientId, listingId, orderId,
-        initialMessage: `Hi, I'm messaging about order #${code}.`,
+        sellerId: recipientId, orderId, orderItemId,
       });
       if (result.ok && result.href) router.push(result.href);
       else setError(result.error ?? "Could not open this conversation.");
@@ -93,8 +92,10 @@ export function OrderContact({ orderId, code, recipientId, listingId, seller }: 
     }
   }
   return <div>
-    <button type="button" className={orderButton} onClick={contact} disabled={busy}>
-      <MessageCircle className="size-4" aria-hidden="true" />{busy ? "Opening chat…" : seller ? "Contact Customer" : "Contact Seller"}
+    <button type="button" className={orderItemId
+      ? "inline-flex min-h-9 items-center gap-1.5 rounded-lg px-2 py-1 text-xs font-bold text-brand-purple hover:bg-[#F4F1FA] disabled:opacity-50"
+      : orderButton} onClick={contact} disabled={busy}>
+      <MessageCircle className="size-4" aria-hidden="true" />{busy ? "Opening chat…" : orderItemId ? "Chat about item" : seller ? "Contact Buyer" : "Contact Seller"}
     </button>
     {error && <p role="alert" className="mt-1 max-w-60 text-xs text-red-800">{error}</p>}
   </div>;

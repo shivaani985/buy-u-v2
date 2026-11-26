@@ -45,11 +45,14 @@ test("Guest discovery and photo access fail closed before querying notices", () 
 
 test("Chat resolves the active donor, checks blocking, reuses the pair and skips automated messages", () => {
   const actions = read("src/app/messages/actions.ts");
+  const open = actions.slice(actions.indexOf("export async function startConversationAction"), actions.indexOf("export async function sendMessageAction"));
+  const migration = read("docs/sql/phase-10m-contextual-messaging.sql");
   assert.match(actions, /if \(freeNoticeId\)[\s\S]*?eq\("status", "active"\)[\s\S]*?peerId = notice\.contributor_id/);
   assert.match(actions, /checkBlockedBidirectional\(supabase, userId, peerId\)/);
-  assert.match(actions, /insertErr\.code === "23505"/);
-  assert.match(actions, /const trimmedInitial = freeNoticeId \? ""/);
-  assert.doesNotMatch(actions, /create_free_notice_claim_atomic|create_cart_checkout_atomic/);
+  assert.match(open, /rpc\("open_contextual_conversation"/);
+  assert.match(migration, /pg_advisory_xact_lock\(hashtextextended\('chat-pair:'/);
+  assert.match(migration, /EXCEPTION WHEN unique_violation/);
+  assert.doesNotMatch(open, /sendMessageAction|from\("messages"\)|create_free_notice_claim_atomic|create_cart_checkout_atomic/);
 });
 
 test("Free Items embeds the exact migration and retains the rollback and access controls", () => {

@@ -3,6 +3,7 @@ import { formatVariationOptionLabel } from "@/lib/seller/variations";
 import { getPublicSupabaseEnv } from "@/lib/supabase/env";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { reconcileExpiredOfferReservations } from "@/lib/supabase/service";
+import { chatPreview, loadChatReferences, type ChatReference } from "./context";
 import type { AuthSessionSummary } from "@/types/marketplace";
 import {
   computeOfferExpiresAt,
@@ -66,7 +67,10 @@ export interface ConversationListItem {
   isBlocked: boolean;
 }
 
+export const CHAT_MESSAGE_FIELDS = "id,conversation_id,sender_id,body,image_paths,listing_id,order_id,free_notice_id,service_request_id,edited_at,created_at";
+
 export interface ChatMessageItem {
+  reference?: ChatReference;
   id: string;
   conversationId: string;
   senderId: string;
@@ -81,6 +85,7 @@ export interface ChatMessageItem {
 }
 
 export interface MessagesPageData {
+  serverNow: number;
   eligibility: MessagingEligibilityResult;
   conversations: ConversationListItem[];
   activeConversationId: string | null;
@@ -181,10 +186,11 @@ export function mapRawOffer(
   };
 }
 
-export function mapRawMessage(row: RawMessageRow): ChatMessageItem {
+export function mapRawMessage(row: RawMessageRow, reference?: ChatReference): ChatMessageItem {
   return {
     id: row.id,
     conversationId: row.conversation_id,
+    reference,
     senderId: row.sender_id,
     body: row.body ?? "",
     imagePaths: Array.isArray(row.image_paths) ? row.image_paths : [],
@@ -201,10 +207,12 @@ export async function getMessagesPageData(
   session: AuthSessionSummary,
   options: { requestedConversationId?: string | null; requestedListingId?: string | null } = {}
 ): Promise<MessagesPageData> {
+  const serverNow = Date.now();
   const eligibility = evaluateMessagingEligibility(session);
 
   if (!eligibility.eligible || !eligibility.userId) {
     return {
+      serverNow,
       eligibility,
       conversations: [],
       activeConversationId: null,
@@ -220,6 +228,7 @@ export async function getMessagesPageData(
   const supabase = await createSupabaseServerClient();
   if (!env || !supabase) {
     return {
+      serverNow,
       eligibility,
       conversations: [],
       activeConversationId: null,
@@ -258,6 +267,7 @@ export async function getMessagesPageData(
 
   if (convRes.error) {
     return {
+      serverNow,
       eligibility,
       conversations: [],
       activeConversationId: null,
@@ -286,6 +296,7 @@ export async function getMessagesPageData(
 
   if (convRows.length === 0) {
     return {
+      serverNow,
       eligibility,
       conversations: [],
       activeConversationId: null,
@@ -331,9 +342,7 @@ export async function getMessagesPageData(
       activeConversationId
         ? supabase
             .from("messages")
-            .select(
-              "id,conversation_id,sender_id,body,image_paths,listing_id,order_id,free_notice_id,service_request_id,edited_at,created_at"
-            )
+            .select(CHAT_MESSAGE_FIELDS)
             .eq("conversation_id", activeConversationId)
             .order("created_at", { ascending: false })
             .limit(MESSAGE_PAGE_SIZE + 1)
@@ -380,11 +389,12 @@ export async function getMessagesPageData(
   // Latest message and latest listing_id per conversation
   const latestMsgByConv = new Map<
     string,
-    { body: string; hasFiles: boolean; senderId: string; createdAt: string }
+    { id: string; body: string; hasFiles: boolean; senderId: string; createdAt: string }
   >();
   const latestListingByConv = new Map<string, string>();
 
   for (const m of (recentMsgsRes.data ?? []) as Array<{
+    id: string;
     conversation_id: string;
     sender_id: string;
     body: string | null;
@@ -394,6 +404,7 @@ export async function getMessagesPageData(
   }>) {
     if (!latestMsgByConv.has(m.conversation_id)) {
       latestMsgByConv.set(m.conversation_id, {
+        id: m.id,
         body: (m.body ?? "").trim(),
         hasFiles: Array.isArray(m.image_paths) && m.image_paths.length > 0,
         senderId: m.sender_id,
@@ -410,7 +421,11 @@ export async function getMessagesPageData(
   const trimmedActiveDesc = hasOlderMessages
     ? rawActiveMessages.slice(0, MESSAGE_PAGE_SIZE)
     : rawActiveMessages;
-  const activeMessages = trimmedActiveDesc.reverse().map(mapRawMessage);
+  const contexts = await loadChatReferences(supabase, [
+    ...trimmedActiveDesc.map((message) => message.id),
+    ...[...latestMsgByConv.values()].map((message) => message.id),
+  ]);
+  const activeMessages = trimmedActiveDesc.reverse().map((row) => mapRawMessage(row, contexts.get(row.id)));
   const rawOfferRows = (activeOffersRes.data ?? []) as RawOfferRow[];
   const activeOffers = rawOfferRows.map((row) =>
     mapRawOffer(
@@ -433,13 +448,9 @@ export async function getMessagesPageData(
     listingIdsToFetch.add(options.requestedListingId);
   }
 
-  const activeListingId =
-    (options.requestedListingId && isValidUuid(options.requestedListingId)
-      ? options.requestedListingId
-      : null) ??
-    (activeConversationId
-      ? latestListingByConv.get(activeConversationId) ?? null
-      : null);
+  // Only an explicit bargaining entry can choose a listing for the offer form.
+  const activeListingId = requestedId === activeConversationId && options.requestedListingId &&
+    isValidUuid(options.requestedListingId) ? options.requestedListingId : null;
 
   let listingsMap = new Map<
     string,
@@ -565,9 +576,8 @@ export async function getMessagesPageData(
     const linkedId = latestListingByConv.get(c.id) ?? null;
     const linkedTitle = linkedId ? listingsMap.get(linkedId)?.title ?? null : null;
 
-    const preview = latest
-      ? latest.body || (latest.hasFiles ? "Sent an attachment" : "New message")
-      : "No messages yet";
+    const context = latest ? contexts.get(latest.id) : undefined;
+    const preview = latest ? chatPreview(latest.body, Number(latest.hasFiles), context) : "No messages yet";
 
     return {
       id: c.id,
@@ -592,7 +602,7 @@ export async function getMessagesPageData(
       lastMessageSenderId: latest?.senderId ?? null,
       unreadCount: byConversation[c.id.toLowerCase()] ?? 0,
       linkedListingId: linkedId,
-      linkedListingTitle: linkedTitle,
+      linkedListingTitle: context?.title ?? linkedTitle,
       isBlocked: blockedPeers.has(peerId),
     };
   });
@@ -600,7 +610,8 @@ export async function getMessagesPageData(
   const activeListingRow = activeListingId
     ? listingsMap.get(activeListingId) ?? null
     : null;
-  const activeListing: LinkedListingContext | null = activeListingRow
+  const activePeer = activeConv ? (activeConv.member_a === userId ? activeConv.member_b : activeConv.member_a) : null;
+  const activeListing: LinkedListingContext | null = activeListingRow?.seller_id === activePeer && activeListingRow
     ? {
         id: activeListingRow.id,
         title: activeListingRow.title,
@@ -631,10 +642,8 @@ export async function getMessagesPageData(
     : null;
 
   const enrichedOffers = activeOffers.map((offer) => {
-    const nextLabel =
-      offer.variantId && variantLabelMap.has(offer.variantId)
-        ? variantLabelMap.get(offer.variantId) ?? offer.variantLabel ?? null
-        : offer.variantLabel ?? null;
+    const nextLabel = offer.variantLabel ??
+      (offer.variantId ? variantLabelMap.get(offer.variantId) ?? null : null);
     const nextImageUrl =
       offer.variantImageUrl ??
       (offer.variantId && variantImageMap.has(offer.variantId)
@@ -650,6 +659,7 @@ export async function getMessagesPageData(
   });
 
   return {
+    serverNow,
     eligibility,
     conversations,
     activeConversationId,

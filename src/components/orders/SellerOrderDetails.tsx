@@ -41,8 +41,7 @@ export function SellerOrderDetails({ order, back, mode, serverNow, timeline }: {
   return (
     <OrderDetailsLayout back={back} backLabel="Back to Seller Orders" code={order.orderCode} name={order.buyerName}
       badge={presentation.badge} date={order.createdAt} actions={<>
-        {order.paymentVerified && <OrderContact seller orderId={order.id} code={order.orderCode}
-          recipientId={order.buyerId} listingId={order.items[0]?.listingId} />}
+        {order.paymentVerified && <OrderContact seller orderId={order.id} recipientId={order.buyerId} />}
         <SellerCompleteOrder key={order.id} id={order.id} code={order.orderCode} mode={mode} lockedUntil={order.pinLockedUntil}
           failedAttempts={order.pinFailedAttempts} now={now} eligible={eligible} />
       </>}
@@ -72,7 +71,7 @@ export function SellerOrderDetails({ order, back, mode, serverNow, timeline }: {
         {timeline}
         {order.status === "handed_over" && <p className="mt-2 text-sm text-ink-secondary">{order.handedOverAt ? "PIN verified on " + formatMytDateTime(order.handedOverAt) + ". " : ""}Waiting for the buyer to confirm receipt under the previous order flow.</p>}
       </OrderSection>
-      <OrderSection title="Purchased items"><OrderItems items={order.items} /></OrderSection>
+      <OrderSection title="Purchased items"><OrderItems items={order.items} itemAction={order.paymentVerified ? (item) => <OrderContact seller orderId={order.id} orderItemId={item.id} recipientId={order.buyerId} /> : undefined} /></OrderSection>
       {order.paymentVerified && <OrderFulfilment id={order.id} area={order.collectionAreaName} service={order.isServiceOrder} items={order.items} />}
       {(order.dispute || order.refund) && <details id="dispute" open className={orderPanel}>
         <summary className="cursor-pointer px-4 py-3 font-bold">Refund &amp; Dispute</summary>

@@ -251,7 +251,7 @@ export function BuyerOrderDetails({ order, back, mode, serverNow, startReview, t
     <OrderDetailsLayout back={back} backLabel="Back to My Orders" code={order.orderCode} name={order.sellerName}
       date={order.createdAt} badge={presentation.badge}
       actions={fulfilmentAvailable && (
-        <OrderContact orderId={order.id} code={order.orderCode} recipientId={order.sellerId} listingId={order.items[0]?.listingId} />
+        <OrderContact orderId={order.id} recipientId={order.sellerId} />
       )}
       aside={<>
         {canReveal && mode !== "unavailable" && <CompletionPin key={order.id} orderId={order.id} mode={mode} />}
@@ -291,7 +291,7 @@ export function BuyerOrderDetails({ order, back, mode, serverNow, startReview, t
       <OrderSection title="Order progress">
         {timeline}
       </OrderSection>
-      <OrderSection title="Purchased items"><OrderItems items={order.items} /></OrderSection>
+      <OrderSection title="Purchased items"><OrderItems items={order.items} itemAction={(item) => <OrderContact orderId={order.id} orderItemId={item.id} recipientId={order.sellerId} />} /></OrderSection>
       {fulfilmentAvailable && <OrderFulfilment id={order.id} area={order.collectionAreaName} service={order.isServiceOrder} items={order.items} />}
       {(order.dispute || order.refund) && <details id="dispute" open className={orderPanel}>
         <summary className="cursor-pointer px-4 py-3 font-bold">Refund &amp; Dispute</summary>

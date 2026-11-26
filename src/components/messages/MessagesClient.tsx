@@ -2,23 +2,19 @@
 
 import { useEffect, useRef, useState, useTransition } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import {
   AlertCircle,
   ArrowLeft,
   Ban,
   Check,
-  ExternalLink,
   FileText,
-  Info,
   Loader2,
-  MapPin,
   MessageCircle,
   Paperclip,
   RefreshCw,
   Search,
   Send,
-  ShieldCheck,
-  Store,
   Tag,
   X,
 } from "lucide-react";
@@ -35,6 +31,8 @@ import {
 } from "@/app/messages/offer-actions";
 import { startOfferToyyibPayCheckoutAction } from "@/app/checkout/actions";
 import { OfferCard } from "@/components/messages/OfferCard";
+import { ChatReferenceCard } from "@/components/messages/ChatReferenceCard";
+import { chatPreview, loadChatReferences, type ChatReference } from "@/lib/messages/context";
 import type {
   ChatMessageItem,
   ConversationListItem,
@@ -56,8 +54,9 @@ import {
   mergeOrderedMessages,
   validateAttachmentFileMeta,
 } from "@/lib/messages/validation";
-import { formatRelativeTime, formatSenToRm } from "@/lib/format";
+import { formatSenToRm, resolvePublicStorageUrl } from "@/lib/format";
 import { getSupabaseBrowserClient } from "@/lib/supabase/client";
+import { getPublicSupabaseEnv } from "@/lib/supabase/env";
 
 interface MessagesClientProps {
   currentUserId: string;
@@ -67,6 +66,9 @@ interface MessagesClientProps {
   initialOffers: OfferCardItem[];
   initialHasOlder: boolean;
   activeListing: LinkedListingContext | null;
+  initialDraft: { key: string; reference: ChatReference } | null;
+  initialDraftError: string | null;
+  renderedAt: number;
   hasExplicitConversationParam: boolean;
   initialOpenOffer?: boolean;
   initialVariantId?: string | null;
@@ -85,10 +87,10 @@ interface OptimisticMessage {
   files: File[];
   uploadedPaths: string[];
   attachments: OptimisticAttachment[];
-  listingId: string | null;
+  reference: ChatReference | null;
+  draftKey?: string;
   status: "sending" | "failed";
   error?: string;
-  createdAt: string;
 }
 
 const CONV_ID_RE =
@@ -105,6 +107,7 @@ function formatMessageTime(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "";
   return new Intl.DateTimeFormat("en-MY", {
+    timeZone: "Asia/Kuala_Lumpur",
     day: "numeric",
     month: "short",
     hour: "numeric",
@@ -134,13 +137,6 @@ function getCurrentTimestampMs(): number {
   return Date.now();
 }
 
-function createOptimisticClientId(): string {
-  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-    return `opt-${crypto.randomUUID()}`;
-  }
-  return `opt-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
 export function MessagesClient({
   currentUserId,
   initialConversations,
@@ -149,15 +145,25 @@ export function MessagesClient({
   initialOffers,
   initialHasOlder,
   activeListing,
+  initialDraft,
+  initialDraftError,
+  renderedAt,
   hasExplicitConversationParam,
   initialOpenOffer = false,
   initialVariantId = null,
 }: MessagesClientProps) {
+  const router = useRouter();
+  const [conversationSeed, setConversationSeed] = useState(initialConversations);
   const [conversations, setConversations] =
     useState<ConversationListItem[]>(initialConversations);
+  if (conversationSeed !== initialConversations) {
+    setConversationSeed(initialConversations);
+    setConversations(initialConversations);
+  }
+  const knownConversationIds = useRef(new Set(initialConversations.map((conversation) => conversation.id)));
   const [messages, setMessages] = useState<ChatMessageItem[]>(initialMessages);
   const [offers, setOffers] = useState<OfferCardItem[]>(initialOffers);
-  const [nowMs, setNowMs] = useState<number>(() => getCurrentTimestampMs());
+  const [nowMs, setNowMs] = useState<number>(renderedAt);
   const [offerPanelOpen, setOfferPanelOpen] = useState(
     Boolean(initialOpenOffer)
   );
@@ -165,13 +171,19 @@ export function MessagesClient({
     activeListing?.hasVariants && activeListing.variants.length > 0
       ? activeListing.variants.find(
           (v) => v.id === initialVariantId && v.active
-        ) ??
-        activeListing.variants.find((v) => v.active && v.availableStock > 0) ??
-        activeListing.variants[0]
+        ) ?? (initialVariantId ? null :
+          activeListing.variants.find((v) => v.active && v.availableStock > 0) ?? null)
       : null;
   const [selectedOfferVariantId, setSelectedOfferVariantId] = useState<
     string | null
   >(defaultOfferVariant?.id ?? null);
+  const offerEntry = activeListing ? `${activeListing.id}:${initialVariantId ?? ""}` : "";
+  const [previousOfferEntry, setPreviousOfferEntry] = useState(offerEntry);
+  if (offerEntry !== previousOfferEntry) {
+    setPreviousOfferEntry(offerEntry);
+    setOfferPanelOpen(initialOpenOffer);
+    setSelectedOfferVariantId(defaultOfferVariant?.id ?? null);
+  }
   const [offerAmountRm, setOfferAmountRm] = useState("");
   const [offerFormError, setOfferFormError] = useState<string | null>(null);
   const [isSubmittingOffer, setIsSubmittingOffer] = useState(false);
@@ -190,7 +202,17 @@ export function MessagesClient({
   const [realtimeStatus, setRealtimeStatus] = useState<
     "connecting" | "live" | "reconnecting"
   >("connecting");
-  const [showMobileDetails, setShowMobileDetails] = useState(false);
+  const [dismissedDraft, setDismissedDraft] = useState<string>();
+  const draft = initialDraft && initialDraft.key !== dismissedDraft ? initialDraft : null;
+  const sending = optimisticMessages.some((message) => message.status === "sending");
+  const sendLock = useRef(false);
+  const isChatVisible = useRef(false);
+  const chatRef = useRef<HTMLDivElement>(null);
+  const referenceIds = messages.filter((message) => message.reference || !message.body).map((message) => message.id).join(",");
+
+  useEffect(() => {
+    knownConversationIds.current = new Set(initialConversations.map((conversation) => conversation.id));
+  }, [initialConversations]);
   const [mobileShowChat, setMobileShowChat] = useState<boolean>(
     hasExplicitConversationParam && Boolean(initialActiveConversationId)
   );
@@ -199,17 +221,75 @@ export function MessagesClient({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
+  useEffect(() => {
+    const chat = chatRef.current;
+    if (!mobileShowChat || !chat) return;
+    const viewport = window.visualViewport;
+    const resize = () => {
+      chat.style.setProperty("--chat-height", `${viewport?.height ?? window.innerHeight}px`);
+      chat.style.setProperty("--chat-top", `${viewport?.offsetTop ?? 0}px`);
+    };
+    resize();
+    viewport?.addEventListener("resize", resize);
+    viewport?.addEventListener("scroll", resize);
+    window.addEventListener("resize", resize);
+    return () => {
+      viewport?.removeEventListener("resize", resize);
+      viewport?.removeEventListener("scroll", resize);
+      window.removeEventListener("resize", resize);
+    };
+  }, [mobileShowChat]);
+
+  useEffect(() => {
+    const supabase = getSupabaseBrowserClient();
+    if (!referenceIds || !supabase) return;
+    let live = true;
+    async function refreshReferences() {
+      if (!supabase) return;
+      const refreshed = await loadChatReferences(supabase, referenceIds.split(","));
+      if (!live || !refreshed.size) return;
+      setMessages((current) => {
+        let changed = false;
+        const next = current.map((message) => {
+          const reference = refreshed.get(message.id);
+          if (!reference || JSON.stringify(reference) === JSON.stringify(message.reference)) return message;
+          changed = true;
+          return { ...message, reference };
+        });
+        return changed ? next : current;
+      });
+    }
+    const timer = window.setInterval(refreshReferences, 30_000);
+    window.addEventListener("focus", refreshReferences);
+    return () => {
+      live = false;
+      window.clearInterval(timer);
+      window.removeEventListener("focus", refreshReferences);
+    };
+  }, [referenceIds]);
+
+  function clearPreparedReference(key: string) {
+    setDismissedDraft(key);
+    const url = new URL(window.location.href);
+    if (url.searchParams.get("draft") === key) {
+      for (const param of ["ref", "target", "item", "draft"]) url.searchParams.delete(param);
+      if (url.searchParams.get("bargain") !== "1") url.searchParams.delete("variant");
+      window.history.replaceState(null, "", url);
+    }
+  }
+
   const activeConversation =
     conversations.find((c) => c.id === initialActiveConversationId) ?? null;
 
-  // Refresh countdown timers every 30 seconds while offers exist
+  // Refresh offer countdowns and the expiry of displayed Free Items.
+  const hasTimedCards = offers.length > 0 || Boolean(referenceIds) || Boolean(draft?.reference.expiresAt);
   useEffect(() => {
-    if (offers.length === 0) return;
+    if (!hasTimedCards) return;
     const timer = window.setInterval(() => {
       setNowMs(getCurrentTimestampMs());
     }, 30000);
     return () => window.clearInterval(timer);
-  }, [offers.length]);
+  }, [hasTimedCards]);
 
   // Auto-scroll smoothly when messages, offers, or optimistic bubbles change
   useEffect(() => {
@@ -221,25 +301,27 @@ export function MessagesClient({
     initialActiveConversationId,
   ]);
 
-  // Mark active conversation unread notifications as read on open and sync navbar
+  // The default inbox selection is only visible on desktop.
   useEffect(() => {
-    if (!initialActiveConversationId) return;
+    const desktop = window.matchMedia("(min-width: 1024px)");
     let cancelled = false;
-    void markConversationReadAction(initialActiveConversationId).then((res) => {
-      if (cancelled || !res.ok) return;
-      setConversations((prev) =>
-        prev.map((c) =>
-          c.id === initialActiveConversationId ? { ...c, unreadCount: 0 } : c
-        )
-      );
-      if (typeof res.remainingUnread === "number") {
-        emitUnreadUpdate({ count: res.remainingUnread });
-      }
-    });
+    function syncVisibility() {
+      isChatVisible.current = desktop.matches || mobileShowChat;
+      if (!initialActiveConversationId || !isChatVisible.current) return;
+      void markConversationReadAction(initialActiveConversationId).then((res) => {
+        if (cancelled || !isChatVisible.current || !res.ok) return;
+        setConversations((prev) => prev.map((conv) =>
+          conv.id === initialActiveConversationId ? { ...conv, unreadCount: 0 } : conv));
+        if (typeof res.remainingUnread === "number") emitUnreadUpdate({ count: res.remainingUnread });
+      });
+    }
+    syncVisibility();
+    desktop.addEventListener("change", syncVisibility);
     return () => {
       cancelled = true;
+      desktop.removeEventListener("change", syncVisibility);
     };
-  }, [initialActiveConversationId]);
+  }, [initialActiveConversationId, mobileShowChat]);
 
   // Authenticated Supabase Realtime subscription (messages + unread notifications)
   useEffect(() => {
@@ -271,82 +353,82 @@ export function MessagesClient({
       }
 
       if (initialActiveConversationId) {
+        const receiveMessage = async (payload: { eventType: "INSERT" | "UPDATE"; new: unknown }) => {
+          const raw = payload.new as {
+            id: string;
+            conversation_id: string;
+            sender_id: string;
+            body: string | null;
+            image_paths: string[] | null;
+            listing_id: string | null;
+            order_id: string | null;
+            free_notice_id: string | null;
+            service_request_id: string | null;
+            edited_at: string | null;
+            created_at: string;
+          };
+          if (!raw?.id) return;
+
+          const references = await loadChatReferences(supabase, [raw.id]);
+          if (disposed) return;
+          const incoming: ChatMessageItem = {
+            id: raw.id,
+            reference: references.get(raw.id),
+            conversationId: raw.conversation_id,
+            senderId: raw.sender_id,
+            body: raw.body ?? "",
+            imagePaths: Array.isArray(raw.image_paths)
+              ? raw.image_paths
+              : [],
+            listingId: raw.listing_id,
+            orderId: raw.order_id,
+            freeNoticeId: raw.free_notice_id,
+            serviceRequestId: raw.service_request_id,
+            editedAt: raw.edited_at,
+            createdAt: raw.created_at,
+          };
+
+          setMessages((prev) => {
+            const previous = prev.find((message) => message.id === incoming.id);
+            return mergeOrderedMessages(prev, [{ ...incoming, reference: incoming.reference ?? previous?.reference }]);
+          });
+          setConversations((prev) => {
+            const updated = prev.map((c) =>
+              c.id === incoming.conversationId && incoming.createdAt >= c.lastMessageAt
+                ? {
+                    ...c,
+                    lastMessageAt: incoming.createdAt,
+                    lastMessagePreview: chatPreview(incoming.body, incoming.imagePaths.length, incoming.reference),
+                    lastMessageSenderId: incoming.senderId,
+                  }
+                : c
+            );
+            return updated.sort(
+              (a, b) =>
+                new Date(b.lastMessageAt).getTime() -
+                new Date(a.lastMessageAt).getTime()
+            );
+          });
+
+          if (payload.eventType === "INSERT" && isChatVisible.current && incoming.senderId !== currentUserId) {
+            void markConversationReadAction(incoming.conversationId).then(
+              (res) => {
+                if (res.ok && typeof res.remainingUnread === "number") {
+                  emitUnreadUpdate({ count: res.remainingUnread });
+                }
+              }
+            );
+          }
+        };
+        const messageFilter = {
+          schema: "public",
+          table: "messages",
+          filter: `conversation_id=eq.${initialActiveConversationId}`,
+        };
         msgChannel = supabase
           .channel(`chat-messages-${initialActiveConversationId}`)
-          .on(
-            "postgres_changes",
-            {
-              event: "INSERT",
-              schema: "public",
-              table: "messages",
-              filter: `conversation_id=eq.${initialActiveConversationId}`,
-            },
-            (payload) => {
-              const raw = payload.new as {
-                id: string;
-                conversation_id: string;
-                sender_id: string;
-                body: string | null;
-                image_paths: string[] | null;
-                listing_id: string | null;
-                order_id: string | null;
-                free_notice_id: string | null;
-                service_request_id: string | null;
-                edited_at: string | null;
-                created_at: string;
-              };
-              if (!raw?.id) return;
-
-              const incoming: ChatMessageItem = {
-                id: raw.id,
-                conversationId: raw.conversation_id,
-                senderId: raw.sender_id,
-                body: raw.body ?? "",
-                imagePaths: Array.isArray(raw.image_paths)
-                  ? raw.image_paths
-                  : [],
-                listingId: raw.listing_id,
-                orderId: raw.order_id,
-                freeNoticeId: raw.free_notice_id,
-                serviceRequestId: raw.service_request_id,
-                editedAt: raw.edited_at,
-                createdAt: raw.created_at,
-              };
-
-              setMessages((prev) => mergeOrderedMessages(prev, [incoming]));
-              setConversations((prev) => {
-                const updated = prev.map((c) =>
-                  c.id === incoming.conversationId
-                    ? {
-                        ...c,
-                        lastMessageAt: incoming.createdAt,
-                        lastMessagePreview:
-                          incoming.body ||
-                          (incoming.imagePaths.length > 0
-                            ? "Sent an attachment"
-                            : "New message"),
-                        lastMessageSenderId: incoming.senderId,
-                      }
-                    : c
-                );
-                return updated.sort(
-                  (a, b) =>
-                    new Date(b.lastMessageAt).getTime() -
-                    new Date(a.lastMessageAt).getTime()
-                );
-              });
-
-              if (incoming.senderId !== currentUserId) {
-                void markConversationReadAction(incoming.conversationId).then(
-                  (res) => {
-                    if (res.ok && typeof res.remainingUnread === "number") {
-                      emitUnreadUpdate({ count: res.remainingUnread });
-                    }
-                  }
-                );
-              }
-            }
-          )
+          .on("postgres_changes", { ...messageFilter, event: "INSERT" }, receiveMessage)
+          .on("postgres_changes", { ...messageFilter, event: "UPDATE" }, receiveMessage)
           .subscribe((status) => {
             if (disposed) return;
             if (status === "SUBSCRIBED") {
@@ -387,7 +469,13 @@ export function MessagesClient({
             const cidMatch = row.href?.match(CONV_ID_RE);
             const targetConvId = cidMatch ? cidMatch[0].toLowerCase() : null;
 
+            if (targetConvId && !knownConversationIds.current.has(targetConvId)) {
+              router.refresh();
+              return;
+            }
+
             if (
+              isChatVisible.current &&
               targetConvId &&
               initialActiveConversationId &&
               targetConvId === initialActiveConversationId.toLowerCase()
@@ -475,17 +563,15 @@ export function MessagesClient({
                 listingId: raw.listing_id ?? "",
                 variantId: (raw as { variant_id?: string | null }).variant_id ?? null,
                 variantLabel: (() => {
-                  const vId = (raw as { variant_id?: string | null }).variant_id;
-                  const match = vId
-                    ? activeListing?.variants.find((v) => v.id === vId)
-                    : null;
-                  if (match) return match.label;
                   const snap = (raw as { variant_snapshot?: Record<string, string> | null }).variant_snapshot;
-                  return snap && typeof snap === "object"
-                    ? Object.values(snap).filter(Boolean).join(" · ") || null
-                    : null;
+                  if (snap) return Object.values(snap).filter(Boolean).join(" · ") || null;
+                  const vId = (raw as { variant_id?: string | null }).variant_id;
+                  return activeListing?.variants.find((v) => v.id === vId)?.label ?? null;
                 })(),
                 variantImageUrl: (() => {
+                  const path = (raw as { variant_image_path?: string | null }).variant_image_path;
+                  const storedImage = resolvePublicStorageUrl("listings", path, getPublicSupabaseEnv()?.url);
+                  if (storedImage || raw.listing_id !== activeListing?.id) return storedImage;
                   const vId = (raw as { variant_id?: string | null }).variant_id;
                   const match = vId
                     ? activeListing?.variants.find((v) => v.id === vId)
@@ -535,7 +621,7 @@ export function MessagesClient({
       if (notifChannel) void supabase.removeChannel(notifChannel);
       if (offersChannel) void supabase.removeChannel(offersChannel);
     };
-  }, [initialActiveConversationId, currentUserId]);
+  }, [initialActiveConversationId, currentUserId, activeListing?.id, activeListing?.imageUrl, activeListing?.variants, router]);
 
   const filteredConversations = conversations.filter((c) => {
     const q = searchQuery.trim().toLowerCase();
@@ -644,10 +730,11 @@ export function MessagesClient({
     // 2. Persist message row & create recipient notification server-side
     try {
       const res = await sendMessageAction({
+        messageId: opt.clientId,
         conversationId: opt.conversationId,
         body: opt.body,
         attachmentPaths: uploadedPaths,
-        listingId: opt.listingId,
+        reference: opt.reference,
       });
 
       if (!res.ok || !res.message) {
@@ -667,6 +754,10 @@ export function MessagesClient({
       }
 
       const persisted = res.message;
+      if (opt.draftKey) clearPreparedReference(opt.draftKey);
+      setDraftBody("");
+      setSelectedFiles([]);
+      setComposerError(null);
       revokePreviews(opt);
       setOptimisticMessages((prev) =>
         prev.filter((m) => m.clientId !== opt.clientId)
@@ -674,15 +765,11 @@ export function MessagesClient({
       setMessages((prev) => mergeOrderedMessages(prev, [persisted]));
       setConversations((prev) => {
         const updated = prev.map((c) =>
-          c.id === persisted.conversationId
+          c.id === persisted.conversationId && persisted.createdAt >= c.lastMessageAt
             ? {
                 ...c,
                 lastMessageAt: persisted.createdAt,
-                lastMessagePreview:
-                  persisted.body ||
-                  (persisted.imagePaths.length > 0
-                    ? "Sent an attachment"
-                    : "New message"),
+                lastMessagePreview: chatPreview(persisted.body, persisted.imagePaths.length, persisted.reference),
                 lastMessageSenderId: persisted.senderId,
               }
             : c
@@ -709,56 +796,50 @@ export function MessagesClient({
     }
   }
 
+  function beginDelivery(message: OptimisticMessage) {
+    if (sendLock.current) return;
+    sendLock.current = true;
+    const existing = optimisticMessages.find((item) => item.clientId !== message.clientId);
+    if (existing) revokePreviews(existing);
+    setOptimisticMessages([{ ...message, status: "sending", error: undefined }]);
+    void deliverOptimisticMessage(message).catch(() => {
+      setOptimisticMessages((current) => current.map((item) => item.clientId === message.clientId
+        ? { ...item, status: "failed", error: "Connection error. Try sending again." } : item));
+    }).finally(() => { sendLock.current = false; });
+  }
+
   function handleSend(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
-    if (!activeConversation || activeConversation.isBlocked) return;
+    if (!activeConversation || sendLock.current || (activeConversation.isBlocked && draft?.reference.kind !== "order")) return;
     setComposerError(null);
 
     const trimmed = draftBody.trim();
-    if (trimmed.length === 0 && selectedFiles.length === 0) {
-      setComposerError("Write a message or attach a file before sending.");
+    if (!trimmed && selectedFiles.length === 0 && !draft) {
+      setComposerError("Write a message or add a reference or file before sending.");
+      return;
+    }
+    const failed = optimisticMessages.find((message) => message.status === "failed");
+    if (failed && failed.body === trimmed && failed.draftKey === draft?.key &&
+        failed.files.length === selectedFiles.length && failed.files.every((file, i) => file === selectedFiles[i])) {
+      beginDelivery(failed);
       return;
     }
 
-    const filesToSend = [...selectedFiles];
-    const attachments: OptimisticAttachment[] = filesToSend.map((f) => ({
-      name: f.name,
-      isImage: f.type.startsWith("image/"),
-      previewUrl: f.type.startsWith("image/") ? URL.createObjectURL(f) : null,
-    }));
-
-    const optimistic: OptimisticMessage = {
-      clientId: createOptimisticClientId(),
+    beginDelivery({
+      clientId: crypto.randomUUID(),
       conversationId: activeConversation.id,
       body: trimmed,
-      files: filesToSend,
+      files: [...selectedFiles],
       uploadedPaths: [],
-      attachments,
-      listingId: activeListing?.id ?? null,
+      attachments: selectedFiles.map((file) => ({
+        name: file.name,
+        isImage: file.type.startsWith("image/"),
+        previewUrl: file.type.startsWith("image/") ? URL.createObjectURL(file) : null,
+      })),
+      reference: draft?.reference ?? null,
+      draftKey: draft?.key,
       status: "sending",
-      createdAt: new Date().toISOString(),
-    };
-
-    // Immediate smooth UI update
-    setOptimisticMessages((prev) => [...prev, optimistic]);
-    setDraftBody("");
-    setSelectedFiles([]);
-
-    void deliverOptimisticMessage(optimistic);
-  }
-
-  function handleRetryOptimistic(clientId: string) {
-    const target = optimisticMessages.find((m) => m.clientId === clientId);
-    if (!target) return;
-    const retrying: OptimisticMessage = {
-      ...target,
-      status: "sending",
-      error: undefined,
-    };
-    setOptimisticMessages((prev) =>
-      prev.map((m) => (m.clientId === clientId ? retrying : m))
-    );
-    void deliverOptimisticMessage(retrying);
+    });
   }
 
   function handleDismissOptimistic(clientId: string) {
@@ -929,139 +1010,15 @@ export function MessagesClient({
     );
   }
 
-  const listingStatusText = !activeListing
-    ? null
-    : activeListing.status !== "published"
-      ? activeListing.status === "archived"
-        ? "Archived"
-        : "Unavailable"
-      : activeListing.kind === "service"
-        ? "Student Service"
-        : activeListing.availableStock !== null &&
-            activeListing.availableStock <= 0
-          ? "Out of Stock"
-          : `${activeListing.availableStock} available`;
-
-  const listingStatusColor =
-    activeListing &&
-    (activeListing.status !== "published" ||
-      (activeListing.availableStock !== null &&
-        activeListing.availableStock <= 0))
-      ? "text-[#B42318]"
-      : "text-[#008285]";
-
-  const listingDetailsPanel = activeConversation ? (
-    <div className="space-y-4">
-      {activeListing ? (
-        <div className="rounded-xl border border-[#ECEAF3] bg-white p-4">
-          <p className="text-[11px] font-bold uppercase tracking-wider text-[#6B6779]">
-            Linked Listing
-          </p>
-
-          <div className="mt-3 overflow-hidden rounded-xl border border-[#E6E3EE] bg-[#F7F6FA]">
-            <div className="aspect-[4/3] w-full">
-              {(activeOfferVariant?.imageUrl || activeListing.imageUrl) ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={activeOfferVariant?.imageUrl || activeListing.imageUrl || ""}
-                  alt={activeListing.title}
-                  className="h-full w-full object-cover"
-                />
-              ) : (
-                <div className="flex h-full w-full items-center justify-center text-xs font-semibold text-[#6B6779]">
-                  No Photo
-                </div>
-              )}
-            </div>
-          </div>
-
-          <Link
-            href={`/listings/${activeListing.id}`}
-            className="mt-3 block text-sm font-bold text-[#14121A] transition hover:text-[#4E2A84]"
-          >
-            {activeListing.title}
-          </Link>
-
-          <div className="mt-1.5 flex items-baseline justify-between gap-2">
-            <span className="text-base font-extrabold text-[#4E2A84]">
-              {formatSenToRm(activeListing.priceSen)}
-            </span>
-            {listingStatusText ? (
-              <span className={`text-xs font-bold ${listingStatusColor}`}>
-                {listingStatusText}
-              </span>
-            ) : null}
-          </div>
-
-          {activeListing.campusArea ? (
-            <p className="mt-2 flex items-center gap-1 text-xs text-[#6B6779]">
-              <MapPin className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-              <span>{activeListing.campusArea}</span>
-            </p>
-          ) : null}
-
-          <Link
-            href={`/listings/${activeListing.id}`}
-            className="mt-3 inline-flex w-full items-center justify-center gap-1.5 rounded-xl border border-[#E6E3EE] bg-white px-3 py-2 text-xs font-semibold text-[#14121A] transition hover:border-[#4E2A84] hover:text-[#4E2A84]"
-          >
-            <span>View Listing</span>
-            <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
-          </Link>
-        </div>
-      ) : null}
-
-      <div className="rounded-xl border border-[#ECEAF3] bg-white p-4">
-        <p className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-[#6B6779]">
-          <Store className="h-3.5 w-3.5 text-[#4E2A84]" aria-hidden="true" />
-          <span>Campus Member</span>
-        </p>
-
-        <div className="mt-3 flex items-center gap-3">
-          {activeConversation.peer.logoUrl ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
-              src={activeConversation.peer.logoUrl}
-              alt={activeConversation.peer.displayName}
-              className="h-10 w-10 shrink-0 rounded-xl border border-[#E6E3EE] object-cover"
-            />
-          ) : (
-            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#4E2A84] text-xs font-bold text-white">
-              {getInitials(
-                activeConversation.peer.shopName ||
-                  activeConversation.peer.displayName
-              )}
-            </div>
-          )}
-
-          <div className="min-w-0">
-            <p className="truncate text-sm font-bold text-[#14121A]">
-              {activeConversation.peer.shopName ||
-                activeConversation.peer.displayName}
-            </p>
-            <p className="flex items-center gap-1 text-xs text-[#6B6779]">
-              <ShieldCheck
-                className="h-3.5 w-3.5 shrink-0 text-[#00A3A6]"
-                aria-hidden="true"
-              />
-              <span className="truncate">{activeConversation.peer.badge}</span>
-            </p>
-            {activeConversation.peer.faculty ? (
-              <p className="text-xs text-[#6B6779]">
-                {activeConversation.peer.faculty}
-              </p>
-            ) : null}
-          </div>
-        </div>
-      </div>
-    </div>
-  ) : null;
-
   return (
-    <div className="grid grid-cols-1 overflow-hidden rounded-2xl border border-[#E6E3EE] bg-white lg:h-[680px] lg:grid-cols-12">
+    <div ref={chatRef} className={`grid min-w-0 grid-cols-1 overflow-hidden border border-[#E6E3EE] bg-white
+      lg:static lg:h-[min(72dvh,760px)] lg:min-h-[530px] lg:grid-cols-[minmax(240px,3fr)_minmax(0,7fr)] lg:rounded-2xl
+      ${mobileShowChat ? "max-lg:fixed max-lg:inset-x-0 max-lg:top-[var(--chat-top,0px)] max-lg:z-[80] max-lg:h-[var(--chat-height,100dvh)]"
+        : "rounded-2xl"}`}>
       {/* LEFT PANE: Searchable Conversation List */}
       <aside
         aria-label="Conversations"
-        className={`flex flex-col border-b border-[#ECEAF3] lg:col-span-3 lg:border-r lg:border-b-0 ${
+        className={`min-h-0 min-w-0 flex-col border-b border-[#ECEAF3] lg:border-r lg:border-b-0 ${
           mobileShowChat ? "hidden lg:flex" : "flex"
         }`}
       >
@@ -1124,15 +1081,9 @@ export function MessagesClient({
                           {name}
                         </p>
                         <span className="shrink-0 text-[11px] text-[#6B6779]">
-                          {formatRelativeTime(conv.lastMessageAt)}
+                          {formatMessageTime(conv.lastMessageAt)}
                         </span>
                       </div>
-
-                      {conv.linkedListingTitle ? (
-                        <p className="truncate text-[11px] font-semibold text-[#4E2A84]">
-                          {conv.linkedListingTitle}
-                        </p>
-                      ) : null}
 
                       <div className="mt-0.5 flex items-center justify-between gap-2">
                         <p className="truncate text-xs text-[#6B6779]">
@@ -1158,23 +1109,32 @@ export function MessagesClient({
       {/* CENTER PANE: Active Chat + Optimistic Bubbles + Compact Composer */}
       <section
         aria-label="Active conversation"
-        className={`flex min-h-[520px] flex-col lg:col-span-6 lg:min-h-0 lg:border-r lg:border-[#ECEAF3] ${
+        className={`min-h-0 min-w-0 flex-col ${
           mobileShowChat ? "flex" : "hidden lg:flex"
         }`}
       >
         {activeConversation ? (
           <>
-            <header className="flex items-center justify-between gap-2 border-b border-[#ECEAF3] px-4 py-3">
+            <header className="flex shrink-0 items-center justify-between gap-2 border-b border-[#ECEAF3] px-4 py-3">
               <div className="flex min-w-0 items-center gap-2.5">
                 <button
                   type="button"
-                  onClick={() => setMobileShowChat(false)}
+                  onClick={() => {
+                    if (draft) clearPreparedReference(draft.key);
+                    setMobileShowChat(false);
+                  }}
                   aria-label="Back to conversations"
-                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-[#E6E3EE] text-[#14121A] lg:hidden"
+                  className="grid size-11 shrink-0 place-items-center rounded-lg border border-[#E6E3EE] text-[#14121A] lg:hidden"
                 >
                   <ArrowLeft className="h-4 w-4" aria-hidden="true" />
                 </button>
 
+                {activeConversation.peer.logoUrl ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={activeConversation.peer.logoUrl} alt="" className="size-9 shrink-0 rounded-lg object-cover" />
+                ) : <span aria-hidden="true" className="grid size-9 shrink-0 place-items-center rounded-lg bg-[#4E2A84] text-xs font-bold text-white">
+                  {getInitials(activeConversation.peer.shopName || activeConversation.peer.displayName)}
+                </span>}
                 <div className="min-w-0">
                   <p className="truncate text-sm font-bold text-[#14121A]">
                     {activeConversation.peer.shopName ||
@@ -1200,25 +1160,10 @@ export function MessagesClient({
                 </div>
               </div>
 
-              <button
-                type="button"
-                onClick={() => setShowMobileDetails((v) => !v)}
-                aria-expanded={showMobileDetails}
-                className="inline-flex shrink-0 items-center gap-1 rounded-lg border border-[#E6E3EE] px-2.5 py-1.5 text-xs font-semibold text-[#14121A] lg:hidden"
-              >
-                <Info className="h-3.5 w-3.5 text-[#4E2A84]" aria-hidden="true" />
-                <span>{showMobileDetails ? "Hide Info" : "Details"}</span>
-              </button>
             </header>
 
-            {showMobileDetails ? (
-              <div className="border-b border-[#ECEAF3] bg-[#FAF9FC] p-3.5 lg:hidden">
-                {listingDetailsPanel}
-              </div>
-            ) : null}
-
             {/* Scrollable Messages + Optimistic Pending/Failed Bubbles */}
-            <div className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
+            <div className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain px-3 py-4 sm:px-4">
               {hasOlder ? (
                 <div className="text-center">
                   <button
@@ -1320,14 +1265,15 @@ export function MessagesClient({
                         }`}
                       >
                         <div
-                          className={`max-w-[85%] rounded-2xl px-3.5 py-2.5 text-sm leading-relaxed sm:max-w-[78%] ${
+                          className={`min-w-0 max-w-[88%] rounded-2xl px-3 py-2 text-sm leading-relaxed sm:max-w-[min(75%,38rem)] ${
                             isOwn
                               ? "bg-[#4E2A84] text-white"
                               : "border border-[#E6E3EE] bg-[#FAF9FC] text-[#14121A]"
                           }`}
                         >
+                          {msg.reference && <ChatReferenceCard reference={msg.reference} conversationId={msg.conversationId} now={nowMs} />}
                           {msg.body ? (
-                            <p className="whitespace-pre-wrap break-words">
+                            <p className={`whitespace-pre-wrap [overflow-wrap:anywhere] ${msg.reference ? "mt-2" : ""}`}>
                               {msg.body}
                             </p>
                           ) : null}
@@ -1397,17 +1343,18 @@ export function MessagesClient({
                   })}
 
                   {/* Optimistic Pending / Failed Bubbles */}
-                  {optimisticMessages.map((opt) => (
+                  {optimisticMessages.filter((opt) => !messages.some((msg) => msg.id === opt.clientId)).map((opt) => (
                     <div key={opt.clientId} className="flex flex-col items-end">
                       <div
-                        className={`max-w-[85%] rounded-2xl px-3.5 py-2.5 text-sm leading-relaxed sm:max-w-[78%] ${
+                        className={`min-w-0 max-w-[88%] rounded-2xl px-3 py-2 text-sm leading-relaxed sm:max-w-[min(75%,38rem)] ${
                           opt.status === "failed"
                             ? "border border-[#B42318]/40 bg-[#4E2A84]/85 text-white"
                             : "bg-[#4E2A84]/80 text-white"
                         }`}
                       >
+                        {opt.reference && <ChatReferenceCard reference={opt.reference} conversationId={opt.conversationId} now={nowMs} disabled />}
                         {opt.body ? (
-                          <p className="whitespace-pre-wrap break-words">
+                          <p className="whitespace-pre-wrap [overflow-wrap:anywhere]">
                             {opt.body}
                           </p>
                         ) : null}
@@ -1456,8 +1403,8 @@ export function MessagesClient({
                             {opt.error || "Failed to send"}
                           </span>
                           <button
-                            type="button"
-                            onClick={() => handleRetryOptimistic(opt.clientId)}
+                            type="submit"
+                            form="chat-composer"
                             className="inline-flex items-center gap-1 font-bold text-[#4E2A84] underline underline-offset-2"
                           >
                             <RefreshCw className="h-3 w-3" aria-hidden="true" />
@@ -1483,7 +1430,7 @@ export function MessagesClient({
 
             {/* Compact Collapsible Bargain / Offer Panel (Pre-Loved & non-food Student Business) */}
             {canMakeOffer && activeListing ? (
-              <div className="border-t border-[#ECEAF3] bg-[#FAF9FC] px-3.5 py-2.5">
+              <div className="max-h-[40%] shrink-0 overflow-y-auto border-t border-[#ECEAF3] bg-[#FAF9FC] px-3.5 py-2.5">
                 <div className="flex items-center justify-between gap-2">
                   <button
                     type="button"
@@ -1499,6 +1446,9 @@ export function MessagesClient({
                       {offerPanelOpen ? "Hide Bargain Form" : "Bargain / Make an Offer"}
                     </span>
                   </button>
+                  <Link href={`/listings/${activeListing.id}`} className="min-w-0 truncate text-xs font-bold text-brand-purple hover:underline">
+                    {activeListing.title}
+                  </Link>
                   <span className="text-[11px] text-[#6B6779]">
                     Listed at {formatSenToRm(activeOfferListedPriceSen)} · Min RM
                     2.00
@@ -1618,8 +1568,8 @@ export function MessagesClient({
             ) : null}
 
             {/* Compact Composer */}
-            <div className="border-t border-[#ECEAF3] bg-white px-3.5 py-3">
-              {activeConversation.isBlocked ? (
+            <div className="shrink-0 border-t border-[#ECEAF3] bg-white px-3.5 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
+              {activeConversation.isBlocked && draft?.reference.kind !== "order" ? (
                 <p className="flex items-center gap-2 text-xs font-semibold text-[#B42318]">
                   <Ban className="h-4 w-4 shrink-0" aria-hidden="true" />
                   <span>
@@ -1628,7 +1578,11 @@ export function MessagesClient({
                   </span>
                 </p>
               ) : (
-                <form onSubmit={handleSend} className="space-y-2">
+                <form id="chat-composer" onSubmit={handleSend} className="space-y-2">
+                  {draft && <ChatReferenceCard reference={draft.reference} conversationId={activeConversation.id}
+                    draftKey={draft.key} disabled={sending} now={nowMs}
+                    onRemove={() => clearPreparedReference(draft.key)} />}
+                  {initialDraftError && <p role="status" className="text-xs text-[#B42318]">{initialDraftError}</p>}
                   {selectedFiles.length > 0 ? (
                     <div className="flex flex-wrap gap-1.5">
                       {selectedFiles.map((file, idx) => (
@@ -1646,6 +1600,7 @@ export function MessagesClient({
                                 prev.filter((_, i) => i !== idx)
                               )
                             }
+                            disabled={sending}
                             aria-label={`Remove ${file.name}`}
                             className="text-[#6B6779] hover:text-[#B42318]"
                           >
@@ -1675,17 +1630,18 @@ export function MessagesClient({
                       type="file"
                       accept="image/jpeg,image/png,image/webp,image/gif,application/pdf"
                       multiple
+                      disabled={sending}
                       onChange={handleFilePick}
                       className="sr-only"
                       aria-label="Attach image or PDF"
                     />
                     <button
                       type="button"
-                      disabled={selectedFiles.length >= MAX_MESSAGE_ATTACHMENTS}
+                      disabled={sending || selectedFiles.length >= MAX_MESSAGE_ATTACHMENTS}
                       onClick={() => fileInputRef.current?.click()}
                       aria-label="Attach image or file"
                       title="Attach image or PDF (max 5 MB)"
-                      className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-[#DCD9E6] bg-white text-[#4A4656] transition hover:border-[#4E2A84] hover:text-[#4E2A84] disabled:opacity-40"
+                      className="flex size-11 shrink-0 items-center justify-center rounded-xl border border-[#DCD9E6] bg-white text-[#4A4656] transition hover:border-[#4E2A84] hover:text-[#4E2A84] disabled:opacity-40"
                     >
                       <Paperclip className="h-4 w-4" aria-hidden="true" />
                     </button>
@@ -1697,17 +1653,17 @@ export function MessagesClient({
                       id="chat-composer-input"
                       type="text"
                       value={draftBody}
+                      readOnly={sending}
                       onChange={(e) => setDraftBody(e.target.value)}
                       maxLength={2000}
                       placeholder="Write a message..."
-                      className="h-9 min-w-0 flex-1 rounded-xl border border-[#DCD9E6] bg-[#FAF9FC] px-3 text-sm text-[#14121A] placeholder:text-[#6B6779] focus:border-[#4E2A84] focus:bg-white focus:outline-none"
+                      className="h-11 min-w-0 flex-1 rounded-xl border border-[#DCD9E6] bg-[#FAF9FC] px-3 text-base sm:text-sm text-[#14121A] placeholder:text-[#6B6779] focus:border-[#4E2A84] focus:bg-white focus:outline-none"
                     />
 
                     <button
                       type="submit"
                       disabled={
-                        draftBody.trim().length === 0 &&
-                        selectedFiles.length === 0
+                        sending || (!draft && !draftBody.trim() && selectedFiles.length === 0)
                       }
                       aria-label="Send message"
                       className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-xl bg-[#4E2A84] px-3.5 text-xs font-bold text-white transition hover:bg-[#3F216B] disabled:cursor-not-allowed disabled:bg-[#C9C4D6]"
@@ -1727,13 +1683,6 @@ export function MessagesClient({
         )}
       </section>
 
-      {/* RIGHT PANE: Linked Listing & Seller Details (Desktop) */}
-      <aside
-        aria-label="Listing and seller details"
-        className="hidden overflow-y-auto bg-[#FAF9FC] p-4 lg:col-span-3 lg:block"
-      >
-        {listingDetailsPanel}
-      </aside>
     </div>
   );
 }

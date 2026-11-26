@@ -546,9 +546,7 @@ export function OrderList({
                     {inProgress && entry.recipientId ? (
                       <OrderContact
                         orderId={entry.id}
-                        code={entry.code}
                         recipientId={entry.recipientId}
-                        listingId={entry.listingId}
                         seller={seller}
                       />
                     ) : null}

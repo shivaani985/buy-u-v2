@@ -3,7 +3,7 @@ import Link from "next/link";
 import { AlertCircle, Lock, RefreshCw } from "lucide-react";
 import { MessagesClient } from "@/components/messages/MessagesClient";
 import { getMessagesPageData } from "@/lib/messages/data";
-import { isValidUuid } from "@/lib/buyer/validation";
+import { contextArgs, parseChatTarget, type ChatReference } from "@/lib/messages/context";
 import { createSupabaseServerClient, getSessionSummary } from "@/lib/supabase/server";
 
 export const metadata: Metadata = {
@@ -15,7 +15,10 @@ interface MessagesPageProps {
   searchParams: Promise<{
     c?: string;
     listing?: string;
-    freeItem?: string;
+    ref?: string;
+    target?: string;
+    item?: string;
+    draft?: string;
     variant?: string;
     bargain?: string;
   }>;
@@ -27,21 +30,26 @@ export default async function MessagesPage({
   const [sp, session] = await Promise.all([searchParams, getSessionSummary()]);
   const requestedConvId = typeof sp.c === "string" ? sp.c.trim() : null;
   const requestedListingId =
-    typeof sp.listing === "string" ? sp.listing.trim() : null;
+    sp.bargain === "1" && typeof sp.listing === "string" ? sp.listing.trim() : null;
 
   const data = await getMessagesPageData(session, {
     requestedConversationId: requestedConvId,
     requestedListingId,
   });
 
-  let freeItem: { id: string; title: string } | null = null;
-  const active = data.conversations.find((conversation) => conversation.id === requestedConvId);
-  if (active && data.eligibility.eligible && sp.freeItem && isValidUuid(sp.freeItem)) {
-    const supabase = await createSupabaseServerClient();
-    const result = await supabase?.from("free_notices").select("id,title")
-      .eq("id", sp.freeItem).eq("contributor_id", active.peer.id).eq("status", "active")
-      .not("pickup_location", "is", null).gt("expires_at", new Date().toISOString()).maybeSingle();
-    freeItem = result?.data ?? null;
+  let draft: { key: string; reference: ChatReference } | null = null;
+  let draftError: string | null = null;
+  if (requestedConvId && requestedConvId === data.activeConversationId && sp.ref && sp.draft) {
+    const target = parseChatTarget({ kind: sp.ref, targetId: sp.target, variantId: sp.variant, itemId: sp.item });
+    if (target) {
+      const supabase = await createSupabaseServerClient();
+      const response = await supabase?.rpc("preview_chat_context", {
+        p_conversation: requestedConvId,
+        ...contextArgs(target),
+      });
+      if (response?.data) draft = { key: sp.draft, reference: response.data as ChatReference };
+    }
+    if (!draft) draftError = "This item is no longer available to reference.";
   }
 
   return (
@@ -62,11 +70,6 @@ export default async function MessagesPage({
           </p>
         ) : null}
       </div>
-
-      {freeItem && <div className="mb-4 rounded-xl border border-border-crisp px-4 py-3 text-sm">
-        Free item · <Link className="font-bold text-brand-purple hover:underline"
-          href={`/free-items?post=${freeItem.id}#post-${freeItem.id}`}>{freeItem.title}</Link>
-      </div>}
 
       {!data.eligibility.eligible ? (
         <section className="rounded-2xl border border-[#E6E3EE] bg-white p-6 sm:p-8">
@@ -140,6 +143,9 @@ export default async function MessagesPage({
           initialOffers={data.activeOffers}
           initialHasOlder={data.hasOlderMessages}
           activeListing={data.activeListing}
+          initialDraft={draft}
+          initialDraftError={draftError}
+          renderedAt={data.serverNow}
           hasExplicitConversationParam={Boolean(requestedConvId)}
           initialOpenOffer={sp.bargain === "1"}
           initialVariantId={

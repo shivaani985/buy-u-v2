@@ -1,7 +1,8 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { mapRawMessage, type ChatMessageItem } from "@/lib/messages/data";
+import { CHAT_MESSAGE_FIELDS, mapRawMessage, type ChatMessageItem } from "@/lib/messages/data";
+import { contextArgs, loadChatReferences, parseChatTarget, type ChatTarget } from "@/lib/messages/context";
 import {
   evaluateMessagingEligibility,
   isValidUuid,
@@ -13,7 +14,6 @@ import {
   createSupabaseServerClient,
   getSessionSummary,
 } from "@/lib/supabase/server";
-import { createRecipientMessageNotification } from "@/lib/supabase/service";
 
 export interface StartConversationResult {
   ok: boolean;
@@ -63,7 +63,7 @@ export async function startConversationAction(input: {
   variantId?: string | null;
   orderId?: string | null;
   freeNoticeId?: string | null;
-  initialMessage?: string | null;
+  orderItemId?: string | null;
   openBargain?: boolean;
 }): Promise<StartConversationResult> {
   const session = await getSessionSummary();
@@ -131,241 +131,115 @@ export async function startConversationAction(input: {
         : typedOrder.buyer_id;
   }
 
-  const isBlocked =
-    !validOrderId && isValidUuid(peerId)
-      ? await checkBlockedBidirectional(supabase, userId, peerId)
-      : false;
+  const listingId = input.listingId?.trim() || null;
+  const variantId = input.variantId?.trim() || null;
+  const orderItemId = input.orderItemId?.trim() || null;
+  let target: ChatTarget | null = null;
+  if (validOrderId) {
+    if (orderItemId) {
+      if (!isValidUuid(orderItemId)) return { ok: false, error: "Invalid purchased item." };
+      const { data } = await supabase.from("order_items").select("id")
+        .eq("order_id", validOrderId).eq("id", orderItemId).maybeSingle();
+      if (!data) return { ok: false, error: "Purchased item unavailable." };
+    }
+    target = { kind: "order", targetId: validOrderId, itemId: orderItemId };
+  } else if (freeNoticeId) {
+    target = { kind: "free", targetId: freeNoticeId };
+  } else if (listingId) {
+    if (!isValidUuid(listingId) || (variantId && !isValidUuid(variantId))) {
+      return { ok: false, error: "Invalid listing or selected variation." };
+    }
+    const { data: listing } = await supabase.from("listings").select("kind,has_variants")
+      .eq("id", listingId).eq("seller_id", peerId).eq("status", "published").maybeSingle();
+    if (!listing) return { ok: false, error: "This listing is no longer available." };
+    if (variantId) {
+      const { data } = await supabase.from("listing_variants").select("id")
+        .eq("id", variantId).eq("listing_id", listingId).eq("active", true).maybeSingle();
+      if (!listing.has_variants || !data) return { ok: false, error: "This variation is no longer available." };
+    }
+    target = { kind: listing.kind === "service" ? "service" : "product", targetId: listingId, variantId };
+  }
 
-  const check = validateStartConversation({
-    eligibility,
-    peerUserId: peerId,
-    listingId: freeNoticeId ? null : input.listingId ?? null,
-    isBlocked,
+  const isBlocked = !validOrderId && isValidUuid(peerId)
+    ? await checkBlockedBidirectional(supabase, userId, peerId)
+    : false;
+  const check = validateStartConversation({ eligibility, peerUserId: peerId, isBlocked });
+  if (!check.ok) return { ok: false, error: check.error };
+
+  const { data: conversationId, error } = await supabase.rpc("open_contextual_conversation", {
+    p_peer: peerId,
+    p_order: validOrderId,
   });
-
-  if (!check.ok) {
-    return { ok: false, error: check.error };
+  if (error || typeof conversationId !== "string") {
+    return { ok: false, error: error?.message.includes("INTERACTION_BLOCKED")
+      ? "You cannot open this blocked conversation." : "Could not open this conversation." };
   }
-
-  const { data: existing, error: fetchErr } = await supabase
-    .from("conversations")
-    .select("id")
-    .eq("member_a", check.memberA)
-    .eq("member_b", check.memberB)
-    .maybeSingle();
-
-  if (fetchErr) {
-    return { ok: false, error: "Could not open conversation right now." };
-  }
-
-  let conversationId = (existing as { id?: string } | null)?.id ?? null;
-
-  if (!conversationId) {
-    const nowIso = new Date().toISOString();
-    const { data: created, error: insertErr } = await supabase
-      .from("conversations")
-      .insert({
-        member_a: check.memberA,
-        member_b: check.memberB,
-        last_message_at: nowIso,
-      })
-      .select("id")
-      .single();
-
-    if (insertErr) {
-      if (insertErr.code === "23505") {
-        const { data: raced } = await supabase
-          .from("conversations")
-          .select("id")
-          .eq("member_a", check.memberA)
-          .eq("member_b", check.memberB)
-          .maybeSingle();
-        conversationId = (raced as { id?: string } | null)?.id ?? null;
-      } else {
-        return { ok: false, error: "Could not start this conversation." };
-      }
-    } else {
-      conversationId = (created as { id?: string } | null)?.id ?? null;
-    }
-  }
-
-  if (!conversationId) {
-    return { ok: false, error: "Conversation could not be initialized." };
-  }
-
-  const trimmedInitial = freeNoticeId ? "" : (input.initialMessage ?? "").trim();
-  if (trimmedInitial.length > 0) {
-    // Prevent duplicate automatic greetings when reopening an existing conversation for this order/listing
-    let msgQuery = supabase
-      .from("messages")
-      .select("id")
-      .eq("conversation_id", conversationId)
-      .limit(1);
-    if (validOrderId) {
-      msgQuery = msgQuery.eq("order_id", validOrderId);
-    } else if (input.listingId && isValidUuid(input.listingId)) {
-      msgQuery = msgQuery.eq("listing_id", input.listingId.trim());
-    }
-    const { data: existingMsgs } = await msgQuery;
-    if (!existingMsgs || existingMsgs.length === 0) {
-      await sendMessageAction({
-        conversationId,
-        body: trimmedInitial,
-        listingId: input.listingId ?? null,
-        orderId: validOrderId,
-      });
-    }
-  }
-
   revalidatePath("/messages");
-
-  const listingParam =
-    input.listingId && isValidUuid(input.listingId)
-      ? `&listing=${encodeURIComponent(input.listingId.trim())}`
-      : "";
-  const variantParam =
-    input.variantId && isValidUuid(input.variantId)
-      ? `&variant=${encodeURIComponent(input.variantId.trim())}`
-      : "";
-  const bargainParam = input.openBargain ? "&bargain=1" : "";
-
-  if (freeNoticeId) {
-    return { ok: true, conversationId, href: `/messages?c=${encodeURIComponent(conversationId)}&freeItem=${encodeURIComponent(freeNoticeId)}` };
+  const params = new URLSearchParams({ c: conversationId });
+  if (target && input.openBargain) {
+    params.set("listing", target.targetId);
+    if (target.variantId) params.set("variant", target.variantId);
+    params.set("bargain", "1");
+  } else if (target) {
+    params.set("ref", target.kind);
+    params.set("target", target.targetId);
+    if (target.variantId) params.set("variant", target.variantId);
+    if (target.itemId) params.set("item", target.itemId);
+    params.set("draft", crypto.randomUUID());
   }
-
-  return {
-    ok: true,
-    conversationId,
-    href: `/messages?c=${encodeURIComponent(conversationId)}${listingParam}${variantParam}${bargainParam}`,
-  };
+  return { ok: true, conversationId, href: `/messages?${params}` };
 }
 
-/**
- * Persists a validated message (with optional pre-uploaded private attachment
- * paths under `senderUid/conversationId/...`) and creates the recipient's
- * unread notification through the authorized server-only helper.
- */
 export async function sendMessageAction(input: {
+  messageId: string;
   conversationId: string;
   body: string;
   attachmentPaths?: string[];
-  listingId?: string | null;
-  orderId?: string | null;
+  reference?: ChatTarget | null;
 }): Promise<SendMessageResult> {
   const session = await getSessionSummary();
   const eligibility = evaluateMessagingEligibility(session);
-
-  if (!eligibility.eligible || !eligibility.userId) {
-    return {
-      ok: false,
-      error:
-        eligibility.reason || "Sign in with your UMS account to send messages.",
-    };
+  const reference = input.reference ? parseChatTarget(input.reference) : null;
+  if (!isValidUuid(input.messageId) || (input.reference && !reference)) {
+    return { ok: false, error: "Invalid message reference." };
   }
 
-  const supabase = await createSupabaseServerClient();
-  if (!supabase) {
-    return { ok: false, error: "Messaging service unavailable." };
-  }
-
-  const userId = eligibility.userId;
-  const conversationId = (input.conversationId ?? "").trim();
-
-  if (!isValidUuid(conversationId)) {
-    return { ok: false, error: "Invalid conversation identifier." };
-  }
-
-  const { data: convRow, error: convErr } = await supabase
-    .from("conversations")
-    .select("id,member_a,member_b")
-    .eq("id", conversationId)
-    .maybeSingle();
-
-  if (convErr || !convRow) {
-    return { ok: false, error: "Conversation not found or access denied." };
-  }
-
-  const conv = convRow as { id: string; member_a: string; member_b: string };
-  const isParticipant = conv.member_a === userId || conv.member_b === userId;
-  const peerId = conv.member_a === userId ? conv.member_b : conv.member_a;
-
-  const isBlocked = isParticipant
-    ? await checkBlockedBidirectional(supabase, userId, peerId)
-    : false;
-
-  const cleanOrderId =
-    input.orderId && isValidUuid(input.orderId.trim())
-      ? input.orderId.trim()
-      : null;
-
-  // If blocked, ordinary messages are denied; only verified active paid/disputed order messages proceed to DB trigger verification
   const validation = validateMessageInput({
     eligibility,
-    conversationId,
-    isParticipant,
-    isBlocked: isBlocked && !cleanOrderId,
-    body: input.body ?? "",
-    attachmentPaths: input.attachmentPaths ?? [],
-    listingId: input.listingId ?? null,
+    conversationId: input.conversationId,
+    isParticipant: true, // The atomic RPC verifies actual membership.
+    isBlocked: false, // The database also enforces the existing paid-order exception.
+    body: input.body,
+    attachmentPaths: input.attachmentPaths,
+    hasReference: Boolean(reference),
   });
+  if (!validation.ok) return { ok: false, error: validation.error };
 
-  if (!validation.ok) {
-    return { ok: false, error: validation.error };
+  const supabase = await createSupabaseServerClient();
+  if (!supabase) return { ok: false, error: "Messaging service unavailable." };
+
+  const { data: messageId, error } = await supabase.rpc("send_contextual_message", {
+    p_message: input.messageId,
+    p_conversation: input.conversationId,
+    p_body: validation.trimmedBody,
+    p_paths: validation.imagePaths,
+    ...(reference ? contextArgs(reference) : {}),
+  });
+  if (error || typeof messageId !== "string") {
+    const unavailable = /INVALID_CHAT_|CHAT_REFERENCE_UNAVAILABLE/.test(error?.message ?? "");
+    const blocked = error?.message.includes("INTERACTION_BLOCKED");
+    return { ok: false, error: unavailable ? "This reference or attachment is no longer available."
+      : blocked ? "You cannot send messages in this blocked conversation." : "Could not send message. Try again." };
   }
-
-  const { data: inserted, error: insertErr } = await supabase
-    .from("messages")
-    .insert({
-      conversation_id: conversationId,
-      sender_id: userId,
-      body: validation.trimmedBody,
-      image_paths: validation.imagePaths,
-      listing_id: validation.listingId,
-      ...(cleanOrderId ? { order_id: cleanOrderId } : {}),
-    })
-    .select(
-      "id,conversation_id,sender_id,body,image_paths,listing_id,order_id,free_notice_id,service_request_id,edited_at,created_at"
-    )
-    .single();
-
-  if (insertErr || !inserted) {
-    return {
-      ok: false,
-      error: insertErr?.message
-        ? `Could not send message: ${insertErr.message}`
-        : "Could not send message right now. Please retry.",
-    };
-  }
-
-  const mapped = mapRawMessage(
-    inserted as Parameters<typeof mapRawMessage>[0]
-  );
-
-  const senderDisplayName =
-    session.profile?.display_name?.trim() ||
-    session.profile?.full_name?.trim() ||
-    "UMS Member";
-  const previewText =
-    validation.trimmedBody ||
-    (validation.imagePaths.length === 1
-      ? "Sent an attachment"
-      : `Sent ${validation.imagePaths.length} attachments`);
-
-  // Update conversation timestamp + create recipient unread notification server-side.
-  await Promise.allSettled([
-    supabase
-      .from("conversations")
-      .update({ last_message_at: mapped.createdAt })
-      .eq("id", conversationId),
-    createRecipientMessageNotification({
-      recipientUserId: peerId,
-      conversationId,
-      senderDisplayName,
-      previewText,
-    }),
+  const [row, references] = await Promise.all([
+    supabase.from("messages").select(CHAT_MESSAGE_FIELDS).eq("id", messageId).single(),
+    loadChatReferences(supabase, [messageId]),
   ]);
-
-  return { ok: true, message: mapped };
+  const savedReference = references.get(messageId);
+  if (!row.data || (reference && !savedReference)) {
+    return { ok: false, error: "Could not confirm delivery. Retry to check." };
+  }
+  return { ok: true, message: mapRawMessage(row.data, savedReference) };
 }
 
 export async function loadOlderMessagesAction(input: {
@@ -390,9 +264,7 @@ export async function loadOlderMessagesAction(input: {
 
   const { data: rows, error } = await supabase
     .from("messages")
-    .select(
-      "id,conversation_id,sender_id,body,image_paths,listing_id,order_id,free_notice_id,service_request_id,edited_at,created_at"
-    )
+    .select(CHAT_MESSAGE_FIELDS)
     .eq("conversation_id", input.conversationId)
     .lt("created_at", input.beforeCreatedAt)
     .order("created_at", { ascending: false })
@@ -404,9 +276,9 @@ export async function loadOlderMessagesAction(input: {
 
   const rawRows = (rows ?? []) as Parameters<typeof mapRawMessage>[0][];
   const hasOlder = rawRows.length > MESSAGE_PAGE_SIZE;
-  const page = (hasOlder ? rawRows.slice(0, MESSAGE_PAGE_SIZE) : rawRows)
-    .reverse()
-    .map(mapRawMessage);
+  const rowsToMap = (hasOlder ? rawRows.slice(0, MESSAGE_PAGE_SIZE) : rawRows).reverse();
+  const references = await loadChatReferences(supabase, rowsToMap.map((row) => row.id));
+  const page = rowsToMap.map((row) => mapRawMessage(row, references.get(row.id)));
 
   return { ok: true, messages: page, hasOlder };
 }

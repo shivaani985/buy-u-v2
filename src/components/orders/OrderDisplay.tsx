@@ -35,7 +35,9 @@ export function OrderBadge({ badge }: { badge: OrderStatusBadge }) {
   );
 }
 
-export function OrderItems({ items, compact = false }: { items: OrderDisplayItem[]; compact?: boolean }) {
+export function OrderItems({ items, compact = false, itemAction }: {
+  items: OrderDisplayItem[]; compact?: boolean; itemAction?: (item: OrderDisplayItem) => React.ReactNode;
+}) {
   const visible = compact ? items.slice(0, 1) : items;
   return (
     <ul className="divide-y divide-[#F0EDF5]">
@@ -100,6 +102,7 @@ export function OrderItems({ items, compact = false }: { items: OrderDisplayItem
                 ) : null}
               </div>
             ) : null}
+            {itemAction && <div className="mt-1">{itemAction(item)}</div>}
           </div>
           <span
             className={`tabular-price shrink-0 text-sm font-extrabold text-[#14121A] ${

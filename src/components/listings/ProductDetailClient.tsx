@@ -1081,7 +1081,6 @@ export function ProductDetailClient({
                         (!product.hasVariants ||
                           Boolean(activeVariant && activeVariant.active)) &&
                         (activeAvailableStock ?? 0) >= 1;
-                      const autoGreeting = `Hi! I'm interested in "${product.title}"${activeVariant ? ` (${formatVariationOptionLabel(activeVariant.optionValues)})` : ""} listed at ${formatSenToRm(activePriceSen)}. Is this still available?`;
 
                       return (
                         <div
@@ -1109,7 +1108,7 @@ export function ProductDetailClient({
                                 const res = await startConversationAction({
                                   sellerId: product.seller.sellerId,
                                   listingId: product.id,
-                                  initialMessage: autoGreeting,
+                                  variantId: Object.values(selectedOptions).some(Boolean) ? activeVariant?.id : null,
                                 });
                                 if (res.ok && res.href) {
                                   router.push(res.href);

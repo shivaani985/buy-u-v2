@@ -5,7 +5,7 @@ const UUID_RE =
 
 export const CHAT_ATTACHMENTS_BUCKET = "chat-attachments";
 export const MAX_MESSAGE_BODY_LENGTH = 2000;
-export const MAX_MESSAGE_ATTACHMENTS = 4;
+export const MAX_MESSAGE_ATTACHMENTS = 3;
 export const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024; // 5 MB
 export const MESSAGE_PAGE_SIZE = 30;
 
@@ -243,6 +243,7 @@ export function validateMessageInput(input: {
   body: string;
   attachmentPaths?: string[];
   listingId?: string | null;
+  hasReference?: boolean;
 }):
   | { ok: true; trimmedBody: string; imagePaths: string[]; listingId: string | null }
   | { ok: false; error: string } {
@@ -299,10 +300,10 @@ export function validateMessageInput(input: {
     imagePaths.push(p.trim());
   }
 
-  if (trimmedBody.length === 0 && imagePaths.length === 0) {
+  if (trimmedBody.length === 0 && imagePaths.length === 0 && !input.hasReference) {
     return {
       ok: false,
-      error: "Write a message or attach a file before sending.",
+      error: "Write a message or add a reference or file before sending.",
     };
   }
 

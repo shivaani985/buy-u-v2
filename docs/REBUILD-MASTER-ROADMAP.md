@@ -83,3 +83,9 @@ Phase 10R upgrades post-purchase trust, ratings accuracy, repurchase flows, and 
 - Listing/service cards and detail pages distinguish item ratings from weighted **Shop Rating** fallback and **Not rated yet**, and compute **Total sold** strictly from completed, verified, non-fully-refunded unit quantities across variations.
 
 See [Phase 10R acceptance](PHASE-10R-ACCEPTANCE.md) for SQL rollout, verification, and manual test steps.
+
+## 9. Phase 10M Contextual Messaging
+
+Chat uses one continuous conversation per member pair. Product, service, order, and Free Item references start as unsent composer drafts and stay with the specific messages they are sent on. The desktop layout uses an inbox and conversation pane. The mobile conversation keeps its composer within the visible viewport.
+
+The migration adds one private JSONB column to existing messages. Run the rollback verifier and manual checks listed in [Phase 10M acceptance](PHASE-10M-ACCEPTANCE.md) before marking owner acceptance complete.
