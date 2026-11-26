@@ -617,7 +617,7 @@ BEGIN
      OR (SELECT last_message_at FROM public.conversations WHERE id=conv) IS DISTINCT FROM
         (SELECT max(created_at) FROM public.messages WHERE conversation_id=conv)
     THEN RAISE EXCEPTION 'Conversation ordering or deduped unread notifications failed'; END IF;
-  UPDATE public.listing_variants SET price_sen=9000,image_path='later.jpg' WHERE id=variant;
+  UPDATE public.listing_variants SET price_sen=9000,image_path='cover.jpg' WHERE id=variant;
   UPDATE public.free_notices SET expires_at=now()-interval '1 second' WHERE id=notice;
   PERFORM set_config('request.jwt.claims',json_build_object('sub',buyer,'role','authenticated')::text,true);
   PERFORM set_config('request.jwt.claim.sub',buyer::text,true);
