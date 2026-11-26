@@ -1245,9 +1245,17 @@ async function run() {
       // Admin restores review cleanly
       assert.equal((await admin.client.rpc("admin_moderate_review_atomic", { p_review_id: serviceReviewId, p_hide: false, p_reason: "QA review restore verification" })).error, null);
 
-      // Edit deadline (>7 days) enforced
-      await service.from("reviews").update({ created_at: "2020-01-01T00:00:00Z" }).eq("id", serviceReviewId);
-      assert.ok((await buyer.client.rpc("edit_verified_review_atomic", { p_review_id: serviceReviewId, p_rating: 5, p_comment: "Late edit after deadline" })).error);
+      // Phase 10R permits owner edits after 45 days without changing creation time.
+      const olderCreatedAt = new Date(Date.now() - 45 * 86400_000).toISOString();
+      assert.equal((await service.from("reviews").update({ created_at: olderCreatedAt }).eq("id", serviceReviewId)).error, null);
+      const lateEdit = await buyer.client.rpc("edit_verified_review_atomic", {
+        p_review_id: serviceReviewId, p_rating: 5, p_comment: "Updated after 45 days",
+      });
+      assert.equal(lateEdit.error, null);
+      assert.equal(lateEdit.data, true);
+      const olderReview = await service.from("reviews").select("id,created_at").eq("id", serviceReviewId).single();
+      assert.equal(olderReview.error, null);
+      assert.equal(new Date(olderReview.data.created_at).toISOString(), olderCreatedAt);
       await service.from("reviews").update({ created_at: nowIso }).eq("id", serviceReviewId);
     });
 

@@ -39,6 +39,15 @@ interface ReviewMediaUploaderProps {
   disabled?: boolean;
 }
 
+function discardStagedUpload(path: string) {
+  void fetch("/api/reviews/media", {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path }),
+    keepalive: true,
+  }).catch(() => {});
+}
+
 async function readVideoMetadataDuration(file: File): Promise<number | null> {
   return new Promise((resolve) => {
     const url = URL.createObjectURL(file);
@@ -242,6 +251,7 @@ export function ReviewMediaUploader({
     }
 
     if (!uploadedOk) {
+      discardStagedUpload(stagedPath);
       updateEntries((prev) =>
         prev.map((item) =>
           item.localId === entry.localId
@@ -273,6 +283,7 @@ export function ReviewMediaUploader({
         error?: string;
       };
       if (!res.ok || !json.ok || !json.validatedPath) {
+        discardStagedUpload(stagedPath);
         updateEntries((prev) =>
           prev.map((item) =>
             item.localId === entry.localId
@@ -302,6 +313,7 @@ export function ReviewMediaUploader({
         )
       );
     } catch {
+      discardStagedUpload(stagedPath);
       updateEntries((prev) =>
         prev.map((item) =>
           item.localId === entry.localId
@@ -402,13 +414,6 @@ export function ReviewMediaUploader({
     setGlobalError(null);
     if (entry.previewUrl.startsWith("blob:")) {
       URL.revokeObjectURL(entry.previewUrl);
-    }
-    if (entry.validatedPath) {
-      void fetch("/api/reviews/media", {
-        method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: entry.validatedPath }),
-      }).catch(() => {});
     }
     updateEntries((prev) => prev.filter((item) => item.localId !== entry.localId));
   }

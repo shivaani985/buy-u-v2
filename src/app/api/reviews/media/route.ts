@@ -2,6 +2,8 @@ import crypto from "node:crypto";
 import { NextResponse, type NextRequest } from "next/server";
 import { evaluateBuyerEligibility, isValidUuid } from "@/lib/buyer/validation";
 import {
+  ALLOWED_REVIEW_IMAGE_MIMES,
+  ALLOWED_REVIEW_VIDEO_MIMES,
   detectReviewMediaMagicMime,
   extensionForReviewMediaMime,
   isValidStagedReviewMediaPath,
@@ -10,8 +12,8 @@ import {
   MAX_REVIEW_PHOTO_BYTES,
   MAX_REVIEW_VIDEO_BYTES,
   REVIEW_MEDIA_BUCKET,
-  validateReviewVideoDurationBuffer,
 } from "@/lib/reviews/validation";
+import { validateStagedReviewVideo } from "@/lib/reviews/video-duration";
 import { getSessionSummary } from "@/lib/supabase/server";
 import { getServerServiceClient } from "@/lib/supabase/service";
 
@@ -111,51 +113,44 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "Not found" }, { status: 404, headers: NO_STORE_HEADERS });
   }
 
-  const { data: blob, error: dlErr } = await service.storage
+  const { data: signed, error } = await service.storage
     .from(REVIEW_MEDIA_BUCKET)
-    .download(storagePath);
-
-  if (dlErr || !blob) {
+    .createSignedUrl(storagePath, 60);
+  if (error || !signed) {
     return NextResponse.json({ error: "Media not found" }, { status: 404, headers: NO_STORE_HEADERS });
   }
 
-  const buf = new Uint8Array(await blob.arrayBuffer());
-  const mime = detectReviewMediaMagicMime(buf);
-  if (!mime) {
+  // Keep the signed Storage URL server-side and stream the bytes (including video ranges).
+  const range = request.headers.get("range");
+  const upstream = await fetch(signed.signedUrl, {
+    cache: "no-store",
+    redirect: "error",
+    headers: range ? { Range: range } : undefined,
+    signal: request.signal,
+  }).catch(() => null);
+  if (upstream?.status === 416) {
+    const contentRange = upstream.headers.get("content-range");
+    return new Response(null, {
+      status: 416,
+      headers: contentRange ? { ...NO_STORE_HEADERS, "Content-Range": contentRange } : NO_STORE_HEADERS,
+    });
+  }
+  if (!upstream?.ok || !upstream.body) {
+    return NextResponse.json({ error: "Media not found" }, { status: 404, headers: NO_STORE_HEADERS });
+  }
+
+  const mime = upstream.headers.get("content-type")?.split(";")[0] ?? "";
+  if (!ALLOWED_REVIEW_IMAGE_MIMES.has(mime) && !ALLOWED_REVIEW_VIDEO_MIMES.has(mime)) {
+    await upstream.body.cancel();
     return NextResponse.json({ error: "Unsupported media" }, { status: 415, headers: NO_STORE_HEADERS });
   }
 
-  const rangeHeader = request.headers.get("range");
-  if (rangeHeader && mime.startsWith("video/")) {
-    const match = /^bytes=(\d+)-(\d*)$/i.exec(rangeHeader.trim());
-    if (match) {
-      const start = Number(match[1]);
-      const end = match[2] ? Math.min(Number(match[2]), buf.byteLength - 1) : buf.byteLength - 1;
-      if (start >= 0 && start <= end && start < buf.byteLength) {
-        const chunk = buf.subarray(start, end + 1);
-        return new Response(chunk, {
-          status: 206,
-          headers: {
-            ...NO_STORE_HEADERS,
-            "Content-Type": mime,
-            "Accept-Ranges": "bytes",
-            "Content-Range": `bytes ${start}-${end}/${buf.byteLength}`,
-            "Content-Length": String(chunk.byteLength),
-          },
-        });
-      }
-    }
+  const headers = new Headers({ ...NO_STORE_HEADERS, "Content-Type": mime });
+  for (const name of ["Accept-Ranges", "Content-Range", "Content-Length"]) {
+    const value = upstream.headers.get(name);
+    if (value) headers.set(name, value);
   }
-
-  return new Response(buf, {
-    status: 200,
-    headers: {
-      ...NO_STORE_HEADERS,
-      "Content-Type": mime,
-      "Accept-Ranges": mime.startsWith("video/") ? "bytes" : "none",
-      "Content-Length": String(buf.byteLength),
-    },
-  });
+  return new Response(upstream.body, { status: upstream.status, headers });
 }
 
 /**
@@ -244,7 +239,7 @@ export async function POST(request: NextRequest) {
   }
 
   if (isVideo) {
-    const durCheck = validateReviewVideoDurationBuffer(bytes, detectedMime);
+    const durCheck = await validateStagedReviewVideo(bytes, detectedMime);
     if (!durCheck.ok) {
       await removeStaged();
       return NextResponse.json(
@@ -291,8 +286,8 @@ export async function POST(request: NextRequest) {
 }
 
 /**
- * Deletes an unattached temporary staged or owner-validated upload.
- * Refuses to delete files already persisted on a review row.
+ * Discards an owner-staged upload. Validated objects are cleaned up separately
+ * so a deletion cannot race with a review attaching the file.
  */
 export async function DELETE(request: NextRequest) {
   const session = await getSessionSummary();
@@ -312,13 +307,8 @@ export async function DELETE(request: NextRequest) {
   const buyerId = eligibility.userId;
   const targetPath = String(body.path ?? "").trim();
 
-  const isStaged = isValidStagedReviewMediaPath(targetPath, buyerId);
-  const isValidated =
-    isValidValidatedReviewImagePath(targetPath, buyerId) ||
-    isValidValidatedReviewVideoPath(targetPath, buyerId);
-
-  if (!isStaged && !isValidated) {
-    return NextResponse.json({ ok: false, error: "Invalid media path." }, { status: 400 });
+  if (!isValidStagedReviewMediaPath(targetPath, buyerId)) {
+    return NextResponse.json({ ok: false, error: "Invalid staged media path." }, { status: 400 });
   }
 
   const service = getServerServiceClient();
@@ -326,18 +316,9 @@ export async function DELETE(request: NextRequest) {
     return NextResponse.json({ ok: false, error: "Storage unavailable." }, { status: 503 });
   }
 
-  if (isValidated) {
-    const { data: attached } = await service
-      .from("reviews")
-      .select("id")
-      .or(`video_path.eq.${targetPath},image_paths.cs.{"${targetPath}"}`)
-      .limit(1);
-
-    if (attached && attached.length > 0) {
-      return NextResponse.json({ ok: true, preserved: true });
-    }
+  const { error } = await service.storage.from(REVIEW_MEDIA_BUCKET).remove([targetPath]);
+  if (error) {
+    return NextResponse.json({ ok: false, error: "Could not delete upload." }, { status: 503 });
   }
-
-  await service.storage.from(REVIEW_MEDIA_BUCKET).remove([targetPath]).catch(() => {});
   return NextResponse.json({ ok: true });
 }

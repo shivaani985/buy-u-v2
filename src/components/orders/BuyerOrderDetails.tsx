@@ -583,7 +583,6 @@ export function BuyerOrderDetails({ order, back, mode, serverNow, startReview, t
           key={editingReview ? `edit-${editingReview.id}` : `new-${reviewingOrder.id}`}
           open
           orderCode={reviewingOrder.orderCode}
-          buyerDisplayName={reviewingOrder.buyerDisplayName}
           items={(editingReview
             ? reviewingOrder.items.filter((it) => it.listingId === editingReview.listingId)
             : getUnreviewedItems(reviewingOrder)

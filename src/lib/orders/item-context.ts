@@ -23,7 +23,7 @@ export interface RawOrderItemForMedia {
 }
 
 export interface OrderItemMediaContext {
-  offerImageByOrder: Map<string, string>;
+  offerImageByOrder: Map<string, { listingId: string; variantId: string; path: string }>;
   listingCoverById: Map<string, string>;
   variantsById: Map<string, VariantMatchCandidate>;
   variantsByListing: Map<string, VariantMatchCandidate[]>;
@@ -57,7 +57,8 @@ export async function loadOrderItemMediaContext(
   const [offersRes, listingsRes, variantsRes] = await Promise.all([
     client
       .from("offers")
-      .select("order_id,variant_image_path")
+      .select("order_id,listing_id,variant_id,variant_image_path")
+      .eq("status", "accepted")
       .in("order_id", orderIds)
       .then((res: { data?: unknown; error?: unknown }) =>
         res.error ? { data: [] } : res
@@ -76,13 +77,19 @@ export async function loadOrderItemMediaContext(
       : Promise.resolve({ data: [] }),
   ]);
 
-  const offerImageByOrder = new Map<string, string>();
+  const offerImageByOrder: OrderItemMediaContext["offerImageByOrder"] = new Map();
   for (const row of ((offersRes.data ?? []) as Array<{
     order_id: string | null;
+    listing_id: string | null;
+    variant_id: string | null;
     variant_image_path?: string | null;
   }>)) {
-    if (row.order_id && row.variant_image_path?.trim()) {
-      offerImageByOrder.set(row.order_id, row.variant_image_path.trim());
+    if (row.order_id && row.listing_id && row.variant_id && row.variant_image_path?.trim()) {
+      offerImageByOrder.set(row.order_id, {
+        listingId: row.listing_id,
+        variantId: row.variant_id,
+        path: row.variant_image_path.trim(),
+      });
     }
   }
 
@@ -129,11 +136,12 @@ export function resolveOrderItemImageWithContext(
         })
       : null;
 
+  const offer = ctx.offerImageByOrder.get(item.order_id);
   return resolvePurchasedItemImageUrl({
     orderItemImagePath: item.image_path,
-    offerVariantImagePath: !item.image_path?.trim()
-      ? ctx.offerImageByOrder.get(item.order_id) ?? null
-      : null,
+    offerVariantImagePath: !item.is_service && offer
+      && offer.listingId === item.listing_id && offer.variantId === item.variant_id
+      ? offer.path : null,
     variantImagePath: matchedVariantImage,
     listingCoverPath: item.listing_id
       ? ctx.listingCoverById.get(item.listing_id) ?? null

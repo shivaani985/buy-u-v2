@@ -115,6 +115,48 @@ CREATE POLICY review_media_member_staged_delete
     AND (storage.foldername(name))[2] = 'staged'
   );
 
+-- Restrictive policies also cover any broad permissive Storage policies.
+DROP POLICY IF EXISTS review_media_staged_insert_only ON storage.objects;
+CREATE POLICY review_media_staged_insert_only ON storage.objects AS RESTRICTIVE
+  FOR INSERT TO authenticated
+  WITH CHECK (
+    bucket_id <> 'review-media' OR (
+      auth.uid() IS NOT NULL AND (storage.foldername(name))[1] = auth.uid()::text
+      AND (storage.foldername(name))[2] = 'staged'
+      AND cardinality(storage.foldername(name)) = 2
+      AND public.is_active_member()
+    )
+  );
+
+DROP POLICY IF EXISTS review_media_no_member_update ON storage.objects;
+CREATE POLICY review_media_no_member_update ON storage.objects AS RESTRICTIVE
+  FOR UPDATE TO authenticated
+  USING (bucket_id <> 'review-media') WITH CHECK (bucket_id <> 'review-media');
+
+DROP POLICY IF EXISTS review_media_staged_delete_only ON storage.objects;
+CREATE POLICY review_media_staged_delete_only ON storage.objects AS RESTRICTIVE
+  FOR DELETE TO authenticated
+  USING (
+    bucket_id <> 'review-media' OR (
+      (storage.foldername(name))[1] = auth.uid()::text
+      AND (storage.foldername(name))[2] = 'staged'
+    )
+  );
+
+DROP POLICY IF EXISTS review_media_no_anon_access ON storage.objects;
+CREATE POLICY review_media_no_anon_access ON storage.objects AS RESTRICTIVE
+  FOR ALL TO anon
+  USING (bucket_id <> 'review-media') WITH CHECK (bucket_id <> 'review-media');
+
+DROP POLICY IF EXISTS review_media_private_read ON storage.objects;
+CREATE POLICY review_media_private_read ON storage.objects AS RESTRICTIVE
+  FOR SELECT TO authenticated
+  USING (
+    bucket_id <> 'review-media' OR (
+      (storage.foldername(name))[1] = auth.uid()::text OR public.is_active_admin()
+    )
+  );
+
 DROP POLICY IF EXISTS review_media_owner_select ON storage.objects;
 CREATE POLICY review_media_owner_select
   ON storage.objects
@@ -150,7 +192,6 @@ DECLARE
   v_imgs text[] := '{}'::text[];
   v_video text := NULLIF(trim(COALESCE(p_video_path, '')), '');
   v_obj_size bigint;
-  v_obj_mime text;
 BEGIN
   IF p_image_paths IS NOT NULL THEN
     FOREACH v_raw IN ARRAY p_image_paths LOOP
@@ -174,8 +215,8 @@ BEGIN
       RAISE EXCEPTION 'INVALID_REVIEW_MEDIA_PATH';
     END IF;
 
-    SELECT COALESCE((o.metadata->>'size')::bigint, 0), COALESCE(o.metadata->>'mimetype', '')
-      INTO v_obj_size, v_obj_mime
+    SELECT COALESCE((o.metadata->>'size')::bigint, 0)
+      INTO v_obj_size
     FROM storage.objects o
     WHERE o.bucket_id = 'review-media'
       AND o.name = v_raw
@@ -205,8 +246,8 @@ BEGIN
       RAISE EXCEPTION 'INVALID_REVIEW_VIDEO_PATH';
     END IF;
 
-    SELECT COALESCE((o.metadata->>'size')::bigint, 0), COALESCE(o.metadata->>'mimetype', '')
-      INTO v_obj_size, v_obj_mime
+    SELECT COALESCE((o.metadata->>'size')::bigint, 0)
+      INTO v_obj_size
     FROM storage.objects o
     WHERE o.bucket_id = 'review-media'
       AND o.name = v_video
@@ -374,8 +415,8 @@ CREATE OR REPLACE FUNCTION public.edit_verified_review_atomic(
   p_review_id uuid,
   p_rating integer,
   p_comment text,
-  p_is_anonymous boolean DEFAULT false,
-  p_image_paths text[] DEFAULT '{}'::text[],
+  p_is_anonymous boolean DEFAULT NULL,
+  p_image_paths text[] DEFAULT NULL,
   p_video_path text DEFAULT NULL
 )
 RETURNS boolean
@@ -386,6 +427,7 @@ AS $$
 DECLARE
   v_uid uuid := auth.uid();
   v_rev public.reviews;
+  v_order_status text;
   v_clean text := trim(COALESCE(p_comment, ''));
   v_now timestamptz := clock_timestamp();
   v_imgs text[] := '{}'::text[];
@@ -402,14 +444,42 @@ BEGIN
   IF v_rev.buyer_id <> v_uid THEN RAISE EXCEPTION 'FORBIDDEN_BUYER_ONLY' USING ERRCODE = '42501'; END IF;
   IF v_rev.hidden THEN RAISE EXCEPTION 'REVIEW_MODERATED'; END IF;
 
-  SELECT vm.out_images, vm.out_video
-    INTO v_imgs, v_video
-  FROM public.internal_validate_review_media(v_uid, v_rev.id, p_image_paths, p_video_path) vm;
+  IF v_rev.order_id IS NOT NULL THEN
+    SELECT o.status INTO v_order_status
+    FROM public.orders o WHERE o.id = v_rev.order_id FOR SHARE;
+    IF v_order_status IS DISTINCT FROM 'completed'
+       OR NOT public.is_order_payment_verified(v_rev.order_id)
+       OR EXISTS (
+         SELECT 1 FROM public.order_refunds r
+         WHERE r.order_id = v_rev.order_id AND r.refund_type = 'full_refund' AND r.status = 'succeeded'
+       ) OR EXISTS (
+         SELECT 1 FROM public.order_disputes d
+         WHERE d.order_id = v_rev.order_id AND d.status IN ('open', 'under_review')
+       ) THEN
+      RAISE EXCEPTION 'ORDER_NOT_ELIGIBLE_FOR_REVIEW';
+    END IF;
+  ELSE
+    PERFORM 1 FROM public.service_requests sr
+    WHERE sr.id = v_rev.service_request_id AND sr.status = 'completed' FOR SHARE;
+    IF NOT FOUND THEN RAISE EXCEPTION 'SERVICE_NOT_ELIGIBLE_FOR_REVIEW'; END IF;
+  END IF;
+
+  -- NULL means keep the existing media. An empty array or empty video path clears it.
+  v_imgs := v_rev.image_paths;
+  v_video := v_rev.video_path;
+  IF p_image_paths IS NOT NULL OR p_video_path IS NOT NULL THEN
+    SELECT vm.out_images, vm.out_video
+      INTO v_imgs, v_video
+    FROM public.internal_validate_review_media(
+      v_uid, v_rev.id, COALESCE(p_image_paths, v_rev.image_paths),
+      COALESCE(p_video_path, v_rev.video_path)
+    ) vm;
+  END IF;
 
   UPDATE public.reviews
   SET rating       = p_rating,
       comment      = v_clean,
-      is_anonymous = COALESCE(p_is_anonymous, false),
+      is_anonymous = COALESCE(p_is_anonymous, v_rev.is_anonymous),
       image_paths  = COALESCE(v_imgs, '{}'::text[]),
       video_path   = v_video,
       edited_at    = v_now,
@@ -424,9 +494,7 @@ REVOKE ALL ON FUNCTION public.edit_verified_review_atomic(uuid, integer, text, b
 GRANT EXECUTE ON FUNCTION public.edit_verified_review_atomic(uuid, integer, text, boolean, text[], text) TO authenticated;
 
 -- -----------------------------------------------------------------------------
--- 6. Owner-only review lookup helper & strict column-level `buyer_id` protection
---    Ensures authenticated members querying PostgREST directly cannot select
---    `buyer_id` on other buyers' anonymous reviews.
+-- 6. Owner-only review lookup and public-safe column grants
 -- -----------------------------------------------------------------------------
 DROP FUNCTION IF EXISTS public.get_my_reviews_for_orders(uuid[]);
 CREATE OR REPLACE FUNCTION public.get_my_reviews_for_orders(p_order_ids uuid[])
@@ -470,46 +538,12 @@ REVOKE ALL ON FUNCTION public.get_my_reviews_for_orders(uuid[]) FROM PUBLIC, ano
 GRANT EXECUTE ON FUNCTION public.get_my_reviews_for_orders(uuid[]) TO authenticated;
 
 REVOKE ALL ON TABLE public.reviews FROM PUBLIC, anon, authenticated;
+REVOKE SELECT (buyer_id, order_id, service_request_id, image_paths, video_path)
+  ON TABLE public.reviews FROM PUBLIC, anon, authenticated;
 GRANT SELECT (
-  id, order_id, listing_id, service_request_id, seller_id,
-  rating, comment, is_anonymous, image_paths, video_path,
+  id, listing_id, seller_id, rating, comment, is_anonymous,
   seller_response, seller_responded_at, hidden, edited_at, created_at, updated_at
 ) ON TABLE public.reviews TO authenticated;
 GRANT ALL ON TABLE public.reviews TO service_role;
-
--- -----------------------------------------------------------------------------
--- 7. Historical Purchased Variation Image Backfill (Pre-10V Legacy Orders ONLY)
---    Repairs `order_items.image_path` ONLY when an existing physical item snapshot
---    is missing or equals the generic listing cover while a distinct linked offer
---    or variation photo exists. Never mutates items that already store a custom
---    variation snapshot.
--- -----------------------------------------------------------------------------
-WITH resolved_legacy AS (
-  SELECT
-    oi.id AS order_item_id,
-    COALESCE(
-      NULLIF(ofr.variant_image_path, ''),
-      NULLIF(lv.image_path, '')
-    ) AS resolved_variant_image
-  FROM public.order_items oi
-  JOIN public.orders ord ON ord.id = oi.order_id
-  JOIN public.listings l ON l.id = oi.listing_id
-  LEFT JOIN public.offers ofr ON ofr.order_id = ord.id
-  LEFT JOIN public.listing_variants lv
-    ON lv.id = oi.variant_id
-    AND lv.listing_id = oi.listing_id
-  WHERE COALESCE(oi.is_service, false) = false
-    AND (oi.variant_id IS NOT NULL OR oi.variant_snapshot IS NOT NULL)
-    AND (
-      NULLIF(oi.image_path, '') IS NULL
-      OR oi.image_path = l.image_paths[1]
-    )
-)
-UPDATE public.order_items oi
-SET image_path = rl.resolved_variant_image
-FROM resolved_legacy rl
-WHERE oi.id = rl.order_item_id
-  AND rl.resolved_variant_image IS NOT NULL
-  AND rl.resolved_variant_image IS DISTINCT FROM oi.image_path;
 
 COMMIT;

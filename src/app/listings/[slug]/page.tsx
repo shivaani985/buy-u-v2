@@ -98,11 +98,6 @@ export default async function ListingDetailPage({
   }
 
   const viewerUserId = session.profile?.id ?? null;
-  const buyerDisplayName =
-    session.profile?.display_name?.trim() ||
-    session.profile?.full_name?.trim() ||
-    "UMS Buyer";
-
   let listingReviews: PublicReviewItem[] = [];
   let ratingMetrics: ListingRatingAndSoldMetrics = {
     listingRatingSummary: {
@@ -135,25 +130,27 @@ export default async function ListingDetailPage({
               { listingId: product.id, sellerId: product.seller.sellerId },
             ])
           : Promise.resolve(new Map<string, ListingRatingAndSoldMetrics>()),
-        db
-          .from("reviews")
-          .select(
-            "id,order_id,listing_id,service_request_id,buyer_id,rating,comment,seller_response,hidden,is_anonymous,image_paths,video_path,edited_at,created_at"
-          )
-          .eq("listing_id", product.id)
-          .eq("hidden", false)
-          .order("created_at", { ascending: false })
-          .limit(50)
-          .then(async (res) => {
-            if (!res.error) return res;
-            return db
+        (service
+          ? service
               .from("reviews")
-              .select("id,order_id,listing_id,rating,comment,seller_response,hidden,created_at")
+              .select(
+                "id,order_id,listing_id,service_request_id,buyer_id,rating,comment,seller_response,hidden,is_anonymous,image_paths,video_path,edited_at,created_at"
+              )
               .eq("listing_id", product.id)
               .eq("hidden", false)
               .order("created_at", { ascending: false })
-              .limit(50);
-          }),
+              .limit(50)
+          : Promise.resolve({ data: null, error: true })
+        ).then(async (res) => {
+          if (!res.error) return res;
+          return db
+            .from("reviews")
+            .select("id,listing_id,rating,comment,seller_response,hidden,is_anonymous,created_at")
+            .eq("listing_id", product.id)
+            .eq("hidden", false)
+            .order("created_at", { ascending: false })
+            .limit(50);
+        }),
       ]);
 
       const resolvedMetrics = metricsMap.get(product.id);
@@ -186,7 +183,7 @@ export default async function ListingDetailPage({
         )
       );
       const reviewOrderIds = Array.from(
-        new Set(rawReviews.map((r) => r.order_id).filter((id): id is string => Boolean(id)))
+        new Set(rawReviews.flatMap((r) => !r.is_anonymous && r.order_id ? [r.order_id] : []))
       );
 
       const [profilesRes, orderItemsRes, viewerOrdersRes] = await Promise.all([
@@ -385,7 +382,6 @@ export default async function ListingDetailPage({
           preselectedVariantId={preselectedVariantId}
           prevVariantLabel={prevVariantLabel}
           writeReviewOrder={writeReviewOrder}
-          buyerDisplayName={buyerDisplayName}
         />
       </div>
     </div>

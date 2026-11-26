@@ -6,7 +6,7 @@ import { EyeOff, Loader2, Package, Star, X } from "lucide-react";
 import { ReviewMediaUploader } from "@/components/reviews/ReviewMediaUploader";
 import {
   getReviewStarLabel,
-  maskAnonymousReviewerName,
+  ANONYMOUS_REVIEWER_NAME,
   MAX_REVIEW_COMMENT_LEN,
   MIN_REVIEW_COMMENT_LEN,
   REVIEW_STAR_COLOR,
@@ -34,7 +34,6 @@ export interface ReviewDialogInitialReview {
 interface ReviewDialogProps {
   open: boolean;
   orderCode?: string | null;
-  buyerDisplayName: string;
   items: ReviewDialogItemOption[];
   initialReview?: ReviewDialogInitialReview | null;
   submitting: boolean;
@@ -53,7 +52,6 @@ interface ReviewDialogProps {
 export function ReviewDialog({
   open,
   orderCode,
-  buyerDisplayName,
   items,
   initialReview = null,
   submitting,
@@ -109,7 +107,7 @@ export function ReviewDialog({
     items.find((it) => it.listingId === selectedListingId) ?? items[0] ?? null;
   const displayedStar = hoverRating ?? rating;
   const trimmedLen = comment.trim().length;
-  const maskedPreview = maskAnonymousReviewerName(buyerDisplayName);
+  const anonymousPreview = ANONYMOUS_REVIEWER_NAME;
 
   function handleFormSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -357,7 +355,7 @@ export function ReviewDialog({
                 </span>
                 <span className="mt-0.5 block text-[11px] text-[#6B6779]">
                   {isAnonymous
-                    ? `Your review will appear publicly as "${maskedPreview}" with an anonymous avatar.`
+                    ? `Your review will appear publicly as "${anonymousPreview}" with an anonymous avatar.`
                     : "Your display name and profile picture will appear alongside your review."}
                 </span>
               </span>

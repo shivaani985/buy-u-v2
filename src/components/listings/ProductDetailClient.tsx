@@ -81,7 +81,6 @@ interface ProductDetailClientProps {
   preselectedVariantId?: string | null;
   prevVariantLabel?: string | null;
   writeReviewOrder?: WriteReviewOrderContext | null;
-  buyerDisplayName?: string;
 }
 
 type DetailTab = "overview" | "reviews";
@@ -123,7 +122,6 @@ export function ProductDetailClient({
   preselectedVariantId = null,
   prevVariantLabel = null,
   writeReviewOrder = null,
-  buyerDisplayName = "UMS Buyer",
 }: ProductDetailClientProps) {
   const router = useRouter();
   const initialPreselectedVariant =
@@ -686,15 +684,16 @@ export function ProductDetailClient({
                         <span className="font-extrabold text-[#14121A]">
                           {ratingMetrics.effectiveRating.toFixed(1)}
                         </span>
-                        <span className="text-[#6B6779]">
-                          ({ratingMetrics.effectiveReviewCount}{" "}
-                          {ratingMetrics.effectiveReviewCount === 1 ? "review" : "reviews"})
-                        </span>
                         {ratingMetrics.ratingSource === "shop" ? (
                           <span className="rounded bg-[#F4F1FA] px-1.5 py-0.5 text-[10px] font-bold text-[#4E2A84]">
                             Shop Rating
                           </span>
-                        ) : null}
+                        ) : (
+                          <span className="text-[#6B6779]">
+                            ({ratingMetrics.effectiveReviewCount}{" "}
+                            {ratingMetrics.effectiveReviewCount === 1 ? "review" : "reviews"})
+                          </span>
+                        )}
                       </>
                     ) : (
                       <span className="text-[#6B6779]">Not rated yet</span>
@@ -1255,8 +1254,7 @@ export function ProductDetailClient({
                             style={{ color: REVIEW_STAR_COLOR, fill: REVIEW_STAR_COLOR }}
                             aria-hidden="true"
                           />
-                          {ratingMetrics.shopRatingSummary.averageRating.toFixed(1)} (
-                          {ratingMetrics.shopRatingSummary.totalReviews}) Shop
+                          {ratingMetrics.shopRatingSummary.averageRating.toFixed(1)} Shop Rating
                         </span>
                       </>
                     ) : null}
@@ -1497,11 +1495,7 @@ export function ProductDetailClient({
                   ) : ratingMetrics.ratingSource === "shop" ? (
                     <div className="space-y-0.5">
                       <p className="font-bold text-[#14121A]">
-                        Shop Rating &middot;{" "}
-                        {ratingMetrics.shopRatingSummary.totalReviews}{" "}
-                        {ratingMetrics.shopRatingSummary.totalReviews === 1
-                          ? "verified shop review"
-                          : "verified shop reviews"}
+                        Shop Rating
                       </p>
                       <p className="text-[11px] text-[#6B6779]">
                         This {isService ? "service" : "listing"} has no item reviews yet.
@@ -1762,7 +1756,6 @@ export function ProductDetailClient({
           }
           open
           orderCode={writeReviewOrder?.orderCode ?? null}
-          buyerDisplayName={buyerDisplayName}
           items={[
             {
               id: product.id,

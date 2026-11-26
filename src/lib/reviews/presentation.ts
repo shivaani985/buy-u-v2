@@ -1,7 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { resolvePublicStorageUrl } from "../format.ts";
 import { computeRatingSummary, type RatingSummary } from "../marketplace/phase8.ts";
-import { maskAnonymousReviewerName } from "./validation.ts";
+import { ANONYMOUS_REVIEWER_NAME } from "./validation.ts";
 
 export type ListingRatingSource = "listing" | "shop" | "none";
 
@@ -39,8 +39,6 @@ export interface PublicReviewItem {
   canEdit: boolean;
   /** Raw paths ONLY populated for the logged-in owner when editing their own review; never emitted for other viewers. */
   ownEditableDraft?: {
-    orderId: string | null;
-    listingId: string | null;
     imagePaths: string[];
     videoPath: string | null;
     isAnonymous: boolean;
@@ -120,7 +118,7 @@ export function sanitizePublicReviewRow(input: {
     "UMS Buyer";
 
   const reviewerDisplayName = isAnonymous
-    ? maskAnonymousReviewerName(realDisplayName)
+    ? ANONYMOUS_REVIEWER_NAME
     : realDisplayName;
 
   const reviewerAvatarUrl = isAnonymous
@@ -157,7 +155,7 @@ export function sanitizePublicReviewRow(input: {
     isAnonymous,
     reviewerDisplayName,
     reviewerAvatarUrl,
-    purchasedVariantLabel: input.purchasedVariantLabel ?? null,
+    purchasedVariantLabel: isAnonymous ? null : input.purchasedVariantLabel ?? null,
     isVerifiedPurchase: Boolean(review.order_id),
     isVerifiedService: Boolean(review.service_request_id),
     isEdited: Boolean(editedAt),
@@ -170,8 +168,6 @@ export function sanitizePublicReviewRow(input: {
     ...(isOwnReview
       ? {
           ownEditableDraft: {
-            orderId: review.order_id ?? null,
-            listingId: review.listing_id ?? null,
             imagePaths: rawImages,
             videoPath: hasVideo ? review.video_path!.trim() : null,
             isAnonymous,

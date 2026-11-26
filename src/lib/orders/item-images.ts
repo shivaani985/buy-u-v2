@@ -79,8 +79,8 @@ export function matchLegacyVariantImagePath(input: {
 }): string | null {
   if (input.variantId) {
     const direct = input.variantsById.get(input.variantId);
-    if (direct?.image_path && direct.image_path.trim().length > 0) {
-      return direct.image_path.trim();
+    if (direct?.listing_id === input.listingId) {
+      return direct.image_path?.trim() || null;
     }
   }
   if (!input.listingId || !input.variantSnapshot) return null;
@@ -90,7 +90,7 @@ export function matchLegacyVariantImagePath(input: {
   );
   const snapCombo = buildVariantComboKey(snapKeys, input.variantSnapshot);
   for (const variant of candidates) {
-    if (!variant.image_path || !variant.image_path.trim()) continue;
+    if (variant.listing_id !== input.listingId || !variant.image_path?.trim()) continue;
     const norm = normalizeVariantSnapshotRecord(variant.option_values);
     if (!norm) continue;
     const vKeys = Object.keys(norm).sort((a, b) =>

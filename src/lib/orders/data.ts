@@ -235,16 +235,9 @@ export async function getBuyerOrdersData(
         .select("id,order_id,refund_code,refund_type,refund_amount_sen,status,refund_ref,return_required,return_status,return_instructions,completed_at")
         .in("order_id", batch).order("created_at", { ascending: false }).order("id").range(start, end)),
       readOrderRelations(orderIds, async (batch, start, end) => {
-        if (service) {
-          const rev10r = await service.from("reviews")
-            .select("id,order_id,listing_id,rating,comment,seller_response,hidden,is_anonymous,image_paths,video_path,edited_at,created_at")
-            .eq("buyer_id", eligibility.userId).in("order_id", batch).order("created_at", { ascending: false }).order("id").range(start, end);
-          if (!rev10r.error) return rev10r;
-        }
-        const rpcRes = await supabase.rpc("get_my_reviews_for_orders", { p_order_ids: batch });
-        if (!rpcRes.error && Array.isArray(rpcRes.data)) {
-          return { data: rpcRes.data, error: null };
-        }
+        const rpcRes = await supabase.rpc("get_my_reviews_for_orders", { p_order_ids: batch })
+          .range(start, end);
+        if (!rpcRes.error) return rpcRes;
         const fallback = await supabase.from("reviews")
           .select("id,order_id,listing_id,rating,comment,seller_response,hidden,created_at")
           .eq("buyer_id", eligibility.userId).in("order_id", batch).order("created_at", { ascending: false }).order("id").range(start, end);

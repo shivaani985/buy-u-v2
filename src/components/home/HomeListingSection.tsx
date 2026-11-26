@@ -151,7 +151,9 @@ function HomeListingCard({
                 />
                 <span>
                   {listing.rating != null
-                    ? `${listing.rating.toFixed(1)} (${listing.reviewCount ?? 0})`
+                    ? listing.ratingSource === "shop"
+                      ? listing.rating.toFixed(1)
+                      : `${listing.rating.toFixed(1)} (${listing.reviewCount ?? 0})`
                     : "Not rated yet"}
                 </span>
                 {listing.rating != null && listing.ratingSource === "shop" ? (

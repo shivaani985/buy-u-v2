@@ -9,7 +9,6 @@ import {
   isValidStagedReviewMediaPath,
   isValidValidatedReviewImagePath,
   isValidValidatedReviewVideoPath,
-  maskAnonymousReviewerName,
   validateReviewImageMeta,
   validateReviewSubmissionInput,
   validateReviewVideoDurationBuffer,
@@ -20,6 +19,7 @@ import {
   evaluateRepurchaseAvailability,
   sanitizePublicReviewRow,
 } from "../src/lib/reviews/presentation.ts";
+import { validateStagedReviewVideo } from "../src/lib/reviews/video-duration.ts";
 import {
   matchLegacyVariantImagePath,
   resolvePurchasedItemImagePath,
@@ -121,19 +121,13 @@ test("R02: star rating labels & review comment/media submission validation", () 
   );
 });
 
-test("R04/R05: anonymous masking handles short, spaced, and Unicode names without identity leaks", () => {
-  assert.equal(maskAnonymousReviewerName(""), "Anonymous Buyer");
-  assert.equal(maskAnonymousReviewerName("A"), "A***");
-  assert.equal(maskAnonymousReviewerName("Al"), "A***l");
-  assert.equal(maskAnonymousReviewerName("Shazim"), "S****m");
-  assert.equal(maskAnonymousReviewerName("Siti Nurhaliza"), "S********a");
-  assert.equal(maskAnonymousReviewerName("Āmina 😀"), "Ā*****😀");
-
+test("R04/R05: anonymous projection keeps identity, order and media paths private", () => {
   const anonymousProjected = sanitizePublicReviewRow({
     review: {
       id: "rev-anon",
       listing_id: LISTING_UUID,
       order_id: "ord-1",
+      service_request_id: "private-service-id",
       buyer_id: BUYER_UUID,
       rating: 5,
       comment: "Very smooth meetup near cafe.",
@@ -154,7 +148,8 @@ test("R04/R05: anonymous masking handles short, spaced, and Unicode names withou
 
   assert.ok(anonymousProjected);
   assert.equal(anonymousProjected.isAnonymous, true);
-  assert.equal(anonymousProjected.reviewerDisplayName, "S********t");
+  assert.equal(anonymousProjected.reviewerDisplayName, "Anonymous Buyer");
+  assert.equal(anonymousProjected.purchasedVariantLabel, null);
   assert.equal(anonymousProjected.reviewerAvatarUrl, null);
   assert.equal(anonymousProjected.isEdited, true);
   assert.equal(anonymousProjected.canEdit, false);
@@ -163,6 +158,7 @@ test("R04/R05: anonymous masking handles short, spaced, and Unicode names withou
   assert.equal(serialized.includes(BUYER_UUID), false, "Must never expose buyer_id");
   assert.equal(serialized.includes("Shazim"), false, "Must never expose real name");
   assert.equal(serialized.includes("secret-avatar"), false, "Must never expose real avatar");
+  assert.doesNotMatch(serialized, /ord-1|private-service-id|validated|ownEditableDraft/);
   assert.deepEqual(anonymousProjected.media, [
     { kind: "image", url: "/api/reviews/media?reviewId=rev-anon&kind=image&index=0" },
     { kind: "video", url: "/api/reviews/media?reviewId=rev-anon&kind=video" },
@@ -414,4 +410,83 @@ test("R07: Phase 10R SQL removes artificial 7-day edit cap and revokes buyer_id 
     sql,
     /GRANT SELECT\s*\([^)]*\bbuyer_id\b[^)]*\)\s*ON TABLE public\.reviews TO authenticated/i
   );
+});
+
+test("R03: truncated, overrun and duplicate duration metadata is rejected", () => {
+  const mp4 = buildMinimalMp4Buffer(1000, 1000);
+  const shortMovieHeader = Buffer.from(mp4);
+  shortMovieHeader.writeUInt32BE(10, 28);
+  const malformedMp4Tail = Buffer.concat([mp4, Buffer.from([0xff])]);
+  const fragment = Buffer.from([0, 0, 0, 8, 0x6d, 0x6f, 0x6f, 0x66]);
+  for (const file of [mp4.subarray(0, -1), shortMovieHeader, malformedMp4Tail, Buffer.concat([mp4, fragment])]) {
+    assert.equal(validateReviewVideoDurationBuffer(file, "video/mp4").ok, false);
+  }
+
+  const webm = buildMinimalWebmBuffer(1000);
+  const oversizedDuration = Buffer.from(webm);
+  oversizedDuration[oversizedDuration.length - 9] = 0x90;
+  for (const file of [webm.subarray(0, -1), oversizedDuration, Buffer.concat([webm, webm])]) {
+    assert.equal(validateReviewVideoDurationBuffer(file, "video/webm").ok, false);
+  }
+});
+
+test("R03: packet timing rejects real MP4 and WebM clips with falsely short headers", async () => {
+  for (const format of ["mp4", "webm"]) {
+    const read = (seconds) =>
+      fs.readFileSync(new URL(`fixtures/review-media/${seconds}s.${format}`, import.meta.url));
+    const mime = `video/${format}`;
+    const valid = await validateStagedReviewVideo(read(4), mime);
+    assert.equal(valid.ok, true, JSON.stringify(valid));
+
+    const longClip = read(32);
+    if (format === "mp4") {
+      const header = longClip.indexOf("mvhd", 0, "ascii");
+      assert.ok(header > 0);
+      assert.equal(longClip[header + 4], 0);
+      const timescale = longClip.readUInt32BE(header + 16);
+      longClip.writeUInt32BE(timescale * 4, header + 20);
+    } else {
+      const header = longClip.indexOf(Buffer.from([0x44, 0x89, 0x88]));
+      assert.ok(header > 0);
+      longClip.writeDoubleBE(4000, header + 3);
+    }
+    assert.equal(validateReviewVideoDurationBuffer(longClip, mime).ok, true);
+    const forged = await validateStagedReviewVideo(longClip, mime);
+    assert.equal(forged.ok, false);
+    assert.match(forged.error, /30 seconds/);
+  }
+});
+
+test("R08: a variant image cannot come from a different listing", () => {
+  const foreign = { id: VARIANT_UUID, listing_id: OTHER_UUID, option_values: { Colour: "Blue" }, image_path: "wrong.jpg" };
+  assert.equal(matchLegacyVariantImagePath({
+    listingId: LISTING_UUID,
+    variantId: VARIANT_UUID,
+    variantSnapshot: { Colour: "Blue" },
+    variantsById: new Map([[VARIANT_UUID, foreign]]),
+    variantsByListing: new Map([[LISTING_UUID, [foreign]]]),
+  }), null);
+});
+
+test("rollback embeds the exact Phase 10R migration and checks seller and outsider roles", () => {
+  const read = (suffix) => fs.readFileSync(
+    path.join("docs", "sql", `phase-10r-review-enhancements${suffix}.sql`), "utf8"
+  ).replaceAll("\r\n", "\n");
+  const sql = read("");
+  const verify = read(".verify");
+  const body = sql.match(/^BEGIN;\n([\s\S]*?)^COMMIT;$/m)?.[1];
+  const embedded = verify.match(/^-- BEGIN EMBEDDED MIGRATION BODY\n([\s\S]*?)^-- END EMBEDDED MIGRATION BODY$/m)?.[1];
+  assert.ok(body);
+  assert.equal(embedded, body);
+  assert.equal(verify.match(/^BEGIN;$/gm)?.length, 1);
+  assert.equal(verify.match(/^ROLLBACK;$/gm)?.length, 1);
+  assert.match(verify, /ROLLBACK;\s*$/);
+  assert.doesNotMatch(sql, /UPDATE public\.order_items/i);
+
+  const grant = sql.match(/GRANT SELECT \(([^)]*)\) ON TABLE public\.reviews TO authenticated/)?.[1];
+  assert.ok(grant);
+  assert.doesNotMatch(grant, /\b(buyer_id|order_id|service_request_id|image_paths|video_path)\b/);
+  assert.match(verify, /FOREACH actor IN ARRAY ARRAY\[outsider,seller\] LOOP/);
+  const seller = fs.readFileSync(path.join("src", "lib", "orders", "seller-data.ts"), "utf8");
+  assert.match(seller, /eq\("seller_id", sellerId\)\.eq\("order_id", orderId\)\s*\.eq\("hidden", false\)\.eq\("is_anonymous", false\)/);
 });

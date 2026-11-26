@@ -179,13 +179,10 @@ export async function getSellerOrdersData(
       .select("id,order_id,status,refund_amount_sen,return_status,return_required").in("order_id", batch)
       .order("created_at", { ascending: false }).order("id").range(start, end)),
     orderId ? getLatestDisputesByOrderIds([orderId]) : Promise.resolve(null),
-    orderId ? Promise.resolve().then(async () => {
-      const rev10r = await supabase.from("reviews")
-        .select("id,rating,comment,seller_response,is_anonymous,image_paths,video_path,edited_at")
-        .eq("order_id", orderId).eq("hidden", false);
-      if (!rev10r.error) return rev10r;
-      return supabase.from("reviews").select("id,rating,comment,seller_response").eq("order_id", orderId).eq("hidden", false);
-    }) : Promise.resolve({ data: [] }),
+    service && orderId && orderIds.includes(orderId) ? service.from("reviews")
+      .select("id,rating,comment,seller_response,image_paths,video_path,edited_at")
+      .eq("seller_id", sellerId).eq("order_id", orderId)
+      .eq("hidden", false).eq("is_anonymous", false) : Promise.resolve({ data: [] }),
     service ? readOrderRelations(checkoutIds, (batch, start, end) => service.from("checkout_sessions")
       .select("id,buyer_id,status,payment_status,paid_at").in("id", batch).order("id").range(start, end))
       : Promise.resolve({ data: [] }),

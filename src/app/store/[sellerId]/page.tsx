@@ -86,7 +86,7 @@ export default async function PublicStorefrontPage({
         if (!res.error) return res;
         return service
           .from("reviews")
-          .select("id,buyer_id,listing_id,rating,comment,seller_response,order_id,service_request_id,hidden,created_at")
+          .select("id,listing_id,rating,comment,seller_response,hidden,is_anonymous,created_at")
           .eq("seller_id", sellerId)
           .eq("hidden", false)
           .order("created_at", { ascending: false })
@@ -141,7 +141,7 @@ export default async function PublicStorefrontPage({
   const freeItems = (freeRes.data ?? []) as Array<{ id: string; title: string; condition: string }>;
   const rawReviews = (revRes.data ?? []) as Array<{
     id: string;
-    buyer_id: string;
+    buyer_id?: string | null;
     listing_id?: string | null;
     rating: number;
     comment: string | null;
@@ -158,10 +158,10 @@ export default async function PublicStorefrontPage({
   const ratingSummary = computeRatingSummary(rawReviews);
 
   const reviewerIds = Array.from(
-    new Set(rawReviews.filter((r) => !r.is_anonymous && r.buyer_id).map((r) => r.buyer_id))
+    new Set(rawReviews.flatMap((r) => !r.is_anonymous && r.buyer_id ? [r.buyer_id] : []))
   );
   const reviewOrderIds = Array.from(
-    new Set(rawReviews.map((r) => r.order_id).filter((id): id is string => Boolean(id)))
+    new Set(rawReviews.flatMap((r) => !r.is_anonymous && r.order_id ? [r.order_id] : []))
   );
 
   const [revProfilesRes, revOrderItemsRes] = await Promise.all([
@@ -210,8 +210,9 @@ export default async function PublicStorefrontPage({
         review: {
           ...r,
           listing_id: r.listing_id ?? null,
+          buyer_id: r.buyer_id ?? "",
         },
-        profile: !r.is_anonymous ? revProfileMap.get(r.buyer_id) ?? null : null,
+        profile: !r.is_anonymous && r.buyer_id ? revProfileMap.get(r.buyer_id) ?? null : null,
         purchasedVariantLabel: r.order_id
           ? revVariantMap.get(`${r.order_id}:${r.listing_id ?? ""}`) ?? null
           : null,

@@ -49,24 +49,7 @@ export function getReviewStarLabel(rating: number): string {
   return REVIEW_STAR_LABELS[star] ?? "Select a rating";
 }
 
-/**
- * Masks a real display name for anonymous reviews safely across short strings,
- * multi-word names, spaces, accents, and Unicode/emoji graphemes.
- */
-export function maskAnonymousReviewerName(rawName: string | null | undefined): string {
-  const trimmed = (rawName ?? "").trim();
-  if (!trimmed) return "Anonymous Buyer";
-
-  const chars = Array.from(trimmed);
-  if (chars.length <= 1) {
-    return `${chars[0]}***`;
-  }
-  if (chars.length === 2) {
-    return `${chars[0]}***${chars[1]}`;
-  }
-  const maskLen = Math.min(8, Math.max(3, chars.length - 2));
-  return `${chars[0]}${"*".repeat(maskLen)}${chars[chars.length - 1]}`;
-}
+export const ANONYMOUS_REVIEWER_NAME = "Anonymous Buyer";
 
 export function extensionForReviewMediaMime(mime: AllowedReviewMediaMime): string {
   return MIME_TO_EXT[mime];
@@ -170,6 +153,7 @@ export function inspectMp4DurationSeconds(bytes: Uint8Array): {
 } {
   let pos = 0;
   const len = bytes.byteLength;
+  let movieDuration: number | undefined;
 
   while (pos + 8 <= len) {
     let boxSize = readUint32BE(bytes, pos);
@@ -189,6 +173,9 @@ export function inspectMp4DurationSeconds(bytes: Uint8Array): {
     }
     if (boxSize < headerLen || pos + boxSize > len) break;
 
+    if (boxType === "moof") {
+      return { ok: false, error: "Fragmented MP4 is unsupported." };
+    }
     if (boxType === "moov") {
       let inner = pos + headerLen;
       const moovEnd = pos + boxSize;
@@ -212,20 +199,21 @@ export function inspectMp4DurationSeconds(bytes: Uint8Array): {
 
         if (childType === "mvhd") {
           const payload = inner + childHdr;
-          if (payload + 20 > moovEnd) {
+          const childEnd = inner + childSize;
+          if (payload + 4 > childEnd) {
             return { ok: false, error: "Invalid MP4 movie header." };
           }
           const version = bytes[payload]!;
           let timescale = 0;
           let duration = 0;
           if (version === 0) {
-            if (payload + 20 > moovEnd) {
+            if (payload + 20 > childEnd) {
               return { ok: false, error: "Truncated MP4 v0 header." };
             }
             timescale = readUint32BE(bytes, payload + 12);
             duration = readUint32BE(bytes, payload + 16);
           } else if (version === 1) {
-            if (payload + 32 > moovEnd) {
+            if (payload + 32 > childEnd) {
               return { ok: false, error: "Truncated MP4 v1 header." };
             }
             timescale = readUint32BE(bytes, payload + 20);
@@ -244,17 +232,21 @@ export function inspectMp4DurationSeconds(bytes: Uint8Array): {
                 "MP4 container did not declare a finite duration (streaming/fragmented MP4 cannot be duration-verified without ffprobe).",
             };
           }
-          const durationSeconds = duration / timescale;
-          return { ok: true, durationSeconds };
+          if (movieDuration !== undefined) {
+            return { ok: false, error: "Duplicate MP4 movie header." };
+          }
+          movieDuration = duration / timescale;
         }
         inner += childSize;
       }
-      return { ok: false, error: "MP4 moov header missing mvhd metadata." };
+      if (inner !== moovEnd) return { ok: false, error: "Malformed MP4 movie box." };
     }
     pos += boxSize;
   }
 
-  return { ok: false, error: "MP4 metadata container (moov) could not be read." };
+  return pos === len && movieDuration !== undefined
+    ? { ok: true, durationSeconds: movieDuration }
+    : { ok: false, error: "MP4 metadata container (moov) could not be read." };
 }
 
 function readEbmlVint(
@@ -271,7 +263,7 @@ function readEbmlVint(
     mask >>= 1;
     length += 1;
   }
-  if (length > 8 || offset + length > bytes.byteLength) return null;
+  if (length > (keepMarker ? 4 : 8) || offset + length > bytes.byteLength) return null;
 
   let value = keepMarker ? first : first & ~mask;
   let allOnes = (first & ~mask) === (mask - 1);
@@ -280,7 +272,8 @@ function readEbmlVint(
     value = value * 256 + b;
     if (b !== 0xff) allOnes = false;
   }
-  return { value, length, unknown: !keepMarker && allOnes };
+  const unknown = !keepMarker && allOnes;
+  return unknown || Number.isSafeInteger(value) ? { value, length, unknown } : null;
 }
 
 /**
@@ -293,49 +286,59 @@ export function inspectWebmDurationSeconds(bytes: Uint8Array): {
 } {
   let pos = 0;
   const len = bytes.byteLength;
+  let durationSeconds: number | undefined;
+  let sawSegment = false;
+  const invalid = { ok: false, error: "Malformed WebM duration metadata." };
 
   while (pos < len) {
     const id = readEbmlVint(bytes, pos, true);
-    if (!id) break;
+    if (!id) return invalid;
     const size = readEbmlVint(bytes, pos + id.length, false);
-    if (!size) break;
+    if (!size) return invalid;
     const dataStart = pos + id.length + size.length;
-    const elemEnd = size.unknown ? len : Math.min(len, dataStart + size.value);
+    const elemEnd = size.unknown ? len : dataStart + size.value;
+    if (elemEnd > len || dataStart > elemEnd) return invalid;
 
     // Segment ID = 0x18538067
     if (id.value === 0x18538067) {
+      if (sawSegment) return invalid;
+      sawSegment = true;
       let child = dataStart;
       while (child < elemEnd) {
         const cid = readEbmlVint(bytes, child, true);
-        if (!cid) break;
+        if (!cid) return invalid;
         const csize = readEbmlVint(bytes, child + cid.length, false);
-        if (!csize) break;
+        if (!csize || csize.unknown) return invalid;
         const cStart = child + cid.length + csize.length;
-        const cEnd = csize.unknown
-          ? elemEnd
-          : Math.min(elemEnd, cStart + csize.value);
+        const cEnd = cStart + csize.value;
+        if (cEnd > elemEnd) return invalid;
 
         // Segment Info = 0x1549A966
         if (cid.value === 0x1549a966) {
-          let timecodeScaleNs = 1_000_000;
+          if (durationSeconds !== undefined) return invalid;
+          let timecodeScaleNs: number | undefined;
           let rawDuration: number | null = null;
           let infoPos = cStart;
           while (infoPos < cEnd) {
             const fid = readEbmlVint(bytes, infoPos, true);
-            if (!fid) break;
+            if (!fid) return invalid;
             const fsize = readEbmlVint(bytes, infoPos + fid.length, false);
-            if (!fsize || fsize.unknown) break;
+            if (!fsize || fsize.unknown) return invalid;
             const fStart = infoPos + fid.length + fsize.length;
-            const fEnd = Math.min(cEnd, fStart + fsize.value);
+            const fEnd = fStart + fsize.value;
+            if (fEnd > cEnd) return invalid;
 
             // TimecodeScale = 0x2AD7B1
-            if (fid.value === 0x2ad7b1 && fEnd - fStart >= 1 && fEnd - fStart <= 8) {
+            if (fid.value === 0x2ad7b1) {
+              if (timecodeScaleNs !== undefined || fsize.value < 1 || fsize.value > 8) return invalid;
               let val = 0;
               for (let i = fStart; i < fEnd; i++) val = val * 256 + bytes[i]!;
-              if (val > 0) timecodeScaleNs = val;
+              if (!Number.isSafeInteger(val) || val <= 0) return invalid;
+              timecodeScaleNs = val;
             }
             // Duration = 0x4489 (IEEE 754 float32 or float64)
             if (fid.value === 0x4489) {
+              if (rawDuration !== null || (fsize.value !== 4 && fsize.value !== 8)) return invalid;
               const dv = new DataView(
                 bytes.buffer,
                 bytes.byteOffset + fStart,
@@ -356,20 +359,17 @@ export function inspectWebmDurationSeconds(bytes: Uint8Array): {
                 "WebM video did not declare a container duration (live MediaRecorder WebMs without Duration metadata require client/re-muxed MP4/WebM).",
             };
           }
-          const durationSeconds = (rawDuration * timecodeScaleNs) / 1e9;
-          return { ok: true, durationSeconds };
+          durationSeconds = (rawDuration * (timecodeScaleNs ?? 1_000_000)) / 1e9;
         }
-        if (csize.unknown) break;
         child = cEnd;
       }
-      break;
-    }
-
-    if (size.unknown) break;
+    } else if (size.unknown) return invalid;
     pos = elemEnd;
   }
 
-  return { ok: false, error: "WebM container metadata could not be read." };
+  return durationSeconds !== undefined
+    ? { ok: true, durationSeconds }
+    : { ok: false, error: "WebM container metadata could not be read." };
 }
 
 export function validateReviewVideoDurationBuffer(
@@ -381,7 +381,7 @@ export function validateReviewVideoDurationBuffer(
       ? inspectMp4DurationSeconds(bytes)
       : inspectWebmDurationSeconds(bytes);
 
-  if (!inspected.ok || inspected.durationSeconds === undefined) {
+  if (!inspected.ok || !inspected.durationSeconds || !Number.isFinite(inspected.durationSeconds)) {
     return {
       ok: false,
       error: inspected.error ?? "Unable to verify video duration.",

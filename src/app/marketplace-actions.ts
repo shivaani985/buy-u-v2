@@ -7,7 +7,6 @@ import {
   REPORT_REASONS,
 } from "@/lib/marketplace/phase8";
 import {
-  REVIEW_MEDIA_BUCKET,
   validateReviewSubmissionInput,
 } from "@/lib/reviews/validation";
 import { evaluateSellerEligibility } from "@/lib/seller/validation";
@@ -165,39 +164,30 @@ export async function editVerifiedReviewAction(input: {
   if (!supabase) return { ok: false, message: "Database unavailable." };
 
   const service = getServerServiceClient();
-  let previousPaths: string[] = [];
   let listingIdForRevalidate: string | null = null;
   if (service) {
     const { data: prevRow } = await service
       .from("reviews")
-      .select("listing_id,image_paths,video_path")
+      .select("listing_id")
       .eq("id", input.reviewId)
       .eq("buyer_id", elig.userId)
       .maybeSingle();
-    const typed = prevRow as {
-      listing_id?: string | null;
-      image_paths?: string[] | null;
-      video_path?: string | null;
-    } | null;
-    if (typed) {
-      listingIdForRevalidate = typed.listing_id ?? null;
-      previousPaths = [
-        ...(Array.isArray(typed.image_paths) ? typed.image_paths : []),
-        ...(typed.video_path ? [typed.video_path] : []),
-      ];
-    }
+    listingIdForRevalidate = prevRow?.listing_id ?? null;
   }
 
   const { error } = await supabase.rpc("edit_verified_review_atomic", {
     p_review_id: input.reviewId,
     p_rating: check.rating,
     p_comment: check.comment,
-    p_is_anonymous: Boolean(input.isAnonymous),
-    p_image_paths: check.imagePaths,
-    p_video_path: check.videoPath,
+    p_is_anonymous: input.isAnonymous,
+    p_image_paths: input.imagePaths === undefined ? undefined : check.imagePaths,
+    p_video_path: input.videoPath === undefined ? undefined : check.videoPath ?? "",
   });
 
   if (error) {
+    if (error.message.includes("ORDER_NOT_ELIGIBLE_FOR_REVIEW") || error.message.includes("SERVICE_NOT_ELIGIBLE_FOR_REVIEW")) {
+      return { ok: false, message: "This purchase is currently ineligible for review edits." };
+    }
     if (error.message.includes("REVIEW_MODERATED") || error.message.includes("REVIEW_HIDDEN_LOCKED")) {
       return { ok: false, message: "Moderated reviews cannot be edited." };
     }
@@ -205,17 +195,6 @@ export async function editVerifiedReviewAction(input: {
       return { ok: false, message: "One or more attached photos or videos could not be verified." };
     }
     return { ok: false, message: "Could not update review right now." };
-  }
-
-  if (service && previousPaths.length > 0) {
-    const retained = new Set([
-      ...check.imagePaths,
-      ...(check.videoPath ? [check.videoPath] : []),
-    ]);
-    const removed = previousPaths.filter((p) => !retained.has(p));
-    if (removed.length > 0) {
-      await service.storage.from(REVIEW_MEDIA_BUCKET).remove(removed).catch(() => {});
-    }
   }
 
   revalidatePath("/");
